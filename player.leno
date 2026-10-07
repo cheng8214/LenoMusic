@@ -523,6 +523,44 @@ export struct Player {
         return lrc_index_at(lrc.secs, position())
     }
 
+    // 歌词总句数（界面按它裁可见范围 ✓）
+    func lyric_count(): int {
+        ensure_lrc()
+        return lrc.secs.len()
+    }
+
+    // 第 i 句的文字 / 时间（越界 ⇒ "" / -1 ✓ 不崩）
+    func lyric_text_at(int i): string {
+        ensure_lrc()
+        if i < 0 or i >= lrc.texts.len() { return "" }
+        return lrc.texts[i]
+    }
+
+    func lyric_time(int i): float {
+        ensure_lrc()
+        if i < 0 or i >= lrc.secs.len() { return -1.0 }
+        return lrc.secs[i]
+    }
+
+    // 当前句 → 下一句 之间的进度 0..1 —— **平滑上滚**就靠它 ✓（2026-10-08）
+    //   语义：这一句已经"唱了多少"⇒ 画的时候把整块按这个比例往上推一点 ⇒ 看着是连续滚的 ✓
+    //   没有下一句 / 时间戳相同 ⇒ 返回 0（不推 ✓ 免得瞬间跳一下 ✗）
+    func lyric_progress(): float {
+        ensure_lrc()
+        float p = position()
+        int i = lrc_index_at(lrc.secs, p)
+        if i < 0 { return 0.0 }
+        float t0 = lrc.secs[i]
+        float t1 = t0 + 4.0
+        if i + 1 < lrc.secs.len() { t1 = lrc.secs[i + 1] }
+        float span = t1 - t0
+        if span <= 0.05 { return 0.0 }
+        float r = (p - t0) / span
+        if r < 0.0 { r = 0.0 }
+        if r > 1.0 { r = 1.0 }
+        return r
+    }
+
     // ==================== 试听（点一下立刻听 ✓）====================
 
     // 试听某个文件（路径由调用方准备好 ✓，可以只是"前一段" ✓）

@@ -143,6 +143,26 @@ main() {
     check("歌词定位：12.34~20 之间 ⇒ 第 0 句 ✓", pl.lrc_index_at(L1.secs, 15.0) == 0)
     check("歌词定位：过了最后一句 ⇒ 最后一句 ✓", pl.lrc_index_at(L1.secs, 99.0) == 1)
 
+    // ---- ⑩ 歌词的"懒加载 + 取值"（2026-10-08 新增 ✓ 画布要按句取词/取时间 ✓）----
+    //   真造一个小目录（假 mp3 + 真 lrc）⇒ 把 Player 指过去 ⇒ 验"换歌才读、读得到、越界不崩" ✓
+    string tdir = dirs.join(_tmpdir(), "leno_lrc_test")
+    dirs.mkdir_p(tdir)
+    string tname = "测试歌 - 测试歌手"
+    files.write(dirs.join(tdir, tname + ".mp3"), "x")
+    files.write(dirs.join(tdir, tname + ".lrc"), "[ti:测试]\n[00:00.00]第一句\n[00:04.00]第二句\n[00:08.00]第三句\n")
+    Player s2 = new Player()
+    s2.scan(tdir)
+    check("歌词：扫目录后拿到这首 ✓", s2.count() == 1 and s2.index == 0)
+    check("歌词：句数 = 3（[ti:] 不算 ✓）", s2.lyric_count() == 3)
+    check("歌词：第 2 句文字 ✓", s2.lyric_text_at(1) == "第二句")
+    check("歌词：第 3 句时间 = 8.0 秒 ✓", _int(s2.lyric_time(2) * 10.0) == 80)
+    check("歌词：越界取词 ⇒ 空串（不崩 ✓）", s2.lyric_text_at(99) == "" and s2.lyric_text_at(-1) == "")
+    check("歌词：越界取时间 ⇒ -1 ✓", s2.lyric_time(99) < 0.0)
+    check("歌词：位置 0 秒 ⇒ 停在第 1 句（0:00 那句 ✓）", s2.lyric_index() == 0)
+    check("句内进度：位置 0 ⇒ 0%（起句 ✓）", s2.lyric_progress() == 0.0)
+    files.delete(dirs.join(tdir, tname + ".mp3"))
+    files.delete(dirs.join(tdir, tname + ".lrc"))
+
     // ---- 清理临时文件（别在用户机器上留垃圾 ✓）----
     var left = dirs.listdir(dir)
     for left to o {
