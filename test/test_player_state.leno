@@ -124,6 +124,25 @@ main() {
     check("按名找下标：空串 ⇒ -1（不崩 ✓）", s1.index_of("") == -1)
     check("按秒跳：没有声音对象 ⇒ 安全失败（不崩 ✓）", not s1.seek_seconds(3.0))
 
+    // ---- ⑨ 歌词（.lrc）解析与定位（2026-10-08 ✓ 纯逻辑）----
+    //   为什么单测它：真机上"歌词不对"很难分清是**下载的 lrc 有问题**还是**解析写错了** ✗
+    var L1 = pl.lrc_from_text("[00:12.34]第一句\n[00:20.00]第二句\n")
+    check("歌词：两条、时间 12.34 / 20.00 ✓", L1.secs.len() == 2 and _int(L1.secs[0] * 100.0) == 1234 and _int(L1.secs[1] * 100.0) == 2000)
+    check("歌词：文本取对（中文按码点走 ⇒ 不乱码 ✓）", L1.texts[0] == "第一句" and L1.texts[1] == "第二句")
+    var L2 = pl.lrc_from_text("[ti:歌名]\n[ar:歌手]\n[by:某人]\n[00:01]正文\n")
+    check("歌词：元信息行 [ti:]/[ar:]/[by:] 全跳过 ✓", L2.secs.len() == 1 and L2.texts[0] == "正文")
+    var L3 = pl.lrc_from_text("[00:05][00:09]同一句\n")
+    check("歌词：一行挂多个时间标签 ⇒ 拆成两条 ✓", L3.secs.len() == 2 and L3.texts[0] == "同一句" and L3.texts[1] == "同一句")
+    var L4 = pl.lrc_from_text("[00:30.00]后\n[00:10.00]前\n")
+    check("歌词：输入乱序 ⇒ 按时间排好 ✓", L4.texts[0] == "前" and L4.texts[1] == "后")
+    var L5 = pl.lrc_from_text("[00:07.5]半秒一位\n")
+    check("歌词：[mm:ss.x]（一位小数）也认 ✓", L5.secs.len() == 1 and _int(L5.secs[0] * 10.0) == 75)
+    check("歌词：空串 ⇒ 空表（不崩 ✓）", pl.lrc_from_text("").secs.len() == 0)
+    check("歌词：没标签的纯文本行 ⇒ 跳过 ✓", pl.lrc_from_text("就是一行普通文字\n").secs.len() == 0)
+    check("歌词定位：还没到第一句 ⇒ -1 ✓", pl.lrc_index_at(L1.secs, 3.0) == -1)
+    check("歌词定位：12.34~20 之间 ⇒ 第 0 句 ✓", pl.lrc_index_at(L1.secs, 15.0) == 0)
+    check("歌词定位：过了最后一句 ⇒ 最后一句 ✓", pl.lrc_index_at(L1.secs, 99.0) == 1)
+
     // ---- 清理临时文件（别在用户机器上留垃圾 ✓）----
     var left = dirs.listdir(dir)
     for left to o {

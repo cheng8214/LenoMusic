@@ -55,6 +55,10 @@ use SDL3.(Event, Renderer, Label, Button, Slider, ProgressBar, Canvas, ListBox, 
 const float LIST_H = 154.0
 const float LIST_ROW = 22.0
 const float LIST_W = 360.0
+// 歌词浮层（2026-10-08 ✓）：比歌单高一点、宽一点（歌词行比"歌名 - 歌手"长 ✓）
+const float LRC_H = 216.0
+const float LRC_ROW = 22.0
+const float LRC_W = 430.0
 const float LIST_GAP = 16.0          // 浮层下沿与播放条上沿的缺口（躲开忙指示细线 ✓）
 // 播放条主行高度（进度条已并入本行 ✓ 见下面布局注释）
 const float BAR_H = 52.0
@@ -82,10 +86,17 @@ export struct PlayerBar {
     Canvas seekBar               // 进度条改**自绘**（见 build 里的注释：控件版会被 grow 撑成大饼 ✗）
     ListBox lb                   // 歌单（框架控件 ✓ 自带滚动/命中/文字 ✓；展开时才挂上 ✓）
     Canvas capSink               // 浮层"登记员"：每帧渲染期登记**弹层捕获区**（见 apply_pop ✓）
+    ListBox lrcBox               // 歌词（同款浮层 ✓；与歌单**同时只开一个** ✓ 见 toggle_lrc ✓）
+    Button btnLrc                // 「词」按钮（右组，列表左边 ✓）
 
     // ===== 状态 =====
     bool wantPop = false         // 用户**想要**浮层吗（点列表图标/点外面置它 ✓）
     bool popOpen = false         // **实际**挂上去了没有（由 tick 里的 apply_pop 落地 ✓）
+    bool wantLrc = false         // 歌词浮层（同款意图/落地两段式 ✓ 与歌单**互斥** ✓）
+    bool lrcOpen = false
+    string lastLrcTrack = "\x01" // 歌词浮层里"已经装的是哪首"（换歌才重装 ✓）
+    int lastLrcLine = -999       // 上一次高亮到第几句（**只在变了时**动选中/滚动 ✗ 免得拽着用户 ✓）
+    float lastBoxH = -1.0        // 上次给外层盒子的高度（不变就别再 set/刷帧 ✗）
 
     float discAngle = 0.0        // 唱片当前角度（度 ✓）
 
@@ -279,11 +290,15 @@ export struct PlayerBar {
             btnScan.on_click(func() { rescan() })
             right.add(btnScan, {grow: 0, shrink: 0, basis: 48, align: 1})
 
+            btnLrc = icon_btn("lrc", "歌词（点开/收起；与播放列表互斥）", 30.0, 26.0)
+            btnLrc.on_click(func() { toggle_lrc() })
+            right.add(btnLrc, {grow: 0, shrink: 0, basis: 30, align: 1})
+
             btnList = icon_btn("list", "播放列表（点开/收起）", 30.0, 26.0)
             btnList.on_click(func() { toggle_pop() })
             right.add(btnList, {grow: 0, shrink: 0, basis: 30, align: 1})
-            // 同样显式给宽：28(循环) + 6 + 34(音量%) + 6 + 76(滑块) + 6 + 48(重扫) + 6 + 30(列表) ≈ 240 ✓
-            row.add(right, {grow: 0, shrink: 0, basis: 240, align: 1})
+            // 同样显式给宽：32(循环) + 6 + 34(音量%) + 6 + 76(滑块) + 6 + 48(重扫) + 6 + 30(歌词) + 6 + 30(列表) ≈ 276 ✓
+            row.add(right, {grow: 0, shrink: 0, basis: 276, align: 1})
 
             box.add(row, {left: 0, right: 0, top: 0, h: BAR_H})
 
@@ -295,10 +310,12 @@ export struct PlayerBar {
             //   为什么是"每帧登记"：框架每帧渲染前会 clear（sdl_window:1611 ✓ 见 SDL3.leno 的说明 ✓）
             //   ⚠ 画布默认有**不透明底** ⇒ 必须显式透明（速查 ④.5 ✓）
             //   ⚠ 必须排在 `lb` **之前** add：AnchorBox 按插入顺序渲染 ⇒ 它在浮层下面（不遮字 ✓）
-            capSink = SDL3.createCanvas({w: LIST_W, h: LIST_H, pad: 0, border: false, border_width: 0})
+            capSink = SDL3.createCanvas({w: LIST_W, h: LRC_H, pad: 0, border: false, border_width: 0})
             capSink.set_bg_color(#00000000)
             capSink.on_draw(func(Renderer r, float ox, float oy, float cw, float ch) {
-                SDL3.setPopupCapture(lb.x, lb.y, lb.w, lb.h)
+                // 登记**当前展开的那个**浮层（歌单 / 歌词 二选一 ✓ 同时只开一个 ⇒ 不会打架 ✓）
+                if popOpen { SDL3.setPopupCapture(lb.x, lb.y, lb.w, lb.h) }
+                eif lrcOpen { SDL3.setPopupCapture(lrcBox.x, lrcBox.y, lrcBox.w, lrcBox.h) }
             })
 
             lb = SDL3.createListBox({
@@ -310,6 +327,13 @@ export struct PlayerBar {
             //   （sdl_listbox.leno:348 `if not is_selected(idx)` ✓），而浮层展开时当前曲正是选中行
             //   ⇒ 点"正在播的那首"会静悄悄没反应 ✗（用户报的正是这个 ✓）
             //   现在改由本文件 `on_event` 自己按纵坐标算行号点歌（见那里 ✓），一条通路、好懂 ✓
+
+            // ---- 歌词浮层（同款 ✓ 先不挂 ✓）----
+            lrcBox = SDL3.createListBox({
+                w: LRC_W, h: LRC_H, item_h: LRC_ROW, font_size: 13, mode: 0,
+                items: [],
+                tip: "当前这首的歌词（自动滚到正在唱的那句）"
+            })
 
             // 音量：只在这里改（tick 不碰滑块 ⇒ 不会跟用户对着拽 ✓ 见文件头 ⚠①）
             volSld.on_change(func(float v) {
@@ -372,7 +396,7 @@ export struct PlayerBar {
     // ==================== 窗口事件（宿主转交 ✓）：浮层"失去焦点即收" ====================
     //   返回 true = 这一击被浮层吃掉了（宿主别再往下发 ✓）
     func on_event(Event ev): bool {
-        if not popOpen { return false }
+        if not (popOpen or lrcOpen) { return false }
         if ev.isKeyDown() and ev.scancode() == Scancode.ESCAPE {
             close_pop()
             return true
@@ -382,32 +406,73 @@ export struct PlayerBar {
         // ⚠ 判"点在浮层里吗"**必须用控件自己的矩形**（`lb.x/y/w/h` 是公开字段 ✓），
         //   不要用 `box.x/y` 自己推算：框架喂给控件的坐标与这里拿到的可能差一个标题栏偏移 ✗
         //   —— 早先就是这么错的：明明点在列表里，却被判成"点外面"⇒ 直接把浮层收了 ✗（看着"点了没反应"）
-        bool inside = in_rect(lb.x, lb.y, lb.w, lb.h, mx, my)
+        // 当前挂着的是哪个浮层（同时只开一个 ✓ 见 toggle_*）
+        float bx = lrcBox.x
+        float by = lrcBox.y
+        float bw = lrcBox.w
+        float bh = lrcBox.h
+        if popOpen {
+            bx = lb.x
+            by = lb.y
+            bw = lb.w
+            bh = lb.h
+        }
+        bool inside = in_rect(bx, by, bw, bh, mx, my)
         // ★ 2026-10-07：浮层登记了"弹层捕获区"之后，框架**不再把事件派进浮层** ✗
         //   （ListBox 自己的 process 开头也有那句 `if inPopupCapture { return }` ✓）
         //   ⇒ 这里**直投**给它：滚轮翻页、悬停高亮都得靠它自己维护 ✓（库内 Menu / ComboBox 同款范式 ✓）
-        if inside { lb.process(ev) }
+        if inside {
+            if popOpen { lb.process(ev) } else { lrcBox.process(ev) }
+        }
         if not ev.isMouseButtonDown() { return false }
         if inside {
-            // ★ 自己按纵坐标算行号点歌（**镜像 `ListBox.index_at` 的算法** ✓ —— 它是 pri ✗ 用不了）：
-            //   `idx = (my - y + scroll) / itemH`（第 0 项就从 `y` 起，没有内边距 ✓ 见 sdl_listbox ✓）
-            //   为什么要自己算：单选模式下点**已选中行**控件不回调 ✗（见上面 lb 那段注释 ✓）
-            int r = _int((my - lb.y + lb.get_scroll()) / LIST_ROW)
-            if r >= 0 {
-                if p is Player => w {
-                    if r < w.count() {
-                        w.play_index(r)
-                        lastIdx = -1        // 让 tick 下一拍必然刷一次状态栏 ⇒ 点了立刻有反馈 ✓
+            // ★ 只有**歌单**才"点一行就播它"；歌词浮层里点一行什么也不做 ✓（那是给眼睛看的 ✓）
+            if popOpen {
+                // ★ 自己按纵坐标算行号点歌（**镜像 `ListBox.index_at` 的算法** ✓ —— 它是 pri ✗ 用不了）：
+                //   `idx = (my - y + scroll) / itemH`（第 0 项就从 `y` 起，没有内边距 ✓ 见 sdl_listbox ✓）
+                //   为什么要自己算：单选模式下点**已选中行**控件不回调 ✗（见上面 lb 那段注释 ✓）
+                int r = _int((my - lb.y + lb.get_scroll()) / LIST_ROW)
+                if r >= 0 {
+                    if p is Player => w {
+                        if r < w.count() {
+                            w.play_index(r)
+                            lastIdx = -1    // 让 tick 下一拍必然刷一次状态栏 ⇒ 点了立刻有反馈 ✓
+                        }
                     }
                 }
             }
             SDL3.markFrameRedraw()
             return false                    // 放行：让 ListBox 自己把高亮挪过去 ✓（已是选中行时它不动 ✓ 无妨）
         }
-        // ⚠ "列表"按钮要放行：它自己会 toggle ⇒ 否则先被这里关掉、再被按钮打开 = 永远关不掉 ✗
+        // ⚠ 两个入口按钮都要放行：它们自己会 toggle ⇒ 否则先被这里关掉、再被按钮打开 = 永远关不掉 ✗
         if in_rect(btnList.get_x(), btnList.get_y(), btnList.get_w(), btnList.get_h(), mx, my) { return false }
+        if in_rect(btnLrc.get_x(), btnLrc.get_y(), btnLrc.get_w(), btnLrc.get_h(), mx, my) { return false }
         close_pop()                                                // 点别处 ⇒ 收起（= 失去焦点 ✓）
         return false                                               // 不吞这一击：宿主该干嘛干嘛（如点表格 ✓）
+    }
+
+    // 歌词浮层每拍（**开着才做** ✓）：换歌 ⇒ 重装内容；唱到新的一句 ⇒ 高亮 + 滚到看得见 ✓
+    //   ⚠ **只在"行号变了"时才动选中/滚动** ✗ —— 否则用户手动翻歌词会被每拍拽回去
+    //     （与"tick 不碰音量滑块"是同一条纪律 ✓ 见文件头 ⚠①）
+    func tick_lrc(Player q) {
+        string cur = q.current_name()
+        if cur != lastLrcTrack {
+            lastLrcTrack = cur
+            lrcBox.set_items(q.lyric_lines())      // 没歌词时给的是一句说明（照样能显示 ✓）
+            lastLrcLine = -999                     // 置脏 ⇒ 本拍就对位一次 ✓
+        }
+        int li = q.lyric_index()
+        if li != lastLrcLine {
+            lastLrcLine = li
+            if li >= 0 {
+                lrcBox.set_selected(li)            // 高亮当前句 ✓
+                // 当前句滚到**靠上 1/3** 处（像播放器那样 ✓）；越界由控件自己夹住 ✓
+                float want = _float(li) * LRC_ROW - LRC_H * 0.35
+                if want < 0.0 { want = 0.0 }
+                lrcBox.set_scroll(want)
+            }
+            SDL3.markFrameRedraw()
+        }
     }
 
     // ==================== 每 120ms（主界面定时器调 ✓）====================
@@ -425,6 +490,8 @@ export struct PlayerBar {
             if q.playing { SDL3.markFrameRedraw() }
             volLbl.set_text(_str(_int(q.volume * 100.0)) + "%")   // ⚠ 只显示、不碰滑块值 ✓
             sync_icons(q)
+
+            if lrcOpen { tick_lrc(q) }     // 歌词浮层：换歌重装 + 跟着当前句走 ✓
 
             // 换曲 ⇒ 歌单里的选中跟着走（同索引的回调会被忽略 ✓ 见 lb.on_change ✓）
             if q.index != lastIdx {
@@ -492,35 +559,71 @@ export struct PlayerBar {
     }
 
     // 点"列表"图标：在**开/关之间切**（真正的挂摘在 tick ✓ 见文件头 ⚠）
+    //   ⚠ 两个浮层**互斥**（同一时间只挂一个 ✗）：不然两块浮层叠在一起、捕获区还互相打架 ✓
     func toggle_pop() {
         wantPop = not wantPop
+        if wantPop { wantLrc = false }
+        SDL3.markFrameRedraw()
+    }
+
+    // 点「词」图标：同理（与播放列表互斥 ✓）
+    func toggle_lrc() {
+        wantLrc = not wantLrc
+        if wantLrc {
+            wantPop = false
+            lastLrcTrack = "\x01"        // 置脏 ⇒ 下一拍 tick_lrc 必然重装内容 ✓
+            lastLrcLine = -999
+        }
         SDL3.markFrameRedraw()
     }
 
     func close_pop() {
         wantPop = false
+        wantLrc = false                  // ESC / 点外面 ⇒ 两个都收（反正只开着一个 ✓）
         SDL3.markFrameRedraw()
     }
 
-    // 把 `wantPop` 落地（由 tick 调 ✓）：挂上/摘掉浮层
+    // 把意图落地（由 tick 调 ✓）：挂上/摘掉浮层（歌单 / 歌词 二选一 ✓）
     //   ⚠ 收起时必须真的 `remove`：容器遍历子控件**不看 `visible`** ✗
     //     留个看不见的浮层会把那一带的点击全吃掉 ✗✗
+    //   ⚠ 两个浮层共用**一块**登记员（capSink ✓）与**一处**盒高 ⇒ 一起在这里维护 ✗
     func apply_pop() {
-        if wantPop == popOpen { return }
-        popOpen = wantPop
-        if popOpen {
-            if p is Player => q { lb.set_items(list_items(q)) }   // 每次展开都刷新曲目 ✓
-            // 浮层：右贴 10、**底边**贴到播放条上方（`AnchorBox` 的 bottom 锚定 ✓）；摆上去就是层级 ✓
-            //   ⚠ 先挂**登记员**再挂列表：AnchorBox 按插入顺序渲染 ⇒ 登记员在下面（透明的，不遮字 ✓）
-            box.add(capSink, {right: 10, bottom: BAR_TOTAL + LIST_GAP, w: LIST_W, h: LIST_H})
-            box.add(lb, {right: 10, bottom: BAR_TOTAL + LIST_GAP, w: LIST_W, h: LIST_H})
-            // 挂上后把高亮同步到"正在播的那首"（纯显示 ✓）
-            if p is Player => q { if q.count() > 0 { lb.set_selected(q.index) } }
-        } else {
-            box.remove(lb)
-            box.remove(capSink)          // 摘掉登记员 ⇒ 下一帧渲染前框架清空捕获区 ⇒ 不再挡事件 ✓
+        if wantPop != popOpen {
+            popOpen = wantPop
+            if popOpen {
+                if p is Player => q { lb.set_items(list_items(q)) }   // 每次展开都刷新曲目 ✓
+                // 浮层：右贴 10、**底边**贴到播放条上方（`AnchorBox` 的 bottom 锚定 ✓）；摆上去就是层级 ✓
+                //   ⚠ 先挂**登记员**再挂列表：AnchorBox 按插入顺序渲染 ⇒ 登记员在下面（透明的，不遮字 ✓）
+                box.add(capSink, {right: 10, bottom: BAR_TOTAL + LIST_GAP, w: LIST_W, h: LIST_H})
+                box.add(lb, {right: 10, bottom: BAR_TOTAL + LIST_GAP, w: LIST_W, h: LIST_H})
+                // 挂上后把高亮同步到"正在播的那首"（纯显示 ✓）
+                if p is Player => q { if q.count() > 0 { lb.set_selected(q.index) } }
+            } else {
+                box.remove(lb)
+                box.remove(capSink)      // 摘掉登记员 ⇒ 下一帧渲染前框架清空捕获区 ⇒ 不再挡事件 ✓
+            }
         }
-        SDL3.markFrameRedraw()
+        if wantLrc != lrcOpen {
+            lrcOpen = wantLrc
+            if lrcOpen {
+                box.add(capSink, {right: 10, bottom: BAR_TOTAL + LIST_GAP, w: LRC_W, h: LRC_H})
+                box.add(lrcBox, {right: 10, bottom: BAR_TOTAL + LIST_GAP, w: LRC_W, h: LRC_H})
+            } else {
+                box.remove(lrcBox)
+                box.remove(capSink)
+            }
+        }
+        // 外层盒子也要跟着长高：容器按 92 排版的话，浮层放不下会被压掉 ✗
+        //   （布局每帧 relayout ✓ ⇒ 改完高度下一帧就生效、表格自动让位 ✓）
+        //   ⚠ 只在**高度真的变了**时才 set/刷帧 ✗ —— 否则浮层开着就每拍白刷一次 ✓（本文件一贯纪律 ✓）
+        float h = 92.0
+        if popOpen { h = 92.0 + LIST_H + 4.0 }
+        eif lrcOpen { h = 92.0 + LRC_H + 4.0 }
+        if h != lastBoxH {
+            lastBoxH = h
+            box.set_size(0.0, h)
+            SDL3.markFrameRedraw()
+        }
     }
 
     // ★ 试听（搜索结果右击「播放试听」用 ✓）：放一段临时文件，独占音频、放完自动收摊 ✓
