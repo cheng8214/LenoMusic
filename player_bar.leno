@@ -786,9 +786,16 @@ export struct PlayerBar {
         bool adopting = false
         float pos = 0.0
         if p is Player => q {
-            if q.previewing and q.previewName == tag {
-                pos = q.position()
-                adopting = true
+            if q.previewing {
+                // ⚠⚠ 别拿"标签**全等**"当唯一判据 ✗✗（2026-10-08 用户实测：就差这一条 ⇒ 永远切不过去）
+                //   标签是 `歌名 - 歌手`（引擎 `songlabel` ✓），而**落盘文件名**是
+                //   `sanitizefilename(歌名 - 歌手) + "." + 扩展名`（`dl_engine:376` ✓）
+                //   ⇒ 扩展名一定不同 ✗、非法字符还会被清掉 ✗ ⇒ 全等比不出来 ✓
+                //   正解：**去掉扩展名后比**（`strip_ext(basename(path))` ✓）—— 两边同源 ⇒ 稳 ✓
+                if q.previewName == tag or pl.strip_ext(dirs.basename(path)) == q.previewName {
+                    pos = q.position()
+                    adopting = true
+                }
             }
         }
         dlPct = -1.0

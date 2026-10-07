@@ -571,7 +571,14 @@ struct MusicDlApp {
         gBgDlRunning = true
         gBgDlCh = threads.channel(4096)
         Channel cmd = threads.channel(64)
-        gBgDlThread = threads.start(dl_worker_shard, [one], outdir, gBgDlCh, cmd, downloadflags(), 0, 1)
+        // ⚠⚠ 必须**带上 "lyric"** ✗✗（2026-10-08 用户实测：先前用 `downloadflags()` ⇒ 跟着下载窗口那个
+        //   勾选框走 ✗ ⇒ 用户没勾 ⇒ **整首下完了却没有 .lrc** ⇒ 试听中/下完都看不到歌词 ✓）
+        //   引擎只在 `hasflag(flags,"lyric")` 时才抓歌词（`dl_engine:350` ✓）⇒ 不加就永远没有 ✓
+        //   · 语义上也对：试听即整首（"接着看歌词"是它的一半目的 ✓）
+        //   · 重复加一个 "lyric" 无害（引擎按 `hasflag` 判 ✓）
+        Array[string] bgFlags = downloadflags()
+        bgFlags.add("lyric")
+        gBgDlThread = threads.start(dl_worker_shard, [one], outdir, gBgDlCh, cmd, bgFlags, 0, 1)
         if pbar is PlayerBar => b { b.set_dl_progress(0.0) }
     }
 

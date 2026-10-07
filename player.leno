@@ -216,7 +216,8 @@ export struct Player {
 
     // ---- 歌词（2026-10-08 ✓）：**懒加载** —— 换歌才重读一次，其它时候零开销 ✓ ----
     Lrc lrc
-    string lrcFor = ""               // 已经读的是哪首（全路径 ✓ 变了才重读 ✗）
+    string lrcFor = ""               // 已经读的是**哪个歌词文件**（路径 ✓ 变了才重读 ✗ 见 ensure_lrc）
+    string scanDir = ""              // 最近一次 `scan` 的目录（试听态"去输出目录找同名歌词"要用 ✓）
     bool lrcTried = false
 
     // ==================== 列表（纯逻辑 ✓ 离线可测）====================
@@ -225,6 +226,7 @@ export struct Player {
     //   ⚠ `dirs.listdir` 给的是**名字**（不含路径 ✗）⇒ 自己 join ✓
     func scan(string dir): int {
         close()
+        scanDir = dir                     // ★ 记下这次的目录（2026-10-08）：试听态取歌词要用 ✓ 见 lrc_path
         list = []
         index = -1
         if not dirs.exists(dir) { return 0 }
@@ -480,6 +482,17 @@ export struct Player {
 
     // 当前这首该配哪个 .lrc（没在播 ⇒ "" ✓）
     func lrc_path(): string {
+        // ⚠⚠ 试听态必须**单独算** ✗✗（2026-10-08 用户实测踩到）：
+        //   试听不在播放列表里 ⇒ `current()` 是 `""` ⇒ 先前这里直接返回 `""`
+        //   ⇒ **试听期间永远没有歌词** ✗（点「词」是空的；下完切成本地文件后才可能有 ✓）
+        //   正解：试听那个临时文件旁边**没有** .lrc ✗，但**同一首在输出目录里**有 ✓
+        //     —— 试听名（`previewName`）就是下载落盘的文件名主体（"歌名 - 歌手" ✓ 见宿主 startPreview ✓）
+        //       而引擎落歌词用的正是同一个基名（`dl_engine:376-378` `<歌名> - <歌手>.lrc` ✓）
+        //     ⇒ 直接去输出目录取同名 .lrc ✓（还没下完 ⇒ 不存在 ⇒ 先"没有歌词" ✓ 一出现就补读 ✓ 见 ensure_lrc）
+        if previewing {
+            if scanDir == "" or previewName == "" { return "" }
+            return dirs.join(scanDir, previewName + ".lrc")
+        }
         string c = current()
         if c == "" { return "" }
         return strip_ext(c) + ".lrc"
@@ -491,14 +504,26 @@ export struct Player {
     //     ① `: void` + **裸 `return`** ⇒ 编译器嫌"期望 null、实际 any" ✗ ⇒ 用 if 包住整段、不裸 return ✓
     //     ② 给 `lrc.secs`（**字段的字段**）赋 `[]` ⇒ 推断不出元素类型 ✗（本地 `Lrc` 却没事 ✓）
     //        ⇒ 统一用 `lrc_from_text("")` 造空表（同一条路径，也正好是单测覆盖的那条 ✓）
+    //   ⚠ 缓存键换成**歌词文件路径**（不是"哪首"✓）：试听 → 本地文件的切换、以及"歌词比歌晚到"
+    //     这两种情况，用"哪首"当键都判不出来 ✗
     func ensure_lrc() {
-        string c = current()
-        if not (c == lrcFor and lrcTried) {
-            lrcFor = c
+        string p = lrc_path()
+        bool need = (p != lrcFor) or (not lrcTried)
+        // ★ 还差一条（2026-10-08）：上次读时**文件还没出现**（歌词常常比歌晚到 ✓，
+        //   比如试听的后台整首下载：音频先落盘、.lrc 随后 ✓）⇒ 一出现就补读 ✓
+        //   没有它 ⇒ 歌词明明下下来了，画布也一直停在"没有歌词" ✗（用户实测过 ✓）
+        if not need and lrc.texts.len() == 0 and p != "" {
+            try {
+                if files.exists(p) { need = true }
+            } catch e {
+                need = false                   // 查不到就是没有（不崩 ✓）
+            }
+        }
+        if need {
+            lrcFor = p
             lrcTried = true
             lrc = lrc_from_text("")
-            if c != "" {
-                string p = lrc_path()
+            if p != "" {
                 try {
                     if files.exists(p) { lrc = lrc_from_text(files.read(p)) }
                 } catch e {

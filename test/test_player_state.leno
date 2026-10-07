@@ -163,6 +163,24 @@ main() {
     files.delete(dirs.join(tdir, tname + ".mp3"))
     files.delete(dirs.join(tdir, tname + ".lrc"))
 
+    // ---- ⑪ 试听态的歌词（2026-10-08 用户实测踩到 ✓ 两条都要守）----
+    //   ① 试听不在播放列表里（`current()` == "" ✓）⇒ 歌词必须去**输出目录**找同名 .lrc ✓
+    //      先前直接返回 "" ⇒ 试听中点「词」永远是空的 ✗
+    //   ② 歌词常常**比歌晚到**（后台整首下载：音频先落盘、.lrc 后落盘 ✓）
+    //      ⇒ 文件一出现就要能**补读** ✓（不换歌、不重启、不重开浮层 ✓）
+    string tdir2 = dirs.join(_tmpdir(), "leno_lrc_test2")
+    dirs.mkdir_p(tdir2)
+    Player s3 = new Player()
+    s3.scanDir = tdir2
+    s3.previewing = true
+    s3.previewName = "晚到 - 歌手"
+    check("试听歌词路径：指向输出目录的同名 .lrc ✓", s3.lrc_path() == dirs.join(tdir2, "晚到 - 歌手.lrc"))
+    check("试听歌词：文件还没到 ⇒ 空歌词（不崩 ✓）", s3.lyric_count() == 0)
+    files.write(dirs.join(tdir2, "晚到 - 歌手.lrc"), "[00:00.00]第一句\n[00:05.00]第二句\n")
+    check("试听歌词：**文件晚到也能补读** ✓（不换歌/不重启 ✓）", s3.lyric_count() == 2)
+    check("试听歌词：补读后取词正确 ✓", s3.lyric_text_at(1) == "第二句")
+    files.delete(dirs.join(tdir2, "晚到 - 歌手.lrc"))
+
     // ---- 清理临时文件（别在用户机器上留垃圾 ✓）----
     var left = dirs.listdir(dir)
     for left to o {
