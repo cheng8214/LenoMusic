@@ -693,10 +693,10 @@ export struct PlayerBar {
         r.setColorFloat(0.24, 0.51, 0.86, 0.30 + 0.60 * a)
         r.fillRoundedRect(ox + 10.0, bandTop + 6.0, 3.0, bandH - 12.0, 1.5)
         // ---- ②③④ 逐"文本行"画字 ----
-        int curChars = 0
-        if p is Player => q3 { curChars = q3.lyric_text_at(cur).len() }
-        // ★ 唱到第几个字用**浮点**（别取整 ✗ —— 取整就是"一跳一跳"的元凶 ✓）
-        float sungF = lrcSmooth * _float(curChars)
+        // ★ 唱到第几个字：**有逐字时间就按逐字 ✓ 没有就退回"句内进度 × 字数"** ✓（规则在 player.leno ✓）
+        //   浮点、亚字素 ✓（别取整 ✗ —— 取整就是"一跳一跳"的元凶 ✓）
+        float sungF = 0.0
+        if p is Player => q3 { sungF = q3.lyric_sung() }
         int charsBefore = 0                                        // 当前句里、本行之前有多少字 ✓
         int ri = 0
         while ri < lrcRowText.len() {

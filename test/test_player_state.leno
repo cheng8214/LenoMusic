@@ -12,6 +12,7 @@ import "../player_bar.leno" as pb        // 只测它的纯逻辑 playable_count
 import dirs
 import files
 import strings
+import "../kuwo_lyric.leno" as kwo       // 只为测逐字包的**解码**（内层那一步 ✓）
 use pl.Player
 
 var fails = 0
@@ -205,6 +206,41 @@ main() {
     check("空档：唱过一阵 + 下一句 >6 秒才来 ⇒ 间奏(2) ✓", pl.lyric_stage(13.0, 10.0, 20.0, true, true) == 2)
     check("空档：普通句间隔（4 秒）⇒ 不提示 ✓", pl.lyric_stage(12.0, 10.0, 14.0, true, true) == 0)
     check("空档：最后一句 ⇒ 不猜什么时候结束（0 ✓）", pl.lyric_stage(13.0, 10.0, -1.0, true, false) == 0)
+
+    // ---- ⑭ 逐字歌词："有就用、没有就退回线性"（2026-10-08 ✓ 用户要"歌词和唱歌同步" ✓）----
+    //   解析：剥 `<起点,时长>` 标签、收每字的起止、`<0,0>` 译文行并到上一句 ✓
+    var e1 = pl.lrc_from_text("[00:10.00]<10000,500>你<10500,500>好<11500,900>呀\n")
+    check("逐字：标签剥掉、文本对 ✓", e1.texts.len() == 1 and e1.texts[0] == "你好呀")
+    check("逐字：收了 3 个字的起止 ✓", e1.wt_line.len() == 3 and _int(e1.wt_sec[0] * 1000.0) == 10000 and _int(e1.wt_end[0] * 1000.0) == 10500)
+    check("逐字：第 3 字结束 = 12.4 秒 ✓", _int(e1.wt_end[2] * 1000.0) == 12400)
+    var e2 = pl.lrc_from_text("[00:10.00]你好\n[00:10.00]<0,0>Hello\n")
+    check("逐字：`<0,0>` 译文行**并到上一句**（不加新行 ✓）", e2.texts.len() == 1 and e2.texts[0] == "你好 Hello")
+    var e3 = pl.lrc_from_text("[00:10.00]普通歌词\n")
+    check("逐字：普通 .lrc ⇒ 逐字段为空（⇒ 渲染自动退回线性 ✓）", e3.wt_line.len() == 0)
+
+    //   定位（纯函数 ✓）：字内按时间推进；**字间空档不推进**（这条就是"真同步" ✓）
+    check("逐字：字内过半 ⇒ 0.5 个字 ✓", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 10.25, 2) * 100.0) == 50)
+    check("逐字：**字间空档不推进**（10.6 秒仍是 1 个字 ✓）", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 10.6, 2) * 100.0) == 100)
+    check("逐字：下一个字到点才接着走 ✓", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 13.5, 2) * 100.0) == 150)
+    check("逐字：全过了 ⇒ 整句唱完（不超字数 ✓）", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 99.0, 2) * 100.0) == 200)
+    check("逐字：时长缺失(-1) ⇒ 退回'到下一个字起点' ✓", _int(pl.word_sung([10.0, 11.0], [-1.0, -1.0], 10.5, 2) * 100.0) == 50)
+    check("逐字：还没到第一个字 ⇒ 0 ✓", _int(pl.word_sung([10.0], [10.5], 9.0, 1) * 100.0) == 0)
+
+    // ---- ⑮ 逐字包的**解码**（2026-10-08 ✓ 合成一份内层包验往返 ✓）----
+    //   真包是 zlib( base64+xor(gb18030(...)) ) ✓；zlib 那层测试里不好造 ⇒ 直接测**内层** ✓
+    //   上游要是换了异或 key ⇒ 这条会红 ✓（正好当哨兵 ✓）
+    string sample = "[00:10.00]<10000,500>ab<10500,500>cd\n"
+    Array[int] kk = strings.to_bytes("yeelion")
+    Array[int] dd = strings.to_bytes(sample)
+    Array[int] xx = []
+    int zz = 0
+    while zz < dd.len() {
+        xx.add(dd[zz] ^ kk[zz % kk.len()])
+        zz = zz + 1
+    }
+    string packed = strings.to_base64(strings.from_bytes(xx))
+    check("逐字解码：base64+异或 **往返一致** ✓", kwo.decode_lrcx_inner(packed) == sample)
+    check("逐字解码：不像歌词 ⇒ 空串（调用方据此退回标准 LRC ✓）", kwo.decode_lrcx_inner(strings.to_base64("这不是歌词也不是时间轴")) == "")
 
     // ---- 清理临时文件（别在用户机器上留垃圾 ✓）----
     var left = dirs.listdir(dir)

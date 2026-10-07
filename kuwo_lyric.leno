@@ -41,7 +41,20 @@ const LYRIC_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (
 
 // ==================== ① 参数加密 ====================
 export func lyricparams(string songid): string {
-    string plain = "user=12345,web,web,web&requester=localhost&req=1&rid=MUSIC_" + songid
+    return _encryptparams(_param_base(songid))
+}
+
+// ★ 逐字版（2026-10-08 实测）：`&lrcx=1` 必须加进**加密前的明文** ✗✗
+//   挂在 URL 上服务端不认 ⇒ 直接回 16 字节的 `TP=ERROR REQUEST`（HTTP 仍是 200 ✓ 很难察觉 ✗）
+export func lyricparams_lrcx(string songid): string {
+    return _encryptparams(_param_base(songid) + "&lrcx=1")
+}
+
+func _param_base(string songid): string {
+    return "user=12345,web,web,web&requester=localhost&req=1&rid=MUSIC_" + songid
+}
+
+func _encryptparams(string plain): string {
     Array[int] key = strings.to_bytes(LYRIC_KEY)
     Array[int] data = strings.to_bytes(plain)
     Array[int] mixed = []
@@ -106,6 +119,81 @@ export func fetchlyric(string songid): string {
     return text
 }
 
+// ==================== ④ 逐字时间轴（`lrcx=1`；2026-10-08 ★）====================
+// 依据（本仓《移植音乐下载器实录与待办.md》第 77 行）：
+//   加了 `&lrcx=1` 后服务端回的是 `base64+xor(gb18030( 带 <mm,dd> 逐字标签的 LRC ))`，
+//   且**译文行要自己并**（`<0,0>` 那种 ✓ 解析侧已经并了 ✓ 见 player.leno）
+//   ⚠ 比"不加"那条**多一层 base64+异或**（zlib 外皮仍在 ✓）；key 沿用第一层的 "yeelion" ✓
+//   ⚠⚠ 上游随时可能改 ✗ ⇒ 这里一律"**解出来先验一验**"：不像歌词就返回 "" ⇒
+//       调用方退回**标准 LRC** ✓✓（绝不把歌词搞没 ✗ —— 这正是用户定的"有就用、没有就退回" ✓）
+
+// 内层（zlib 解开之后的内容）⇒ 歌词文本：base64 → 逐字节异或 → gb18030 ✓
+//   ⚠ 单独拆出来是为了**能离线单测**（zlib 那层在测试里不好造 ✓）
+export func decode_lrcx_inner(string inner): string {
+    if inner == null or inner == "" { return "" }
+    string bin = strings.from_base64(inner)
+    if bin == "" { return "" }
+    Array[int] key = strings.to_bytes(LYRIC_KEY)
+    Array[int] data = strings.to_bytes(bin)
+    Array[int] out = []
+    int i = 0
+    while i < data.len() {
+        out.add(data[i] ^ key[i % key.len()])
+        i = i + 1
+    }
+    string txt = charsets.decode(strings.from_bytes(out), "gb18030")
+    if not looks_like_lyric(txt) { return "" }
+    return txt
+}
+
+// 像不像歌词（**宽松**判据：有 `[0` 的行 + 至少一个逐字标签 `<` ✓）—— 宁可退回标准版，也不写坏文件 ✓
+func looks_like_lyric(string t): bool {
+    if t == null or t == "" { return false }
+    if strings.byte_find(t, "[0") < 0 { return false }
+    if strings.byte_find(t, "<") < 0 { return false }
+    return true
+}
+
+// 剥 zlib 外皮，返回**未解码字节**（内层还要解密 ⇒ 这里不能顺带解 gb18030 ✗）
+//   判头逻辑与 `decodelyricbody` 同款（共用出来，免得两处走样 ✓）
+func unzlib(string raw): string {
+    int n = raw.byte_len()
+    if n < 16 { return "" }
+    if raw.byte_slice(0, 10) != "tp=content" { return "" }
+    int idx = strings.byte_find(raw, "\r\n\r\n")
+    int skip = 4
+    if idx < 0 {
+        idx = strings.byte_find(raw, "\n\n")
+        skip = 2
+    }
+    if idx < 0 { return "" }
+    int start = idx + skip
+    if start + 2 >= n { return "" }
+    string zbody = raw.byte_slice(start, n)
+    int cmf = _byteAt(zbody, 0)
+    if (cmf & 0x0F) != 8 { return "" }
+    GzipResult r = gzip.inflateRaw(zbody.byte_slice(2, zbody.byte_len()))
+    if not r.ok { return "" }
+    return r.data                             // ⚠ `r.data` 本身就是"字节串" ✓ 别再 `from_bytes`（那是给数组用的 ✗）
+}
+
+// 取"逐字版"歌词（任何一步不对 ⇒ "" ⇒ 调用方退回标准 LRC ✓）
+export func fetchlyric_lrcx(string songid): string {
+    if songid == "" { return "" }
+    HttpClient client = net.createClient()
+    if not client.isOk() { return "" }
+    client.setUserAgent(LYRIC_UA)
+    client.setTimeout(15000)
+    client.setSSLVerify(false, false)
+    client.addHeaders(["Referer: " + LYRIC_REFERER])
+    Response resp = client.get(LYRIC_URL + lyricparams_lrcx(songid))
+    string inner = ""
+    if resp.ok() { inner = unzlib(resp.rawBody()) }
+    client.close()
+    if inner == "" { return "" }
+    return decode_lrcx_inner(inner)
+}
+
 // 音频路径 → 同名 .lrc 路径（把最后一个扩展名换成 .lrc；没有扩展名就直接加后缀）
 export func lrcpath(string audiopath): string {
     int dot = -1
@@ -126,7 +214,11 @@ export func lrcpath(string audiopath): string {
 //   · 个别歌的正文带 UTF-8 BOM（如 Love Story）⇒ 必须**原样**保留：
 //     Windows 侧播放器/记事本靠 BOM 判 UTF-8，去掉反而容易变乱码
 export func savelyric(string songid, string targetpath): int {
-    string text = fetchlyric(songid)
+    // ★ 2026-10-08：**先试逐字版**（有就用 ✓）；解不出/不像歌词 ⇒ 退回标准 LRC ✓（用户定的规矩 ✓）
+    //   存下来的这份如果带 `<mm,dd>` 标签，下次播放不用联网也有逐字 ✓（解析侧认 ✓ 见 player.leno）
+    //   ⚠ 代价：这份 .lrc 给别的播放器看会露出标签 ✗ —— 换来的是"本应用里能跟唱" ✓
+    string text = fetchlyric_lrcx(songid)
+    if text == "" { text = fetchlyric(songid) }
     if text == "" { return 0 }
     try {
         files.write(targetpath, text)

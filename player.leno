@@ -129,6 +129,18 @@ export func split_title(string filename): string {
 export struct Lrc {
     Array[float] secs
     Array[string] texts
+    // ★ 逐字时间（2026-10-08）：`wt_line[k]` = 第 k 个逐字时刻属于**哪一句**、
+    //   `wt_sec[k]` = 那个字的**起始秒**（绝对，按歌里的秒数 ✓）
+    //   为什么要扁平两个数组：嵌套数组（`Array[Array[float]]`）当**字段**用时类型推不出来 ✗（本仓踩过 ✓）
+    //   ⚠ 没有逐字数据（普通 .lrc）的句子 ⇒ 在 `wt_line` 里**一段都没有**
+    //      ⇒ 渲染侧自动退回"按字数线性" ✓✓（这就是"有就用、没有就退回" ✓）
+    Array[int] wt_line
+    Array[float] wt_sec
+    //   和 `wt_sec` 一一对应：这个字的**结束秒** ✓（= 起点 + 时长 ✓）
+    //   ⚠ 为什么必须要它：光有起点的话，"字与字之间的停顿"会被当成"这个字还在唱" ✗
+    //     （那就又变回近似了 ✓）；有了结束 ⇒ 停顿期间**一格都不刷** ✓✓（真同步的关键 ✓）
+    //   时长缺失/为 0（少见）⇒ 记 -1 ⇒ 退回"唱到下一个字的起点" ✓
+    Array[float] wt_end
 }
 
 // 码点数组的一段 ⇒ 字符串（按码点拼 ✓）
@@ -172,7 +184,55 @@ func lrc_tag_secs(string tag): float {
     return _float(mm * 60 + ss) + frac
 }
 
+// 逐字标签 ⇒ (起始秒, 时长秒)
+//   · 酷我 lrcx 那种是 **毫秒**："1234,567"（起点, 时长 ✓）⇒ (1.234, 0.567) ✓
+//   · 也容一手 "00:12.34,0.5"（起点写成 mm:ss.xx、时长还是秒 ✓）
+//   · 起点认不出 ⇒ (-1, 0)（当作没有逐字数据 ✓ 退回线性 ✓）
+//   · 时长缺失/认不出 ⇒ 0（渲染侧会退回"唱到下一个字的起点" ✓）
+func lrc_word_span(string tag): [float, float] {
+    if tag == null or tag == "" { return -1.0, 0.0 }
+    Array[string] parts = tag.split(",")
+    if parts.len() == 0 { return -1.0, 0.0 }
+    // 起点
+    string a = parts[0].trim()
+    float t = lrc_tag_secs(a)                    // "00:12.34" 这种 ✓
+    if t < 0.0 {
+        Array[int] c = strings.to_codepoints(a)  // 纯数字 ⇒ 毫秒 ✓
+        if c.len() == 0 { return -1.0, 0.0 }
+        int n = 0
+        int i = 0
+        while i < c.len() {
+            if c[i] < 48 or c[i] > 57 { return -1.0, 0.0 }
+            n = n * 10 + (c[i] - 48)
+            i = i + 1
+        }
+        t = _float(n) / 1000.0
+    }
+    // 时长（可缺 ✓）
+    float d = 0.0
+    if parts.len() >= 2 {
+        string b = parts[1].trim()
+        Array[int] c2 = strings.to_codepoints(b)
+        int m = 0
+        int j = 0
+        bool bad = false
+        while j < c2.len() {
+            if c2[j] < 48 or c2[j] > 57 { bad = true } else { m = m * 10 + (c2[j] - 48) }
+            j = j + 1
+        }
+        if not bad and c2.len() > 0 {
+            // 起点写成了 mm:ss.xx ⇒ 时长大概率也是秒 ✗ 不好判 ⇒ 一律按**毫秒**理解再兜底 ✓
+            d = _float(m) / 1000.0
+        }
+    }
+    return t, d
+}
+
 // 一行 ⇒ 往 out 里加 0..N 条（元信息/空行 ⇒ 0 条 ✓）
+//   ★ 2026-10-08：同时认**逐字标签** `<起点,时长>`（酷我 `lrcx=1` 那种 ✓）：
+//     标签剥掉（文本照常显示 ✓）、每个字的起点收进 `wt_*` ✓ ⇒ 卡拉OK式真同步 ✓
+//   ⚠ `<0,0>` 打头的行 = **译文行**（上游要"并"到上一句 ✓）⇒ 不加新行、把文字接到上一句尾 ✓
+//   ⚠ 时间戳是毫秒且偶尔会写成"相对本句"的 ⇒ 明显小于本句起点时按相对处理（加回本句起点 ✓）
 func lrc_add_line(string line, Lrc out) {
     if line.trim() == "" { return }
     Array[int] cps = strings.to_codepoints(line)
@@ -189,27 +249,130 @@ func lrc_add_line(string line, Lrc out) {
         i = j + 1
     }
     if ts.len() == 0 { return }                          // 没有任何时间标签 ⇒ 跳过（纯文本行 ✓）
-    string text = cp_slice(cps, i, cps.len() - i).trim()
-    for ts to t2 { out.secs.add(t2); out.texts.add(text) }
+    // ---- 剥逐字标签 + 收每个字的起点 ----
+    string text = ""
+    Array[float] wsec = []
+    Array[float] wend = []
+    float lastW = -1.0
+    float lastWEnd = -1.0
+    bool zeroLead = false
+    int seen = 0
+    while i < cps.len() {
+        if cps[i] == 60 {                                // '<'
+            int j = i + 1
+            while j < cps.len() and cps[j] != 62 { j = j + 1 }   // '>'
+            if j >= cps.len() {
+                text = text + "<"                        // 不闭合 ⇒ 当普通字符 ✓（别吞内容 ✗）
+                i = i + 1
+            } else {
+                string tag = cp_slice(cps, i + 1, j - i - 1).trim()
+                if seen == 0 and tag.split(",").len() > 0 and tag.split(",")[0].trim() == "0" {
+                    zeroLead = true
+                }
+                var[float, float](w, wd) = lrc_word_span(tag)
+                if w >= 0.0 {
+                    lastW = w
+                    lastWEnd = w + wd                    // 时长缺失(0) ⇒ end == start ⇒ 渲染侧退回"唱到下一个字" ✓
+                }
+                seen = seen + 1
+                i = j + 1
+            }
+        } else {
+            text = text + strings.from_codepoint(cps[i])
+            if lastW >= 0.0 {
+                wsec.add(lastW)                          // 这个字的起点 ✓（标签之后的字才有 ✓）
+                wend.add(lastWEnd)
+            }
+            i = i + 1
+        }
+    }
+    text = text.trim()
+    if text == "" { return }                             // 剥完没字 ⇒ 不要 ✓
+    // ---- 译文行：接到上一句尾（不加新行 ✓ 就是上游那个"并" ✓）----
+    if zeroLead and out.secs.len() > 0 {
+        int lastIdx = out.secs.len() - 1
+        out.texts[lastIdx] = out.texts[lastIdx] + " " + text
+        return
+    }
+    // ---- 明显"相对本句"的逐字时间 ⇒ 加回本句起点 ✓（毫秒制绝对是常态 ✓ 这条只是兜底 ✓）
+    if wsec.len() > 0 and wsec[0] + 1.0 < ts[0] {
+        int k = 0
+        while k < wsec.len() {
+            wsec[k] = wsec[k] + ts[0]
+            if wend[k] >= 0.0 { wend[k] = wend[k] + ts[0] }
+            k = k + 1
+        }
+    }
+    for ts to t2 {
+        out.secs.add(t2)
+        out.texts.add(text)
+        int li = out.secs.len() - 1
+        int k = 0
+        while k < wsec.len() {                           // 同一句挂多个时间戳 ⇒ 逐字段也复制一份 ✓
+            out.wt_line.add(li)
+            out.wt_sec.add(wsec[k])
+            out.wt_end.add(wend[k])
+            k = k + 1
+        }
+    }
 }
 
-// 升序排（同时间的保持原顺序 ✓ —— 插入排序稳定 ✓）
+// 升序排（同时间的保持原顺序 ✓ 稳定 ✓）
+//   ★ 重写（2026-10-08）：逐字段是按**句号**索引的 ⇒ 排序时句号会变 ⇒ 必须**同步重映射** ✗
+//     做法：先排"下标"，再按新顺序把 secs / texts / wt_* 全部重建 ✓（比在插入排序里搬三段简单且不易错 ✓）
 func lrc_sort(Lrc out) {
     int n = out.secs.len()
-    int i = 1
-    while i < n {
-        float t = out.secs[i]
-        string s = out.texts[i]
+    if n <= 1 { return }
+    Array[int] ord = []
+    int i = 0
+    while i < n { ord.add(i); i = i + 1 }
+    i = 1
+    while i < n {                                        // 插入排序（稳定 ✓）
+        int cur = ord[i]
+        float t = out.secs[cur]
         int j = i - 1
-        while j >= 0 and out.secs[j] > t {
-            out.secs[j + 1] = out.secs[j]
-            out.texts[j + 1] = out.texts[j]
+        while j >= 0 and out.secs[ord[j]] > t {
+            ord[j + 1] = ord[j]
             j = j - 1
         }
-        out.secs[j + 1] = t
-        out.texts[j + 1] = s
+        ord[j + 1] = cur
         i = i + 1
     }
+    Array[float] ns = []
+    Array[string] nt = []
+    i = 0
+    while i < n {
+        ns.add(out.secs[ord[i]])
+        nt.add(out.texts[ord[i]])
+        i = i + 1
+    }
+    out.secs = ns
+    out.texts = nt
+    // 逐字段：old 句号 ⇒ new 句号 的重映射表，按新顺序重建 ✓
+    Array[int] remap = []
+    i = 0
+    while i < n { remap.add(-1); i = i + 1 }
+    i = 0
+    while i < n { remap[ord[i]] = i; i = i + 1 }
+    Array[int] nwl = []
+    Array[float] nws = []
+    Array[float] nwe = []
+    i = 0
+    while i < n {                                        // 按新句号顺序扫（保证组内次序不乱 ✓）
+        int k = 0
+        while k < out.wt_line.len() {
+            if out.wt_line[k] == i {
+                nwl.add(i)
+                nws.add(out.wt_sec[k])
+                nwe.add(out.wt_end[k])
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    out.wt_line = nwl
+    out.wt_sec = nws
+    out.wt_end = nwe
 }
 
 // 解析一整份 .lrc（换行 `\r\n` / `\n` / `\r` 都认 ✓）
@@ -217,6 +380,9 @@ export func lrc_from_text(string raw): Lrc {
     Lrc out = new Lrc()
     out.secs = []
     out.texts = []
+    out.wt_line = []
+    out.wt_sec = []
+    out.wt_end = []
     if raw == null or raw == "" { return out }
     string s = raw.replace("\r\n", "\n")
     s = s.replace("\r", "\n")
@@ -224,6 +390,37 @@ export func lrc_from_text(string raw): Lrc {
     for lines to ln { lrc_add_line(_str(ln), out) }
     lrc_sort(out)
     return out
+}
+
+// 逐字定位（**纯函数** ✓ 能离线测 ✓）：给定这句每个字的 (起点, 结束) 和当前时刻 ⇒
+//   返回"已经唱到第几个字"（浮点 ✓ 亚字素 ✓）
+//   · 字在**自己的 (起点,结束) 区间**里平滑推进 ✓
+//   · ★ **字与字之间的空档不推进** ✓✓ —— 停顿期间一格格都不动 ✓（这就是"和唱歌同步"的关键 ✓）
+//   · 结束缺失（-1）⇒ 退回"推进到下一个字的起点"（老近似 ✓，比不动好 ✓）
+export func word_sung(Array[float] ws, Array[float] we, float p, int cnt): float {
+    int n = ws.len()
+    if n <= 0 { return 0.0 }
+    float res = 0.0
+    int m = 0
+    while m < n {
+        if ws[m] <= p {
+            float e = -1.0
+            if m < we.len() { e = we[m] }
+            if e < 0.0 and m + 1 < n { e = ws[m + 1] }       // 没有时长 ⇒ 到下一个字起点 ✓
+            if e <= ws[m] + 0.001 {
+                res = _float(m + 1)                          // 连下一个字也没有 ⇒ 一过起点就算唱完 ✓
+            } else if p >= e {
+                res = _float(m + 1)                          // 这个字唱完了 ⇒ 整字计入 ✓
+            } else {
+                float pr = (p - ws[m]) / (e - ws[m])
+                if pr > 1.0 { pr = 1.0 }
+                res = _float(m) + pr                         // 字内部平滑（亚字素 ✓）
+            }
+        }
+        m = m + 1
+    }
+    if res > _float(cnt) { res = _float(cnt) }
+    return res
 }
 
 // 当前唱到第几行：最后一个 `secs[i] <= sec` 的下标 ✓（一条都没到 ⇒ -1 ✓）
@@ -278,6 +475,7 @@ export struct Player {
 
     // ---- 歌词（2026-10-08 ✓）：**懒加载** —— 换歌才重读一次，其它时候零开销 ✓ ----
     Lrc lrc
+    float lrcShift = 0.0             // 歌词整体偏移（秒；正 = 歌词延后 ✓ 默认 0 ✓ 见 lyric_pos）
     string lrcFor = ""               // 已经读的是**哪个歌词文件**（路径 ✓ 变了才重读 ✗ 见 ensure_lrc）
     string scanDir = ""              // 最近一次 `scan` 的目录（试听态"去输出目录找同名歌词"要用 ✓）
     bool lrcTried = false
@@ -604,10 +802,43 @@ export struct Player {
         return lrc.texts
     }
 
+    // 歌词用的"对齐时刻"（= 播放位置 − 偏移 ✓）
+    //   ⚠ 歌词相关的**一律**走这里 ✗ 别再直接用 `position()` ✓（不然将来那个偏移只生效一半 ✓）
+    func lyric_pos(): float {
+        return position() - lrcShift
+    }
+
     // 现在唱到第几行（-1 = 还没到第一句 ✓）
     func lyric_index(): int {
         ensure_lrc()
-        return lrc_index_at(lrc.secs, position())
+        return lrc_index_at(lrc.secs, lyric_pos())
+    }
+
+    // ★ 这一句"已经唱到第几个字"（**浮点** ✓ 亚字素 ✓）—— 就是"有逐字就用、没有就退回" ✓
+    //   ① 有逐字时间（这句在 `wt_line` 里有一段 ✓）：按**每个字的实际起始秒**定位
+    //      ⇒ 字与字之间的**停顿不刷** ✓（这才是"和唱歌同步"的手感 ✓）
+    //   ② 没有（普通 .lrc ✓）⇒ 退回"句内进度 × 字数"的线性近似 ✓
+    func lyric_sung(): float {
+        if index < 0 { return 0.0 }
+        int li = lyric_index()
+        if li < 0 or li >= lrc.texts.len() { return 0.0 }
+        int cnt = lrc.texts[li].len()
+        if cnt <= 0 { return 0.0 }
+        float p = lyric_pos()
+        // ① 逐字：把属于这一句的那些 (起点,结束) 收出来（它们在 wt_* 里是**连续一段** ✓）
+        Array[float] ws = []
+        Array[float] we = []
+        int k = 0
+        while k < lrc.wt_line.len() {
+            if lrc.wt_line[k] == li {
+                ws.add(lrc.wt_sec[k])
+                we.add(lrc.wt_end[k])
+            }
+            k = k + 1
+        }
+        if ws.len() > 0 { return word_sung(ws, we, p, cnt) }
+        // ② 退回线性（近似，但至少在动 ✓）
+        return lyric_progress() * _float(cnt)
     }
 
     // 歌词总句数（界面按它裁可见范围 ✓）
@@ -634,7 +865,7 @@ export struct Player {
     //   没有下一句 / 时间戳相同 ⇒ 返回 0（不推 ✓ 免得瞬间跳一下 ✗）
     func lyric_progress(): float {
         ensure_lrc()
-        float p = position()
+        float p = lyric_pos()
         int i = lrc_index_at(lrc.secs, p)
         if i < 0 { return 0.0 }
         float t0 = lrc.secs[i]
