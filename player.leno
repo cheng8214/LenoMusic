@@ -184,6 +184,17 @@ func lrc_tag_secs(string tag): float {
     return _float(mm * 60 + ss) + frac
 }
 
+// 第 i 句有几条逐字时间（0 = 这句会退回线性 ✓；界面/自检都能读 ✓）
+export func word_count_at(Lrc l, int i): int {
+    int c = 0
+    int k = 0
+    while k < l.wt_line.len() {
+        if l.wt_line[k] == i { c = c + 1 }
+        k = k + 1
+    }
+    return c
+}
+
 // 逐字标签 ⇒ (起始秒, 时长秒)
 //   · 酷我 lrcx 那种是 **毫秒**："1234,567"（起点, 时长 ✓）⇒ (1.234, 0.567) ✓
 //   · 也容一手 "00:12.34,0.5"（起点写成 mm:ss.xx、时长还是秒 ✓）
@@ -294,15 +305,8 @@ func lrc_add_line(string line, Lrc out) {
         out.texts[lastIdx] = out.texts[lastIdx] + " " + text
         return
     }
-    // ---- 明显"相对本句"的逐字时间 ⇒ 加回本句起点 ✓（毫秒制绝对是常态 ✓ 这条只是兜底 ✓）
-    if wsec.len() > 0 and wsec[0] + 1.0 < ts[0] {
-        int k = 0
-        while k < wsec.len() {
-            wsec[k] = wsec[k] + ts[0]
-            if wend[k] >= 0.0 { wend[k] = wend[k] + ts[0] }
-            k = k + 1
-        }
-    }
+    // ⚠ "相对/绝对"的判断**挪到解析完之后**（那时才知道每句的时长 ✓ 见 lrc_fix_words）
+    //   这里只存**原始值** ✓ 不动它 ✗
     for ts to t2 {
         out.secs.add(t2)
         out.texts.add(text)
@@ -378,6 +382,106 @@ func lrc_sort(Lrc out) {
     out.wt_end = nwe
 }
 
+// 逐字时间的**校验与换算**（实测数据很脏 ✗ ⇒ 逐句单独判，不可信就整句丢掉 ⇒ 渲染退回线性 ✓✓）
+//   为什么不能"整份文件一个判据"：同一份里**混着两种基准**，还有回跳 ✓（实测见提交说明 ✓）
+//   两条路，任一成立就采用：
+//     ① 行内相对：非递减（回跳按"前缀最大"修 ✓）且 末值 ≤ 行时长×1.3 + 0.8 秒
+//     ② 歌内绝对：首值 ≥ 行起点 − 1 秒，且 末值 ≤ 行起点 + 行时长×1.3 + 0.8 秒
+//   都不成立 ⇒ **整句丢掉**（该句在 wt_* 里一段都没有 ⇒ 界面自动退回"按字数线性" ✓）
+func lrc_fix_words(Lrc out) {
+    int n = out.secs.len()
+    if n <= 0 or out.wt_line.len() == 0 { return }
+    Array[int] nl = []
+    Array[float] ns = []
+    Array[float] ne = []
+    int i = 0
+    while i < n {
+        Array[float] raw = []
+        Array[float] rawe = []
+        int k = 0
+        while k < out.wt_line.len() {
+            if out.wt_line[k] == i {
+                raw.add(out.wt_sec[k])
+                rawe.add(out.wt_end[k])
+            }
+            k = k + 1
+        }
+        if raw.len() > 0 {
+            float lt = out.secs[i]
+            // ⚠ 句长要拿"**下一个带逐字标签的行**"算 ✗ 不能拿"下一行" ——
+            //   文件里夹着 `词：侯波`/`曲：玄昌俊` 这种短行 ✓ 拿它当句长会把正常长句误杀 ✓（第一版误杀 50 句 ✓）
+            //   真实的"下一句"一定也带逐字标签 ✓ ⇒ 按它算才准 ✓
+            float nt = lt + 30.0
+            int jj = i + 1
+            while jj < n {
+                int kk2 = 0
+                bool hasw = false
+                while kk2 < out.wt_line.len() {
+                    if out.wt_line[kk2] == jj { hasw = true }
+                    kk2 = kk2 + 1
+                }
+                if hasw {
+                    nt = out.secs[jj]
+                    jj = n
+                } else {
+                    jj = jj + 1
+                }
+            }
+            float dur = nt - lt
+            if dur < 0.3 { dur = 0.3 }
+            float mx = -1.0                                   // ① 前缀最大：把回跳抹平 ✓
+            int j = 0
+            while j < raw.len() {
+                if raw[j] < mx { raw[j] = mx } else { mx = raw[j] }
+                j = j + 1
+            }
+            float first = raw[0]
+            float last = raw[raw.len() - 1]
+            // ⚠ 判据的**重点在"首值"**（2026-10-08 实测调出来）：
+            //   · 好数据：首值就落在句子开头那一带（相对值 ~0.5 秒 / 绝对值 ~行起点 ✓）
+            //   · 脏数据：首值**跑到句子外面**去了（实测 [00:00.510] 那行的首值是 2.88 秒 ✗
+            //     ⇒ 用户看到的就是"第一句都唱完了，逐字还停在第一个字" ✓）
+            //   ⚠ 别拿"下一行时间"当句长去卡**末值** ✗：文件里夹着 `词：侯波` 这种短行 ✓
+            //     会把正常的长句误杀 ✓（第一版就这么误杀了 51 句 ✓）
+            float limFirst = dur * 1.3 + 0.8
+            if limFirst < 2.0 { limFirst = 2.0 }
+            // ★ 还要看**总跨度**跟句长是不是一个量级（2026-10-08 实测的关键一条）：
+            //   脏数据会把 9 个字铺出 17 秒 ✗，而那一句只有 8 秒 ⇒ 走完一句才刷 1 个字
+            //   ⇒ 看上去就是"卡在第一个字" ✗（用户截图 ✓）
+            //   正常的逐字数据跨度 ≈ 句长 ✓ ⇒ 差太多就判脏、退回线性 ✓✓
+            float limSpan = dur * 1.6 + 1.0
+            if limSpan < 1.5 { limSpan = 1.5 }
+            float span = last - first
+            bool rel = (first <= limFirst and span <= limSpan)
+            bool ab = (first >= lt - 1.0 and first <= lt + limFirst and span <= limSpan)
+            // ⚠ 先判**绝对** ✗：绝对基准的数值（≈行起点）往往也满足"相对"的形式条件 ✓
+            //   先判相对就会被当成"行内相对"再加一次行起点 ⇒ 时间翻倍 ✗（用例抓到过 ✓）
+            if ab {
+                int m = 0
+                while m < raw.len() {
+                    nl.add(i)
+                    ns.add(raw[m])
+                    ne.add(rawe[m])
+                    m = m + 1
+                }
+            } eif rel {
+                int m = 0
+                while m < raw.len() {
+                    nl.add(i)
+                    ns.add(lt + raw[m])
+                    ne.add(lt + rawe[m])
+                    m = m + 1
+                }
+            }
+            // 两条都不成立 ⇒ 该句整段丢掉（退回线性 ✓）
+        }
+        i = i + 1
+    }
+    out.wt_line = nl
+    out.wt_sec = ns
+    out.wt_end = ne
+}
+
 // 解析一整份 .lrc（换行 `\r\n` / `\n` / `\r` 都认 ✓）
 export func lrc_from_text(string raw): Lrc {
     Lrc out = new Lrc()
@@ -392,6 +496,7 @@ export func lrc_from_text(string raw): Lrc {
     Array[string] lines = s.split("\n")
     for lines to ln { lrc_add_line(_str(ln), out) }
     lrc_sort(out)
+    lrc_fix_words(out)          // ★ 逐字：逐句校验/换算，脏句丢掉 ⇒ 那段自动退回线性 ✓
     return out
 }
 
