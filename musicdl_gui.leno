@@ -38,6 +38,7 @@
 import "SDL3" as SDL3
 import "sdl_filedialog" as fdlg
 import dirs
+import files
 import strings
 import threads
 import "./dl_engine.leno" as eng
@@ -68,6 +69,16 @@ func search_worker(Array[string] srcids, string keyword, int limit, any ch): Arr
 func dl_worker_shard(Array[Array[string]] jobs, string outdir, any ch, any cmd, Array[string] flags, int shard, int nshards): Array[string] {
     return eng.dl_entry_shard(jobs, outdir, ch, cmd, flags, shard, nshards)
 }
+
+// ==================== 无头自检钩子（环境变量；与 dashboard / cleaner_master 同一套约定 ✓）====================
+// 为什么值得有：本应用是 GUI 的（搜索要联网、下载要点按钮）⇒ 没有它就只能"人手开窗看" ✗
+//   DSHOT=<png>  截这一张就退出（默认第 2 帧；DSHOT_AT=<帧> 可调）
+//   DAUTO=<帧>   跑够这么多帧就退出（不截图也行）
+// ⇒ 标题栏那两个图标、整体布局都能被**无头核对**（assert\run_gui_checks.leno 的无头清单 ✓）
+var dlShot = ""
+int dlShotAt = 2
+int dlAuto = 0
+int dlFrames = 0
 
 // ==================== 主结构 ====================
 struct MusicDlApp {
@@ -109,11 +120,13 @@ struct MusicDlApp {
     // ===== 下载窗口（2026-10-07 拧成独立模块 dl_window.leno ✓）=====
     //   窗口自带它的控件与每任务进度状态；本文件只持有它、每 120ms 调一次 tick() ✓
     //   从外面只碰三个字段：`jobs` / `flags`（交给它）与 `wantStart`（见 dlStartIfWanted ✓）
+    //   ★ 它是**非模态**的 ⇒ 主窗口能继续点 ⇒ "已经开着就别再开"由本文件把关（reuseDlIfOpen ✓）
     DlWindow? dl = null
 
     // ===== 设置（dl_settings.leno 纯逻辑 + dl_settings_win.leno 弹窗 ✓）=====
     //   `workers` = 并行下载线程数（**多首歌同时下**）；启动时读一次，改设置后立刻重读 ✓
-    //   入口是**标题栏里那个齿轮动作按钮**（actions: [{id:"settings", icon:"gear"}] ✓）
+    //   入口是**标题栏右侧**的两个动作按钮：`download`（下载窗口）与 `settings`（设置）✓
+    //   图标用应用自带的 images/download.png、images/setting.png（路径见 setupUI ✓）
     DlSettings cfg
 
     // ==================== 数据辅助 ====================
@@ -300,7 +313,22 @@ struct MusicDlApp {
         return flags
     }
 
+    // 下载窗口已经开着？⇒ 置前 + 状态栏说明 + 返回 true（调用方据此**不重复开** ✓）
+    //   ★ 2026-10-07 改非模态后必须有：主窗口能继续点，而原先每点一次都会 `new` 一个新窗口 ✗
+    //   ⚠ 已有窗口在下**另一批**任务时不抢（抢掉 = 中断正在下的 ✗）⇒ 只置前 + 说明"先关掉它"
+    func reuseDlIfOpen(): bool {
+        if not dlw.reuse_if_open(dl) { return false }
+        string what = "下载窗口"
+        if dl is DlWindow => w {
+            if w.lyriconly { what = "下载歌词窗口" }
+        }
+        stateLbl.set_text(what + "已经开着（已切到前台）—— 要开始新的一批，请先关掉它")
+        SDL3.markFrameRedraw()
+        return true
+    }
+
     func startDownload(Array[Array[string]] jobs, Array[string] flags) {
+        if reuseDlIfOpen() { return }          // ★ 一个应用只留一个下载窗口 ✓（非模态 ⇒ 必须自己管）
         if jobs.len() == 0 {
             stateLbl.set_text("先勾选（或右键选中）要下载的歌曲")
             SDL3.markFrameRedraw()
@@ -314,6 +342,29 @@ struct MusicDlApp {
         startDownload(pickchecked(), downloadflags())
     }
 
+    // 标题栏「下载」图标（2026-10-07）：**"打开下载窗口"的入口**，点了必须有明确结果 ✓
+    //   · 已开着 ⇒ 只置前（不重复开 ✓，见 reuseDlIfOpen）
+    //   · 有勾选/选中 ⇒ 与工具栏「下载勾选」同一条路：判定 → 开窗 → 起线程 ✓
+    //   · **一首都没勾 ⇒ 弹个提示框说清怎么办** —— 原先只在状态栏写一句，
+    //     看起来就是"点了没反应" ✗（实测反馈就是它 ✓）
+    //     ⚠ 工具栏那个按钮在同样情况下是**禁用**的（updateCount 里 set_enabled ✓）⇒ 那里保持原样：
+    //       "灰着点不动"比"能点但没反应"清楚 ✓；而图标是入口，得能进得去 ✓
+    func onDownloadAction() {
+        if reuseDlIfOpen() { return }
+        Array[Array[string]] jobs = pickchecked()
+        if jobs.len() == 0 {
+            stateLbl.set_text("还没勾选歌曲 —— 下载窗口需要先有任务")
+            SDL3.markFrameRedraw()
+            SDL3.msgBox("还没有要下载的歌", [
+                "下载窗口是给「要下的那一批歌」用的，现在是空的。",
+                "① 先在搜索框里搜索；② 在结果表里勾选（或右键某行「下载这一首」）。",
+                "然后再点标题栏这个下载图标 ✓"
+            ], "知道了", "", false, null)
+            return
+        }
+        startDownload(jobs, downloadflags())
+    }
+
     func onDownloadSelected() {
         Array[Array[string]] jobs = []
         Array[int] selRows = table.get_selected_rows()
@@ -325,6 +376,7 @@ struct MusicDlApp {
 
     // 只下歌词（右键菜单 / 已有音频时用）
     func onDownloadLyricOnly(Array[Array[string]] jobs) {
+        if reuseDlIfOpen() { return }          // 同上：右键"只下这一首的歌词"也不会开出第二个框 ✓
         if jobs.len() == 0 {
             stateLbl.set_text("先勾选（或右键选中）要下歌词的歌曲")
             SDL3.markFrameRedraw()
@@ -493,14 +545,38 @@ struct MusicDlApp {
     }
 
     func setupUI() {
-        // 标题栏右侧按钮组里加一个**齿轮动作按钮**（"⚙ 设置"）：与最小化/最大化/关闭同一排 ✓
-        //   icon: "gear" 是 LenoSDL3 的内置矢量图标 ⇒ 不需要任何图片资源 ✓
+        // 标题栏右侧按钮组：**下载窗口入口** + **设置**（与最小化/最大化/关闭同一排 ✓）
+        // ★ 2026-10-07：改用应用自带图标 `images/download.png` / `images/setting.png`
+        //   ⚠ 三条都要记牢（前两条都是踩/文档里写着的）：
+        //     ① 路径必须是**绝对**的：标题栏把字符串**原样**交给 SDL_image ⇒ 相对路径跟着
+        //        **进程 cwd** 走，换个工作目录启动就加载失败（画成一个小点 ✗）
+        //     ② 读**随包资源**要用 `dirs.res_dir()`，**不能**用 `script_dir()` ✗ ——
+        //        单文件打包后资源释放到缓存目录，`script_dir()` 还是 exe 所在目录 ⇒ 取不到 ✗
+        //        （未打包时两者**完全一致** ⇒ 开发态照常 ✓ 见 docs/单文件打包使用指南.md §7）
+        //     ③ 资源清单在本应用目录的 `resource.toml`（`[pack] resources = ["images/**"]` ✓）
+        string imgDir = dirs.join(dirs.res_dir(), "images")
+        string iconDl = dirs.join(imgDir, "download.png")
+        string iconSet = dirs.join(imgDir, "setting.png")
+        string iconApp = dirs.join(imgDir, "index.png")
+        // 资源缺失时标题栏只会画个**小点、不报错** ⇒ 这里补一句明确警告（打包漏声明资源最常见 ✗）
+        if not files.exists(iconDl) or not files.exists(iconSet) or not files.exists(iconApp) {
+            print("[musicdl] 图标资源缺失：" + imgDir + "（打包请声明 resource.toml 的 [pack] resources ✓）\n")
+        }
+        if dlShot != "" { print("[musicdl] 图标目录（自检）：" + imgDir + "\n") }
         titleBar = SDL3.createTitleBar({
             title: "Leno 音乐下载器", height: 32, font_size: 14,
-            actions: [{id: "settings", icon: "gear", tip: "设置：并行下载线程数、默认是否带歌词"}]
+            // ★ 标题前的应用图标（2026-10-07 新增）：只有文字时标题前面空一块、观感差 ✗
+            //   与文字**整体**居中/左对齐，尺寸比窗口按钮图标略大一点（18 vs 16 ✓）
+            title_icon: iconApp, title_icon_size: 18,
+            actions: [
+                {id: "download", icon: iconDl, tip: "下载勾选的歌（打开下载窗口；已开着就切到前台）"},
+                {id: "settings", icon: iconSet, tip: "设置：并行下载线程数、默认是否带歌词"}
+            ]
         })
         titleBar.on_action(func(string id) {
-            if id == "settings" { onSettings() }
+            // 下载入口：判定 / 防重复 / 起线程都在那几处，这里只做"该说清的说清" ✓
+            if id == "download" { onDownloadAction() }
+            eif id == "settings" { onSettings() }
         })
         win.add(titleBar)
         float titleH = titleBar.get_h()
@@ -615,7 +691,27 @@ struct MusicDlApp {
 
     // ==================== 事件与主入口 ====================
 
+    // 还有"在下"的任务吗（决定主窗口能不能直接关 ✓）
+    func downloadingNow(): bool {
+        if dl is DlWindow => w {
+            return w.open and w.started and not w.finished
+        }
+        return false
+    }
+
     func handleEvent(Event ev): bool {
+        // ★ 2026-10-07：改非模态后主窗口才**关得掉**（模态时它的全部事件被跳过 ⇒ 点 ✕ 等于没点）
+        //   ⇒ 这里必须拦一下：还在下就直接退，进程一结束线程被带走 ⇒ 可能留下**半截文件** ✗
+        //   拦法用框架的 `cancelClose()`（"关闭到托盘"同款机制 ✓）：窗口不关，状态栏说清怎么办
+        bool winClose = ev.isQuit() or ev.isWindowClose() or titleBar.is_close_requested()
+        bool escQuit = ev.isKeyDown() and ev.scancode() == Scancode.ESCAPE
+        if (winClose or escQuit) and downloadingNow() {
+            if winClose { win.cancelClose() }      // 只有窗口关闭需要走 cancelClose（框架机制 ✓）
+            titleBar.clear_close_request()
+            stateLbl.set_text("还有下载在跑 —— 先在下载窗口点「取消」（或关掉它）再退出，免得留下半截文件")
+            SDL3.markFrameRedraw()
+            return true
+        }
         if ev.isQuit() or ev.isWindowClose() { return false }
         if titleBar.is_close_requested() {
             titleBar.clear_close_request()
@@ -626,6 +722,14 @@ struct MusicDlApp {
     }
 
     func run() {
+        // 无控制台：**打包成 exe 后双击不弹黑框** ✓
+        //   · 打包器在**语义分析阶段**就会看到这句 `_console(false)`（只认字面量 false/0，
+        //     写成变量检测不到 ✗）⇒ 自动改用无控制台的 `leno_vm_gui.exe` 作基底 ✓
+        //     （命令行 `--console` 可反过来强制控制台版 ✓；两者优先级见 main.c 的注释 ✓）
+        //   · ★ 为什么套一层"是否打包"：开发态 `build\leno.exe app.leno` 是从终端启的，
+        //     `_console(false)` 会把**你那个终端窗口**一起藏掉 ✗
+        //     判据用文档给的那条（打包指南 §7）：**打包后 `res_dir() != script_dir()`** ✓
+        if dirs.res_dir() != dirs.script_dir() { _console(false) }
         SDL3.ttfInit()
         SDL3.setTheme(SDL3.lightTheme())
         win = SDL3.createWindow({title: "Leno 音乐下载器", w: 1060, h: 680, flags: 0x20})
@@ -634,6 +738,19 @@ struct MusicDlApp {
             return
         }
         win.setMinSize(780, 460)
+
+        // 窗口 / 任务栏图标（运行时）：**PNG 直接可用** ✓（`win.setIcon` 内部会把像素拷进窗口
+        //   ⇒ 拷完即可释放 surface ✓）
+        //   ⚠ 这跟"打包进 exe 的图标"是两码事：exe 那个**只认 .ico** ✗
+        //     （见 docs/单文件打包使用指南.md §4.2：PNG/JPG 必须先转成 ICO 容器 ✓）
+        string appIcon = dirs.join(dirs.res_dir(), "images", "index.png")
+        if files.exists(appIcon) {
+            var iconSurf = SDL3.loadImage(appIcon)
+            if iconSurf != null {
+                win.setIcon(iconSurf)
+                SDL3.destroySurface(iconSurf)
+            }
+        }
 
         // 默认输出目录 = 脚本目录/downloads（与 CLI 版一致，两边的下载文件放一处）
         outdir = dirs.script_dir() + _sep() + "downloads"
@@ -645,10 +762,31 @@ struct MusicDlApp {
         setupUI()
         // ⚠ setupUI 之后才能碰控件：套上设置里的"默认带歌词"，并在状态栏报一下并行度 ✓
         lyricBox.set_checked(cfg.lyric)
-        stateLbl.set_text("就绪（并行 " + _str(cfg.workers) + " 线程；右上「⚙ 设置」可改）")
+        stateLbl.set_text("就绪（并行 " + _str(cfg.workers) + " 线程；标题栏右上「下载 / 设置」两个图标 ✓）")
         // 全局 120ms 一拍：搜索进度、下载进度、"忙"指示（定时器是模块级全局的 ⇒ 模态对话框
         // 打开期间照样触发，所以下载进度条能在模态窗里动起来 ✓）
         win.addTimer(120, func() { onTick() })
+
+        // ---- 自检钩子（见文件头那段 ✓）：截图/自动退出必须放**叠加层** ----
+        //   叠加层在所有控件/弹层之后、present 之前 ⇒ 此刻帧才完整 ✓
+        //   （放 onRender 回调里读只能拿到"只有底色"的空白图 ✗ —— dashboard 踩过 ✓）
+        if dlShot != "" or dlAuto > 0 {
+            win.setOverlay(func(Renderer r) {
+                dlFrames = dlFrames + 1
+                if dlShot != "" and dlFrames >= dlShotAt {
+                    var wsz = win.getSize()
+                    var s = r.readPixelsAt(0, 0, wsz.w, wsz.h)
+                    bool ok = false
+                    if s != null { ok = SDL3.saveImagePNG(s, dlShot) }
+                    print("[musicdl] 截图 " + dlShot + " ok=" + _str(ok) + " 帧=" + _str(dlFrames) + "\n")
+                    _exit(0)
+                }
+                if dlAuto > 0 and dlFrames >= dlAuto {
+                    print("[musicdl] DAUTO=" + _str(dlAuto) + " 帧跑完 ⇒ 退出 ✓\n")
+                    _exit(0)
+                }
+            })
+        }
 
         win.run(
             func(Event ev): bool { return handleEvent(ev) },
@@ -660,6 +798,12 @@ struct MusicDlApp {
 
 // ==================== 程序入口 ====================
 main() {
+    var sh = _env("DSHOT")
+    if sh != null { dlShot = _str(sh) }
+    var sa = _env("DSHOT_AT")
+    if sa != null { dlShotAt = _int(_str(sa)) }
+    var au = _env("DAUTO")
+    if au != null { dlAuto = _int(_str(au)) }
     MusicDlApp app = new MusicDlApp()
     app.run()
 }

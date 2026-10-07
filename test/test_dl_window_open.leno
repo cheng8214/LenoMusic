@@ -1,0 +1,54 @@
+// test_dl_window_open.leno — 下载窗口"不重复打开"的规则（**无 GUI**，纯逻辑 ✓）
+//
+// 为什么值得有：下载窗口 2026-10-07 从**模态**改成**非模态** ——
+//   · 模态时主窗口收不到任何事件（点不动）⇒ 想点出第二个框都点不出来（所以以前不用管 ✓）
+//   · 非模态后主窗口能继续点，而 `open_download` 每次都 `new` 一个新窗口 ⇒ 点两下就是两个框 ✗
+//   ⇒ "已开着就复用、不再开"从"自动成立"变成**必须自己管**（见 dl_window.reuse_if_open ✓）
+//
+// ★ 不需要窗口/字体：只 `new` 一个**空** DlWindow 玩它的状态机 ✓
+//   （`bringToFront` 只在 `dlg.ok` 时才动 SDL ⇒ 没建过窗口也不会崩 ✓）
+// 跑：build\leno.exe leno_gui\应用\音乐下载器\test\test_dl_window_open.leno
+import "../dl_window.leno" as dlw
+use dlw.DlWindow
+
+var fails = 0
+func check(string name, bool ok) {
+    if ok {
+        print($"[通过] {name}")
+    } else {
+        fails = fails + 1
+        print($"[失败] {name}")
+    }
+}
+
+main() {
+    print("=== 下载窗口：防重复打开 ===")
+    DlWindow d = new DlWindow()
+
+    check("传 null ⇒ false（没有可复用的窗口 ✓）", not dlw.reuse_if_open(null))
+    check("没开过 ⇒ false（调用方该去开一个 ✓）", not dlw.reuse_if_open(d))
+
+    d.open = false
+    check("已关掉 ⇒ false（还能再开 ✓）", not dlw.reuse_if_open(d))
+
+    d.open = true
+    check("开着 ⇒ true（不许再开第二个 ✓）", dlw.reuse_if_open(d))
+    check("幂等：连问两次都是 true ✓", dlw.reuse_if_open(d) and dlw.reuse_if_open(d))
+    check("复用不碰未创建的窗口 ⇒ 不崩 ✓", true)
+
+    // 换模式（只下歌词）也走同一条规则：**同一个窗口**，不因为模式不同就再开一个 ✓
+    d.lyriconly = true
+    check("只下歌词模式同样复用（不抢正在跑的那批 ✓）", dlw.reuse_if_open(d))
+
+    // "关掉 → 再开"的正常回路：关掉之后必须允许开新的一批 ✓
+    d.open = false
+    d.lyriconly = false
+    check("关掉后 ⇒ false（可以开新的一批 ✓）", not dlw.reuse_if_open(d))
+
+    print("")
+    if fails > 0 {
+        print($"共 {fails} 项失败")
+        _exit(1)
+    }
+    print("全部通过（已开着就复用、关了才能再开 ✓）")
+}

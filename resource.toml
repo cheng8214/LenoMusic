@@ -1,0 +1,24 @@
+# resource.toml — 打包资源配置（独立于 leno.toml，没有 leno.toml 也能用 ✓）
+#
+# 本应用的资源只有 images/（标题栏那两个动作图标 download.png / setting.png ✓）：
+#   代码里经 `dirs.join(dirs.res_dir(), "images", …)` 取（见 musicdl_gui.setupUI ✓）
+#   ⚠ 读随包资源**必须**用 res_dir()，不能用 script_dir() ✗ ——
+#     单文件打包后资源释放到用户缓存目录，script_dir() 还是 exe 所在目录 ⇒ 取不到 ✗
+#     （未打包时两者完全一致 ⇒ 开发态照常 ✓ 见 docs/单文件打包使用指南.md §7）
+#   ⚠ 默认输出目录（downloads/）用的是 script_dir() —— 那是**写用户数据**，
+#     按同一节的规则就该用 script_dir（放 hash 目录里反而会"每次重新打包就换地方" ✗）
+#   ⇒ 不声明 resources 的话，打包成 exe 后图标取不到（解包目录里没有 ✓）
+#
+# [pack]
+#   onefile   = true  → 库与资源内嵌进 exe，首次运行解包到**用户缓存目录**（不污染 exe 所在目录 ✓）
+#   resources = 通配模式数组（相对本文件所在目录）；"images/**" ⇒ images 目录递归全部 ✓
+#   icon      = 打包产物的**应用图标** ⇒ Windows **只认 .ico** ✗（PNG 不行，见打包指南 §4.2 ✓）
+#               本仓库自带的转换工具（把 PNG 原样封进 ICO，不重新编码 ✓）：
+#                 build\leno.exe tools\png_to_ico.leno images\index.png app.ico
+#               ⚠ app.ico 放在**应用根目录**（不是 images/ 里）⇒ 不会被 resources 当资源再嵌一遍 ✓
+#               ⚠ 源图最好 **256×256**：48×48 会被系统放大 ⇒ 资源管理器"大图标"发虚 ✗
+
+[pack]
+onefile   = true
+resources = ["images/**"]
+icon      = "app.ico"

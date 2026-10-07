@@ -14,6 +14,14 @@
 //
 // ⚠ 另一处不搬的：**"要下哪些歌"的判定**（勾选的行 / 选中行 / 只下歌词）属主界面业务策略
 //   ⇒ 留在 musicdl_gui.leno（cleaner_detail 的分工同款：本模块"给数据就画" ✓）
+//
+// ★ 2026-10-07：本窗口从**模态**改成**非模态**（开着下载框时主窗口照样能用 ✓）
+//   · 差别只在"进不进模态栈"：`runModal = pushModal + run`，而事件循环里
+//     `if _isModal() and wid != _modalTop() { 跳过该窗口的全部事件 }` ⇒ **模态会吞掉主窗口的事件** ✗
+//   · 现在走 `createModelessDialog`（不 pushModal）+ `dlg.run(...)`：两个窗口都在 `_runWids` 里，
+//     各收各的事件、各自重绘（重绘请求是全局标志 ✓）；关掉本窗口只会摘掉它自己那一项 ✓
+//   ⇒ **"不重复打开"因此成了主界面的责任**：见本文件末尾的 `reuse_if_open` ✓
+//     （原先每点一次"下载"就 `new` 一个 DlWindow + 一个新窗口 ⇒ 点两下就是两个框 ✗）
 import "SDL3" as SDL3
 import strings
 import threads
@@ -60,8 +68,8 @@ export struct DlWindow {
     int maxw = 4                     // 并行线程数上限（**设置**里的值，主界面传进来 ⇒ 只显示口径 ✓）
 
     // ---- 运行状态 ----
-    bool open = false                // 窗口开着（tick() 的总开关 ✓）
-    bool closing = false             // 模态该收了（事件回调据此返回 false ✓）
+    bool open = false                // 窗口开着（tick() 的总开关 ✓；主界面靠它防重复打开 ✓）
+    bool closing = false             // 窗口该收了（事件回调据此返回 false ✓）
     bool started = false
     bool paused = false
     bool finished = false
@@ -89,15 +97,20 @@ export struct DlWindow {
     Channel? ch = null               // 所有 worker **共用**的进度消息通道（消息带全量下标 ⇒ 按 idx 归位 ✓）
     Array[Channel] cmds              // **每个 worker 一条**命令通道（一条被某个 worker 取走，别的就收不到了 ✗）
 
-    // —— 构建窗口并进模态 ——
-    // ⚠ runModal = pushModal + win.run()，主循环已跑时 run() 立即返回 ⇒ 这里**不阻塞**，
+    // —— 构建窗口并显示（**非模态** ✓）——
+    // ⚠ `run()` 第一句是 `registerOnly(...)`；**主循环已在跑时它立即返回、不阻塞** ⇒
     //   收尾动作必须写在按钮/事件回调里（cleaner_master 踩过："点确认什么也不发生" ✗）
+    // ⚠ 非模态 ⇒ 别再用 `runModal`：它是 `pushModal + run`，而模态会让主窗口**收不到任何事件** ✗
     func build() {
         string title = if lyriconly then "下载歌词" else "下载"
         int dw = 820
         int dh = 440
         int tbH = SDL3.DIALOG_TB_H
-        dlg = SDL3.createDialogWindow({title: title, w: dw, h: tbH + dh})
+        // ★ 非模态对话框（**不 pushModal**）⇒ 主窗口照样收事件 ✓
+        //   `createDialogWindow` 是模态那条（UTILITY 标志 + 自动 raise）；非模态这条不自动置前
+        //   ⇒ 下面自己补一个 `raise()`，否则新窗口可能开在主窗口**后面**（观感像"没反应" ✗）
+        dlg = SDL3.createModelessDialog({title: title, w: dw, h: tbH + dh})
+        dlg.raise()
         TitleBar tb = SDL3.dialogTitleBar(dlg, title)
         var droot = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, padX: 16, padY: 14, spacing: 8})
         dlg.setRootAt(droot, 0, tb.get_h())
@@ -125,17 +138,21 @@ export struct DlWindow {
             status.add("等待中")
             totalExp = totalExp + e
             // "只下歌词"模式：格式/大小那两列没有意义 ⇒ 显示 "-"（歌词约几十 KB，不值得标）
-            rows.add([eng.songlabel(j), if lyriconly then "-" else j[eng.F_EXT], if lyriconly then "-" else j[eng.F_SIZETEXT], "0%", "等待中"])
+            // 进度列写**数值**（progress 单元格把该列文本当数值 ⇒ 别写"37%"以外的花活也行 ✓）
+            rows.add([eng.songlabel(j), if lyriconly then "-" else j[eng.F_EXT], if lyriconly then "-" else j[eng.F_SIZETEXT], "0", "等待中"])
         }
 
         table = SDL3.createTable({
             headers: ["歌曲", "格式", "大小", "进度", "状态"],
-            col_widths: [330.0, 60.0, 90.0, 64.0, 220.0],
+            col_widths: [330.0, 60.0, 90.0, 94.0, 190.0],   // 进度列放宽：要装下"条 + 百分比" ✓
             aligns: [0, 1, 2, 1, 0],
             header_aligns: [0, 1, 2, 1, 0],
             zebra: true, row_h: 26, header_h: 28, font_size: 13,
             sortable: false, col_reorder: false, resizable: false,
-            empty_text: "没有任务"
+            empty_text: "没有任务",
+            // ★ 进度列 = **真进度条**（2026-10-07）：原先这列只能把进度写成文字"37%" ✗
+            //   观感与下面那条总进度条**同源**（都出 sdl_progress.drawBar ✓）⇒ 不会一大一小两种样式
+            cell_types: ["", "", "", "progress", ""]
         })
         table.set_rows(rows)
         droot.add(table, {grow: 1, shrink: 1, align: 3})
@@ -166,6 +183,10 @@ export struct DlWindow {
         Button closeBtn = SDL3.createButton({w: 90, h: 32, text: "关闭", type: "dark", font_size: 13})
         pauseBtn.set_enabled(false)
         cancelBtn.set_enabled(false)
+        if jobs.len() == 0 {
+            // 空任务（正常走不到：主界面两个入口都先检查 jobs.len() ✓）—— 但真到了也别让"开始"点了没反应 ✗
+            startBtn.set_enabled(false)
+        }
         droot.add(SDL3.dialogButtonRow([startBtn, pauseBtn, cancelBtn, openBtn, closeBtn], 10), {grow: 0, shrink: 0, align: 3})
 
         startBtn.on_click(func() {
@@ -217,7 +238,9 @@ export struct DlWindow {
         // 标题栏 ✕ 必须自己接（TitleBar 只置 closeRequested ✓）
         tb.on_close(func() { close() })
 
-        SDL3.runModal(dlg,
+        // ★ `dlg.run`（**不是** `runModal`）：只 registerOnly —— 主循环已在跑 ⇒ 立即返回、不阻塞 ✓
+        //   回调返回 false ⇒ 主循环只销毁**这一个**窗口（其余窗口继续跑 ✓ 见 sdl_window 的收尾段）
+        dlg.run(
             func(Event ev): bool {
                 if ev.isQuit() { return false }
                 if ev.isWindowClose() { close(); return false }
@@ -230,6 +253,12 @@ export struct DlWindow {
         // ⚠ `open` 放在**控件都建好之后**：tick() 的总开关就是它（早置会让 tick 摸到空控件 ✗）
         open = true
         SDL3.markFrameRedraw()
+    }
+
+    // 把窗口提到前台（"已经开着时再点一次入口"就靠它 ✓）
+    //   ⚠ 只在 `dlg.ok` 时才碰 SDL：纯逻辑单测可以 `new` 一个**没建过窗口**的 DlWindow ✓
+    func bringToFront() {
+        if dlg.ok { dlg.raise() }
     }
 
     // 主界面起好线程/通道后交回本窗口（语言硬约束的接口，见文件头 ⚠）
@@ -397,7 +426,9 @@ export struct DlWindow {
                 pct = g * 100 / e
                 if pct > 100 { pct = 100 }
             }
-            table.set_cell(i, 3, _str(pct) + "%")
+            // 进度列是 progress 单元格：写**数值**就行（"37" 当百分数、"0.37" 当比例，都认 ✓
+            //   解析规则见 sdl_progress.parseProgress —— 它把非数字（如"等待中"）当 0，不抛错 ✓）
+            table.set_cell(i, 3, _str(pct))
             if i < status.len() { table.set_cell(i, 4, status[i]) }
             i = i + 1
         }
@@ -426,4 +457,22 @@ export func open_download(Array[Array[string]] jobs, Array[string] flags, string
     w.lyriconly = hasflag(flags, "lyriconly")
     w.build()
     return w
+}
+
+// ==================== 防重复打开（2026-10-07 改非模态后必须 ✓）====================
+// 已经开着 ⇒ **置前并返回 true**；调用方据此"不再开第二个" ✓
+//   为什么现在必须有：模态时主窗口根本收不到事件（点不动）⇒ 点不出第二个框；
+//   改非模态后主窗口能继续点，而 `open_download` 每次都 `new` 一个新窗口 ⇒ 点两下两个框 ✗
+// 归口在这里（而不是主界面各入口各写一遍）：三个入口（勾选 / 选中行 / 只下歌词）共用同一条规则 ✓
+//   ⚠ 纯逻辑：`open` 是窗口自己的状态 ⇒ 不建窗口也能单测（test/test_dl_window_open.leno ✓）
+//   ⚠ 不比对"模式"：已有窗口在下**歌词**、你点的是**音频** ⇒ 也只置前（那是另一批任务，抢掉更糟 ✗）
+//     说明由调用方写进状态栏 ✓
+export func reuse_if_open(DlWindow? w): bool {
+    if w is DlWindow => p {
+        if p.open {
+            p.bringToFront()
+            return true
+        }
+    }
+    return false
 }
