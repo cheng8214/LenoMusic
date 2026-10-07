@@ -117,6 +117,12 @@ export struct PlayerBar {
     float lrcCurRow = 0.0        // 当前句在这串文本行里的**中心**位置（居中基准 ✓）
     int lrcCurRows = 1           // 当前句折了几行（平滑滚动与高亮条高度都按它 ✓）
     bool wantLyricFetch = false  // ★ 面板里"立即下载歌词"被点了 ⇒ 宿主（主界面）看到就去下 ✓
+    // ---- ⑦⑧⑫⑬（2026-10-08 第二批 ✓）----
+    string lrcStage = ""         // 空档提示文案（"前奏中…"/"间奏中…" ✓；空 = 不提示 ✓）
+    float lrcSlide = 1.0         // 换歌滑入 0..1（1 = 已就位 ✓ 每拍 +0.12 ✓）
+    bool lrcPinned = false       // 钉住：点面板外**不**自动收（看歌词时点别处不该消失 ✓）
+    float pinX = -1.0            // "固定"小药丸（画布内坐标 ✓ 点击命中用 ✓）
+    float pinY = -1.0
     // 三档字体的**实测行高**（垂直居中要用它 ✓ 别再写死偏移 ✗ —— 用户实测点名"字压在框里偏下" ✓）
     //   内容随便取 ✓（行高与内容无关 ✓）；只在 build 里测一次 ✓ 不每帧量 ✗
     float lrcHBig = 0.0
@@ -392,6 +398,13 @@ export struct PlayerBar {
             })
             // 点击：先看两颗药丸（回到当前句 / 立即下载歌词 ✓），否则当"点某句 ⇒ 跳那一句" ✓
             lrcView.on_click(func(float lx, float ly, int btn) {
+                // ★ ⑬ 右上角"固定"（最先判 ✓ 它在最上面 ✓）
+                if pinY >= 0.0 and ly >= pinY and ly <= pinY + 22.0
+                   and lx >= pinX and lx <= pinX + 52.0 {
+                    lrcPinned = not lrcPinned
+                    SDL3.markFrameRedraw()
+                    return
+                }
                 if pillBackY >= 0.0 and ly >= pillBackY and ly <= pillBackY + 26.0
                    and lx >= pillBackX and lx <= pillBackX + 104.0 {
                     lrcWheel = 0.0                     // ★ ④ 回到当前句（抵消手翻的偏移 ✓）
@@ -519,6 +532,9 @@ export struct PlayerBar {
         // ⚠ 两个入口按钮都要放行：它们自己会 toggle ⇒ 否则先被这里关掉、再被按钮打开 = 永远关不掉 ✗
         if in_rect(btnList.get_x(), btnList.get_y(), btnList.get_w(), btnList.get_h(), mx, my) { return false }
         if in_rect(btnLrc.get_x(), btnLrc.get_y(), btnLrc.get_w(), btnLrc.get_h(), mx, my) { return false }
+        // ★ ⑬ 钉住（2026-10-08）：歌词开着且钉住 ⇒ 点别处**不收** ✓
+        //   （看歌词时顺手点一下搜索框/表格就消失 ✗ 很烦 ✓；要收就再点「词」按钮 ✓）
+        if lrcOpen and lrcPinned { return false }
         close_pop()                                                // 点别处 ⇒ 收起（= 失去焦点 ✓）
         return false                                               // 不吞这一击：宿主该干嘛干嘛（如点表格 ✓）
     }
@@ -534,6 +550,7 @@ export struct PlayerBar {
             lrcWheel = 0.0
             lrcSmooth = 0.0
             lrcFade = 0.0
+            lrcSlide = 0.0                      // ⑫ 换歌：整块从下方滑上来 ✓
             lastLrcLine = -999
         }
         // ② 当前句 + 句内进度 ⇒ 平滑上滚（播放中每拍都在动 ⇒ 顺手催帧 ✓）
@@ -552,6 +569,19 @@ export struct PlayerBar {
         if lrcFade < 1.0 {
             lrcFade = lrcFade + 0.16
             if lrcFade > 1.0 { lrcFade = 1.0 }
+        }
+        if lrcSlide < 1.0 {                     // ⑫ 换歌滑入（33ms 一步 ⇒ 约 0.3 秒到位 ✓）
+            lrcSlide = lrcSlide + 0.12
+            if lrcSlide > 1.0 { lrcSlide = 1.0 }
+        }
+        // ⑦ 空档提示（长前奏/长间奏 ⇒ 给一句话 ✓ 免得看着像卡住；阈值在 player.leno 里 ✓ 有单测）
+        int lcnt = q.lyric_count()
+        lrcStage = ""
+        if lcnt > 0 {
+            float pos0 = q.position()
+            int st = pl.lyric_stage(pos0, q.lyric_time(li), q.lyric_time(li + 1), li >= 0, li >= 0 and li + 1 < lcnt)
+            if st == 1 { lrcStage = "前奏中…" }
+            eif st == 2 { lrcStage = "间奏中…" }
         }
         // ⚠ 静止（暂停 + 没在换句 + 淡入结束）⇒ **不刷帧** ✓（本文件一贯纪律 ✓）
         if q.playing or changed or lrcFade < 1.0 { SDL3.markFrameRedraw() }
@@ -616,6 +646,8 @@ export struct PlayerBar {
         r.fillRoundedRect(ox, oy, cw, ch, 10.0)
         r.setColor(#E2E5EBFF)
         r.drawRoundedRect(ox + 0.5, oy + 0.5, cw - 1.0, ch - 1.0, 10.0)
+        pinX = -1.0
+        pinY = -1.0
         pillBackX = -1.0
         pillBackY = -1.0
         pillFetchX = -1.0
@@ -648,7 +680,8 @@ export struct PlayerBar {
         float centerY = oy + ch * 0.50
         float smoothRows = 0.0
         if lrcCurRows > 0 { smoothRows = lrcSmooth / _float(lrcCurRows) }
-        float shift = (lrcCurRow + smoothRows - lrcWheel) * LRC_ROW
+        //   ⚠ 末尾那项是 ⑫ 换歌滑入：从下方 18px 处升上来（`lrcSlide` 0→1 ✓ 约 0.3 秒 ✓）
+        float shift = (lrcCurRow + smoothRows - lrcWheel) * LRC_ROW - (1.0 - lrcSlide) * 18.0
         // ---- ④ 当前句：**只留左缘细竖条**，不要那条浅蓝底框 ----
         //   ⚠ 2026-10-08 用户点名去掉底框 ✗：大字 + 逐字刷色本身已经够显眼 ✓
         //     （先前那条底框还要照顾"折不折行/上下对称"⇒ 一堆偏差 ✗ 现在省了 ✓）
@@ -731,6 +764,48 @@ export struct PlayerBar {
             pillBackX = bx2 - ox
             pillBackY = by2 - oy
         }
+        // ---- ⑧ 右侧"整首位置"细指示（纯画 ✓ 手翻歌词时也知道自己在全曲哪儿 ✓）----
+        float dur = 0.0
+        float posL = 0.0
+        if p is Player => q5 {
+            dur = q5.duration()
+            posL = q5.position()
+        }
+
+        if dur > 0.5 {
+            //   ⚠ 别太淡 ✗：18% 灰压在白底上几乎看不见 ✓（实测截图里根本找不到 ✓）⇒ 加粗+加深 ✓
+            float pw = 4.0
+            float pxx = ox + cw - 10.0
+            float pyt = oy + 14.0
+            float ph = ch - 28.0
+            r.setColorFloat(0.42, 0.48, 0.58, 0.30)
+            r.fillRoundedRect(pxx, pyt, pw, ph, 2.0)
+            float pr = posL / dur
+            if pr > 1.0 { pr = 1.0 }
+            if pr < 0.0 { pr = 0.0 }
+            r.setColorFloat(0.24, 0.51, 0.86, 0.75)
+            r.fillRoundedRect(pxx, pyt, pw, ph * pr, 2.0)
+        }
+        // ---- ⑦ 空档提示（顶部居中；画在渐隐带**之后** ✓ 免得被压暗 ✗）----
+        if lrcStage != "" {
+            r.drawTextCentered(lrcFontSmall, lrcStage, ox, cw, oy + 7.0, #9AA0AEFF)
+        }
+        // ---- ⑬ "固定"药丸（右上角 ✓ 点一下 = 点别处不自动收 ✓）----
+        float pw3 = 52.0
+        float ph3 = 22.0
+        float px3 = ox + cw - pw3 - 12.0
+        float py3 = oy + 7.0
+        if lrcPinned {
+            r.setColorFloat(0.24, 0.51, 0.86, 0.22)
+            r.fillRoundedRect(px3, py3, pw3, ph3, 11.0)
+            r.drawTextCentered(lrcFontSmall, "已固定", px3, pw3, py3 + (ph3 - lrcHSmall) * 0.5, #2A6CC8FF)
+        } else {
+            r.setColorFloat(0.55, 0.62, 0.74, 0.14)
+            r.fillRoundedRect(px3, py3, pw3, ph3, 11.0)
+            r.drawTextCentered(lrcFontSmall, "固定", px3, pw3, py3 + (ph3 - lrcHSmall) * 0.5, #7A8494FF)
+        }
+        pinX = px3 - ox
+        pinY = py3 - oy
     }
 
     // 点某一句 ⇒ 跳到那一句（y 是**画布内**坐标 ✓ 由 Canvas.on_click 给 ✓）
@@ -743,7 +818,7 @@ export struct PlayerBar {
         float centerY = lrcView.get_h() * 0.50
         float smoothRows = 0.0
         if lrcCurRows > 0 { smoothRows = lrcSmooth / _float(lrcCurRows) }
-        float shift = (lrcCurRow + smoothRows - lrcWheel) * LRC_ROW
+        float shift = (lrcCurRow + smoothRows - lrcWheel) * LRC_ROW - (1.0 - lrcSlide) * 18.0
         // 反解"第几个**文本行**"：y = centerY + ri*ROW - shift ⇒ ri = (y - centerY + shift)/ROW
         int ri = _int((ly - centerY + shift) / LRC_ROW + 0.5)
         if ri < 0 or ri >= lrcRowLine.len() { return }

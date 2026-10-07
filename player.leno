@@ -62,6 +62,21 @@ export func wrap_units(string text, int maxUnits): Array[string] {
     return parts
 }
 
+// ==================== 歌词"空档"判定（纯逻辑 ✓ 能离线测）====================
+// 为什么要有：长**前奏** / 长**间奏**时，画面上"什么都没在动" ✗ ⇒ 容易以为卡住了 ✓
+//   ⇒ 到那种时候给一句话（"前奏中…" / "间奏中…"）✓
+//   ⚠ 阈值**不能太敏感** ✗：普通句间隔（2~4 秒）不该冒提示 ✓（那会一直闪 ✓ 反而烦）
+// 返回：0 = 不提示；1 = 还没到第一句（前奏）；2 = 这句唱过一阵、下一句还很远（间奏）
+export func lyric_stage(float pos, float cur_t, float next_t, bool has_cur, bool has_next): int {
+    if not has_cur {
+        if cur_t - pos > 1.5 { return 1 }        // 第一句还早 ⇒ 前奏 ✓（第一句在 0:00 时**不**提示 ✓）
+        return 0
+    }
+    if not has_next { return 0 }                 // 最后一句：不猜"什么时候结束" ✗
+    if next_t - pos > 6.0 and pos - cur_t > 2.5 { return 2 }
+    return 0
+}
+
 // 去掉扩展名（找**最后**一个点 ✓）："a.b.mp3" ⇒ "a.b"；没有点 ⇒ 原样 ✓
 export func strip_ext(string name): string {
     if name == null { return "" }

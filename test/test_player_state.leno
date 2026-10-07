@@ -197,6 +197,15 @@ main() {
     check("折行：上限过小按 4 兜底（不死循环 ✗）", pl.wrap_units("一二三", 1).len() >= 2)
     check("判宽：汉字算宽 ✓ / ASCII 算窄 ✓", pl.is_wide_cp(strings.codepoint_at("你", 0)) and not pl.is_wide_cp(strings.codepoint_at("a", 0)))
 
+    // ---- ⑬ 歌词"空档"判定（2026-10-08 ✓ 纯逻辑 ⇒ 能离线测 ✓）----
+    //   长前奏/长间奏时给一句"前奏中…/间奏中…"✓；普通句间隔**不该**冒提示 ✗（会一直闪 ✓ 反而烦）
+    check("空档：还没到第一句且还早 ⇒ 前奏(1) ✓", pl.lyric_stage(0.0, 5.0, 9.0, false, true) == 1)
+    check("空档：第一句就在 0:00 ⇒ 不提示（否则一开歌就闪 ✗）", pl.lyric_stage(0.0, 0.0, 4.0, false, true) == 0)
+    check("空档：这句刚唱 ⇒ 不提示（先让它唱 2.5 秒 ✓）", pl.lyric_stage(10.5, 10.0, 20.0, true, true) == 0)
+    check("空档：唱过一阵 + 下一句 >6 秒才来 ⇒ 间奏(2) ✓", pl.lyric_stage(13.0, 10.0, 20.0, true, true) == 2)
+    check("空档：普通句间隔（4 秒）⇒ 不提示 ✓", pl.lyric_stage(12.0, 10.0, 14.0, true, true) == 0)
+    check("空档：最后一句 ⇒ 不猜什么时候结束（0 ✓）", pl.lyric_stage(13.0, 10.0, -1.0, true, false) == 0)
+
     // ---- 清理临时文件（别在用户机器上留垃圾 ✓）----
     var left = dirs.listdir(dir)
     for left to o {
