@@ -649,15 +649,14 @@ export struct PlayerBar {
         float smoothRows = 0.0
         if lrcCurRows > 0 { smoothRows = lrcSmooth / _float(lrcCurRows) }
         float shift = (lrcCurRow + smoothRows - lrcWheel) * LRC_ROW
-        // ---- ④ 当前句的高亮条：盖住它折后的**所有**文本行，并且**上下对称** ----
-        //   ⚠ 先前 `- 15.0` + 高 `ROW-6` ⇒ 框中心比行中心**低 5px** ✗ ⇒ 字压在框里偏下 ✗（用户实测点名 ✓）
-        //   现在：先把"这几行文本行的几何中心"算出来，再让它上下各分一半 ✓
+        // ---- ④ 当前句：**只留左缘细竖条**，不要那条浅蓝底框 ----
+        //   ⚠ 2026-10-08 用户点名去掉底框 ✗：大字 + 逐字刷色本身已经够显眼 ✓
+        //     （先前那条底框还要照顾"折不折行/上下对称"⇒ 一堆偏差 ✗ 现在省了 ✓）
+        //   竖条仍按"这几行文本行的几何中心"上下居中 ✓（折行也正 ✓）
         float rowsC = lrcCurRow + (_float(lrcCurRows) - 1.0) * 0.5
         float bandH = _float(lrcCurRows) * LRC_ROW - 6.0
         float bandTop = centerY + rowsC * LRC_ROW - shift - bandH * 0.5
         float a = lrcFade
-        r.setColorFloat(0.29, 0.51, 0.86, 0.09 + 0.11 * a)
-        r.fillRoundedRect(ox + 8.0, bandTop, cw - 16.0, bandH, 8.0)
         r.setColorFloat(0.24, 0.51, 0.86, 0.30 + 0.60 * a)
         r.fillRoundedRect(ox + 10.0, bandTop + 6.0, 3.0, bandH - 12.0, 1.5)
         // ---- ②③④ 逐"文本行"画字 ----
