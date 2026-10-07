@@ -348,9 +348,15 @@ export struct PlayerBar {
             lrcView.on_draw(func(Renderer r, float ox, float oy, float cw, float ch) {
                 draw_lyrics(r, ox, oy, cw, ch)
             })
-            // 滚轮：手动翻歌词（正数 = 往**早**看 ✓）；换句时会慢慢归零 ⇒ 不永久偏着 ✓
+            // 滚轮：手动翻歌词（`lrcWheel` 越大 = 往**早**看 ✓）；换句时会慢慢归零 ⇒ 不永久偏着 ✓
+            //   ⚠⚠ 符号别凭直觉 ✗✗（2026-10-08 用户实测：先前"正好反过来"）：
+            //     框架约定 = `wheelY()` **正值是"远离用户"（往上滚 ✓）**（sdl_event:129 原话 ✓）
+            //       而"往上滚 ⇒ 看更早的内容"是框架一致的语义 ✓（四处同款 ✗
+            //       sdl_table:1439 `scrollY = scrollY - ev.wheelY()*rowH` ✓ sdl_listbox:329 ✓
+            //       sdl_edit:856 ✓ sdl_treeview:692 ✓）
+            //     ⇒ 往上滚（dy > 0）要"看更早" ⇒ `lrcWheel` **加** ✓（先前写成减 ⇒ 滚上去反而往后跑 ✗）
             lrcView.on_wheel(func(float lx, float ly, float dx, float dy) {
-                lrcWheel = lrcWheel - dy * 0.6
+                lrcWheel = lrcWheel + dy * 0.6
                 if lrcWheel > 60.0 { lrcWheel = 60.0 }
                 if lrcWheel < -60.0 { lrcWheel = -60.0 }
                 SDL3.markFrameRedraw()
