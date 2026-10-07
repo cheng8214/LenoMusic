@@ -49,7 +49,7 @@ import SDL3
 import "sdl_progress" as prgb          // 复用"画进任意矩形"的观感（与进度条控件同源 ✓）
 import "./player.leno" as pl
 use pl.Player
-use SDL3.(Event, Renderer, Label, Button, Slider, ProgressBar, Canvas, ListBox, AnchorBox, HBox, VBox, Scancode, Font)
+use SDL3.(Event, Renderer, Label, Button, Slider, ProgressBar, Canvas, ListBox, AnchorBox, HBox, VBox, Scancode, Font, SDL_Rect)
 
 // 浮层尺寸与行高（✓）
 const float LIST_H = 154.0
@@ -117,6 +117,12 @@ export struct PlayerBar {
     float lrcCurRow = 0.0        // 当前句在这串文本行里的**中心**位置（居中基准 ✓）
     int lrcCurRows = 1           // 当前句折了几行（平滑滚动与高亮条高度都按它 ✓）
     bool wantLyricFetch = false  // ★ 面板里"立即下载歌词"被点了 ⇒ 宿主（主界面）看到就去下 ✓
+    // 三档字体的**实测行高**（垂直居中要用它 ✓ 别再写死偏移 ✗ —— 用户实测点名"字压在框里偏下" ✓）
+    //   内容随便取 ✓（行高与内容无关 ✓）；只在 build 里测一次 ✓ 不每帧量 ✗
+    float lrcHBig = 0.0
+    float lrcHMid = 0.0
+    float lrcHSmall = 0.0
+
     // 面板里两个"小药丸"的位置（**画布内坐标** ✓ 与 Canvas.on_click 给的一致 ✓；不画时给负值 ✓）
     float pillBackX = -1.0
     float pillBackY = -1.0
@@ -359,6 +365,13 @@ export struct PlayerBar {
             lrcFontBig = SDL3.acquireFontAuto(17.0)
             lrcFontMid = SDL3.acquireFontAuto(14.0)
             lrcFontSmall = SDL3.acquireFontAuto(12.5)
+            // 行高**实测一次**（垂直居中全靠它 ✓）：`measureString` 是多返回值 ⇒ 必须解构 ✗
+            var[float, float](_m1, mh1) = lrcFontBig.measureString("汉Ag")
+            var[float, float](_m2, mh2) = lrcFontMid.measureString("汉Ag")
+            var[float, float](_m3, mh3) = lrcFontSmall.measureString("汉Ag")
+            lrcHBig = mh1
+            lrcHMid = mh2
+            lrcHSmall = mh3
             lrcView = SDL3.createCanvas({w: LRC_W, h: LRC_H, pad: 0, border: false, border_width: 0})
             lrcView.set_bg_color(#00000000)      // 底由我自己画（圆角白底 ✓ 见 draw_lyrics）
             lrcView.on_draw(func(Renderer r, float ox, float oy, float cw, float ch) {
@@ -620,7 +633,7 @@ export struct PlayerBar {
             r.fillRoundedRect(bx, by, bw, bh, 16.0)
             r.setColor(#C8D9F2FF)
             r.drawRoundedRect(bx + 0.5, by + 0.5, bw - 1.0, bh - 1.0, 16.0)
-            r.drawTextCentered(lrcFontMid, "立即下载歌词", ox, cw, by + 8.0, #2A6CC8FF)
+            r.drawTextCentered(lrcFontMid, "立即下载歌词", ox, cw, by + (bh - lrcHMid) * 0.5, #2A6CC8FF)
             pillFetchX = bx - ox
             pillFetchY = by - oy
             r.drawTextCentered(lrcFontSmall, "（拿不到这首的行信息时，请到搜索结果里右键「下载歌词」）", ox, cw, by + bh + 12.0, #B6BCC8FF)
@@ -636,9 +649,12 @@ export struct PlayerBar {
         float smoothRows = 0.0
         if lrcCurRows > 0 { smoothRows = lrcSmooth / _float(lrcCurRows) }
         float shift = (lrcCurRow + smoothRows - lrcWheel) * LRC_ROW
-        // ---- ④ 当前句的高亮条：盖住它折后的**所有**文本行 ----
-        float bandTop = centerY + (lrcCurRow - (_float(lrcCurRows) - 1.0) * 0.5) * LRC_ROW - shift - 15.0
+        // ---- ④ 当前句的高亮条：盖住它折后的**所有**文本行，并且**上下对称** ----
+        //   ⚠ 先前 `- 15.0` + 高 `ROW-6` ⇒ 框中心比行中心**低 5px** ✗ ⇒ 字压在框里偏下 ✗（用户实测点名 ✓）
+        //   现在：先把"这几行文本行的几何中心"算出来，再让它上下各分一半 ✓
+        float rowsC = lrcCurRow + (_float(lrcCurRows) - 1.0) * 0.5
         float bandH = _float(lrcCurRows) * LRC_ROW - 6.0
+        float bandTop = centerY + rowsC * LRC_ROW - shift - bandH * 0.5
         float a = lrcFade
         r.setColorFloat(0.29, 0.51, 0.86, 0.09 + 0.11 * a)
         r.fillRoundedRect(ox + 8.0, bandTop, cw - 16.0, bandH, 8.0)
@@ -647,7 +663,8 @@ export struct PlayerBar {
         // ---- ②③④ 逐"文本行"画字 ----
         int curChars = 0
         if p is Player => q3 { curChars = q3.lyric_text_at(cur).len() }
-        int sungTotal = _int(lrcSmooth * _float(curChars) + 0.5)   // 当前句唱到第几个字（逐字刷色 ✓）
+        // ★ 唱到第几个字用**浮点**（别取整 ✗ —— 取整就是"一跳一跳"的元凶 ✓）
+        float sungF = lrcSmooth * _float(curChars)
         int charsBefore = 0                                        // 当前句里、本行之前有多少字 ✓
         int ri = 0
         while ri < lrcRowText.len() {
@@ -658,23 +675,38 @@ export struct PlayerBar {
                 int dist = li - cur
                 if dist < 0 { dist = -dist }
                 if dist == 0 {
-                    // 当前句：整行先画"未唱"冷灰 ✓ 再从**同一 x** 画已唱的部分 ⇒ 前缀字形一致、正好盖住 ✓
-                    float y0 = y - 12.0
-                    // ⚠ `measureString` 是**多返回值** ⇒ 必须解构 ✗（`m[0]` 会报"对象不支持索引" ✓ 实测崩过）
+                    // 当前句：整行先画"未唱"冷灰 ✓ 再用**裁剪**露出左边已唱的那一段（同一 x ✓ 字形一致 ✓）
+                    //   ⚠ `measureString` 是**多返回值** ⇒ 必须解构 ✗（`m[0]` 运行期报"对象不支持索引" ✓ 踩过）
                     var[float, float](w0, _h0) = lrcFontBig.measureString(tx)
                     float tx0 = ox + (cw - w0) * 0.5
+                    float y0 = y - lrcHBig * 0.5                // ★ 按**实测行高**居中（先前写死 -12 ⇒ 偏下 ✗）
                     r.drawText(lrcFontBig, tx, tx0, y0, #A9B7CCFF)
-                    int rc = tx.len()
-                    int sung = sungTotal - charsBefore
-                    if sung > rc { sung = rc }
-                    if sung > 0 {
-                        r.drawText(lrcFontBig, tx.slice(0, sung), tx0, y0, #1B2233FF)
+                    int rch = tx.len()
+                    if rch > 0 {
+                        float here = sungF - _float(charsBefore)   // 本行"已唱多少字"（浮点 ✓ 亚字素 ✓）
+                        if here > _float(rch) { here = _float(rch) }
+                        if here > 0.0 {
+                            float wx = w0 * (here / _float(rch))
+                            if wx < 1.0 { wx = 1.0 }
+                            // ⚠ 裁剪矩形要**直接写字段**（照 sdl_renderer:231 的写法 ✓）：
+                            //   用 `if 字段 is SDL_Rect => rc` 拿到的是**值拷贝** ✗ ⇒ 写进去等于没写
+                            //   ⇒ 矩形全是 0 ⇒ 裁成空 ⇒ 已唱部分**整个消失** ✗（实测 ✓）
+                            SDL_Rect rc2 = SDL_Rect.malloc()
+                            rc2.x = _int(tx0)
+                            rc2.y = _int(oy)
+                            rc2.w = _int(wx + 1.0)
+                            rc2.h = _int(ch)
+                            r.pushClipRect(rc2.to_ptr())      // push/pop 会 flush 批次 ⇒ 裁剪对文字生效 ✓
+                            r.drawText(lrcFontBig, tx, tx0, y0, #1B2233FF)
+                            r.popClipRect()
+                            rc2.free()                        // 一次一分配一释放（框架本身也是这么干的 ✓ 不漏 ✗）
+                        }
                     }
-                    charsBefore = charsBefore + rc
+                    charsBefore = charsBefore + rch
                 } eif dist == 1 {
-                    r.drawTextCentered(lrcFontMid, tx, ox, cw, y - 9.0, #6A7183FF)
+                    r.drawTextCentered(lrcFontMid, tx, ox, cw, y - lrcHMid * 0.5, #6A7183FF)
                 } else {
-                    r.drawTextCentered(lrcFontSmall, tx, ox, cw, y - 8.0, #A2A8B5AA)
+                    r.drawTextCentered(lrcFontSmall, tx, ox, cw, y - lrcHSmall * 0.5, #A2A8B5AA)
                 }
             }
             ri = ri + 1
@@ -696,7 +728,7 @@ export struct PlayerBar {
             float by2 = oy + ch - bh2 - 10.0
             r.setColorFloat(0.55, 0.62, 0.74, 0.22)
             r.fillRoundedRect(bx2, by2, bw2, bh2, 13.0)
-            r.drawTextCentered(lrcFontSmall, "回到当前句", bx2, bw2, by2 + 6.0, #4A5566FF)
+            r.drawTextCentered(lrcFontSmall, "回到当前句", bx2, bw2, by2 + (bh2 - lrcHSmall) * 0.5, #4A5566FF)
             pillBackX = bx2 - ox
             pillBackY = by2 - oy
         }
@@ -789,6 +821,13 @@ export struct PlayerBar {
             if q.playing {
                 discAngle = discAngle + 7.0            // 33ms 一步 ⇒ 约 1.6 秒一圈 ✓
                 if discAngle >= 360.0 { discAngle = discAngle - 360.0 }
+            }
+            // ★★ 歌词的平滑：**33ms 一帧**推进（2026-10-08 用户实测"滚动/逐字都不平滑" ✗ 修 ✓）
+            //   先前只在 120ms 的 `tick()` 里推进 ⇒ 8fps 一跳一跳 ✗；这里跟着 30fps 的 animate 走 ✓
+            //   `tick_lrc` 是幂等的（换句才重建窗口 ✓），多调一次不妨事 ✓
+            if lrcOpen and (q.playing or lrcFade < 1.0) {
+                tick_lrc(q)
+                SDL3.markFrameRedraw()
             }
             // ⚠⚠ 只在"画面确实在变"时才 `markFrameRedraw` ✓：暂停 + 没悬停 + 没涟漪 ⇒ **不刷** ✓
             if q.playing or hoverEase > 0.0 or clickFx >= 0.0 { SDL3.markFrameRedraw() }
