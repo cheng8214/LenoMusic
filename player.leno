@@ -361,7 +361,10 @@ func lrc_sort(Lrc out) {
     while i < n {                                        // 按新句号顺序扫（保证组内次序不乱 ✓）
         int k = 0
         while k < out.wt_line.len() {
-            if out.wt_line[k] == i {
+            // ★★ 必须走 `remap`（老句号→新句号）✗✗ 2026-10-08 实测踩过：
+            //     `wt_line` 里存的还是**老句号**，直接拿它比新号 ⇒ 整组被分到错的行上
+            //     ⇒ 该行的时间变成别的行的几十秒 ⇒ 逐字刷色**一格都不动** ✓（用户截图就是这个 ✓）
+            if remap[out.wt_line[k]] == i {
                 nwl.add(i)
                 nws.add(out.wt_sec[k])
                 nwe.add(out.wt_end[k])
@@ -406,7 +409,12 @@ export func word_sung(Array[float] ws, Array[float] we, float p, int cnt): float
         if ws[m] <= p {
             float e = -1.0
             if m < we.len() { e = we[m] }
-            if e < 0.0 and m + 1 < n { e = ws[m + 1] }       // 没有时长 ⇒ 到下一个字起点 ✓
+            float nx = -1.0
+            if m + 1 < n { nx = ws[m + 1] }
+            // ⚠ 结束时间要**落在本字与下一字之间**才可信 ✗✗（2026-10-08 实测：酷我那个标签的
+            //   第二个字段根本不是时长 —— 是 `首值 − 2×本行首值` 的怪癖 ✓ 会给出乱七八糟的值 ✓）
+            if e <= ws[m] + 0.001 { e = nx }
+            if e > ws[m] + 0.001 and nx > ws[m] and e > nx { e = nx }
             if e <= ws[m] + 0.001 {
                 res = _float(m + 1)                          // 连下一个字也没有 ⇒ 一过起点就算唱完 ✓
             } else if p >= e {
@@ -477,6 +485,8 @@ export struct Player {
     Lrc lrc
     float lrcShift = 0.0             // 歌词整体偏移（秒；正 = 歌词延后 ✓ 默认 0 ✓ 见 lyric_pos）
     string lrcFor = ""               // 已经读的是**哪个歌词文件**（路径 ✓ 变了才重读 ✗ 见 ensure_lrc）
+    int lrcMtime = -1                // 上次读的那份的**修改时间**（文件被覆盖/晚到时靠它发现 ✓）
+    int lrcSize = -1                 // 以及**大小**（mtime 秒级粒度、同秒覆盖会漏 ✗ 靠它兜住 ✓）
     string scanDir = ""              // 最近一次 `scan` 的目录（试听态"去输出目录找同名歌词"要用 ✓）
     bool lrcTried = false
 
@@ -768,20 +778,30 @@ export struct Player {
     //     这两种情况，用"哪首"当键都判不出来 ✗
     func ensure_lrc() {
         string p = lrc_path()
-        bool need = (p != lrcFor) or (not lrcTried)
-        // ★ 还差一条（2026-10-08）：上次读时**文件还没出现**（歌词常常比歌晚到 ✓，
-        //   比如试听的后台整首下载：音频先落盘、.lrc 随后 ✓）⇒ 一出现就补读 ✓
-        //   没有它 ⇒ 歌词明明下下来了，画布也一直停在"没有歌词" ✗（用户实测过 ✓）
-        if not need and lrc.texts.len() == 0 and p != "" {
+        // ★★ 文件**变了**也要重读（2026-10-08 实测踩到）：只按"路径"判断是不够的 ✗
+        //    场景：重新「下载歌词」会把同名文件**覆盖**成逐字版 ✓ 而路径没变
+        //    ⇒ 不重读就一直用着旧的**纯 LRC**（没有逐字时间 ⇒ 卡拉OK一格格不动 ✓ 用户截图就是这个 ✓）
+        //    顺带也覆盖了"歌词比歌晚到"（首次出现 ⇒ mtime 由 -1 变成真值 ⇒ 也是"变了" ✓）
+        int mt = -1
+        int sz = -1
+        if p != "" {
             try {
-                if files.exists(p) { need = true }
+                var st = dirs.stat(p)
+                if st.exists {
+                    mt = st.mtime
+                    sz = st.size                      // ⚠ mtime 只有**秒级**粒度 ⇒ 同一秒内被覆盖会漏 ✗ 再叠一层大小 ✓
+                }
             } catch e {
-                need = false                   // 查不到就是没有（不崩 ✓）
+                mt = -1
+                sz = -1
             }
         }
+        bool need = (p != lrcFor) or (not lrcTried) or (mt != lrcMtime) or (sz != lrcSize)
         if need {
             lrcFor = p
             lrcTried = true
+            lrcMtime = mt
+            lrcSize = sz
             lrc = lrc_from_text("")
             if p != "" {
                 try {
@@ -839,6 +859,12 @@ export struct Player {
         if ws.len() > 0 { return word_sung(ws, we, p, cnt) }
         // ② 退回线性（近似，但至少在动 ✓）
         return lyric_progress() * _float(cnt)
+    }
+
+    // 这首歌词里有多少条"逐字时间"（0 = 纯 LRC ⇒ 会退回线性 ✓ 界面/自检都能读 ✓）
+    func lyric_word_count(): int {
+        ensure_lrc()
+        return lrc.wt_line.len()
     }
 
     // 歌词总句数（界面按它裁可见范围 ✓）

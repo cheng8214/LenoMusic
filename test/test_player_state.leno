@@ -218,6 +218,22 @@ main() {
     var e3 = pl.lrc_from_text("[00:10.00]普通歌词\n")
     check("逐字：普通 .lrc ⇒ 逐字段为空（⇒ 渲染自动退回线性 ✓）", e3.wt_line.len() == 0)
 
+    //   ★ **歌词文件被覆盖后要重读**（2026-10-08 用户实测："重新下过歌词，却一点逐字都没有" ✓）
+    //     原因：只按"路径"判缓存 ⇒ 同名文件被换成逐字版也不会重读 ✗
+    string tdir3 = dirs.join(_tmpdir(), "leno_lrc_test3")
+    dirs.mkdir_p(tdir3)
+    string nm3 = "覆盖测 - 歌手"
+    files.write(dirs.join(tdir3, nm3 + ".mp3"), "x")
+    files.write(dirs.join(tdir3, nm3 + ".lrc"), "[00:01.00]普通一句\n")          // 先给"纯 LRC"版
+    Player s4 = new Player()
+    s4.scan(tdir3)
+    check("覆盖重读：先读到纯 LRC（逐字条 = 0 ✓）", s4.lyric_count() == 1 and s4.lyric_word_count() == 0)
+    //   再把它**覆盖**成逐字版（同名同路径 ✓ 只有内容变）
+    files.write(dirs.join(tdir3, nm3 + ".lrc"), "[00:01.00]<1000,200>逐<1300,200>字<1600,200>版\n")
+    check("覆盖重读：文件换了 ⇒ **自动重读**（逐字条 = 3 ✓）", s4.lyric_word_count() == 3 and s4.lyric_text_at(0) == "逐字版")
+    files.delete(dirs.join(tdir3, nm3 + ".mp3"))
+    files.delete(dirs.join(tdir3, nm3 + ".lrc"))
+
     //   定位（纯函数 ✓）：字内按时间推进；**字间空档不推进**（这条就是"真同步" ✓）
     check("逐字：字内过半 ⇒ 0.5 个字 ✓", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 10.25, 2) * 100.0) == 50)
     check("逐字：**字间空档不推进**（10.6 秒仍是 1 个字 ✓）", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 10.6, 2) * 100.0) == 100)
