@@ -30,7 +30,6 @@ import files
 import "web_net" as net
 import "web_gzip" as gzip
 import "web_charset" as charsets
-import "Crypto" as crypto
 
 use net.(Response, HttpClient)
 use gzip.GzipResult
@@ -43,15 +42,17 @@ const LYRIC_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (
 // ==================== ① 参数加密 ====================
 export func lyricparams(string songid): string {
     string plain = "user=12345,web,web,web&requester=localhost&req=1&rid=MUSIC_" + songid
-    Array[int] key = crypto.str_to_bytes(LYRIC_KEY)
-    Array[int] data = crypto.str_to_bytes(plain)
+    Array[int] key = strings.to_bytes(LYRIC_KEY)
+    Array[int] data = strings.to_bytes(plain)
     Array[int] mixed = []
     int i = 0
     while i < data.len() {
         mixed.add(data[i] ^ key[i % key.len()])
         i = i + 1
     }
-    return crypto.bytes_to_b64(mixed).replace("+", "%2B")
+    // base64 改用核心标准库（2026-10-07）；**仍旧只转义 '+'、不改成 URL-safe 字母表** ——
+    // 服务端按标准字母表解码，`-_` 未必认（协议相关，不做"顺手优化"）
+    return strings.to_base64(strings.from_bytes(mixed)).replace("+", "%2B")
 }
 
 // ==================== ② 响应解码 ====================

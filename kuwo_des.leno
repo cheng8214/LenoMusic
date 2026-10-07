@@ -12,7 +12,6 @@
 //
 // 校验：金标向量来自 Python 侧 kuwoutils.py 的实际输出，见文件末尾注释。
 import strings
-import "Crypto" as crypto
 
 const MASK32 = 0xFFFFFFFF
 const MASK64 = 0xFFFFFFFFFFFFFFFF
@@ -184,7 +183,7 @@ func appendbytes(Array[int] out, int value) {
 
 // 8 字节小端合成（对应 int.from_bytes(key, 'little')）
 func keyfromstring(string key): int {
-    Array[int] bs = crypto.str_to_bytes(key)
+    Array[int] bs = strings.to_bytes(key)
     int value = 0
     int i = 0
     while i < 8 and i < bs.len() {
@@ -196,8 +195,9 @@ func keyfromstring(string key): int {
 
 // ==================== 对外：encryptquery ====================
 // 与 Python 的 KuwoMusicClientUtils.encryptquery 等价
+// base64 用**核心标准库**（2026-10-07）：`crypto.bytes_to_b64` 已随 base64 归口 `strings` 一并删除
 export func encryptquery(string query): string {
-    return crypto.bytes_to_b64(cryptbytes(crypto.str_to_bytes(query), 0))
+    return strings.to_base64(strings.from_bytes(cryptbytes(strings.to_bytes(query), 0)))
 }
 
 // 金标向量（Python 侧 kuwoutils.py 实际输出，移植后应逐字节一致）：
