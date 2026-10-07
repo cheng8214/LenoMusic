@@ -32,7 +32,7 @@ import strings
 import threads
 import "./dl_engine.leno" as eng
 
-use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, CheckBox, Table, ProgressBar, HBox, VBox, Edit, SpinBox, Scancode)
+use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, CheckBox, Table, ProgressBar, HBox, VBox, Edit, SpinBox, Separator, Scancode)
 
 // ==================== 表格列 ← 歌曲行字段（见 dl_engine 的 SONG_ROW 注释） ====================
 // 行：0 id / 1 歌名 / 2 歌手 / 3 专辑 / 4 时长 / 5 格式 / 6 大小 / 7 字节
@@ -826,10 +826,14 @@ struct MusicDlApp {
         srcRow = SDL3.createHBox({h: 30, padX: 0, padY: 0, spacing: 10})
         srcRow.add(SDL3.createLabel({text: "音源：", font_size: 13}), {grow: 0, shrink: 0, align: 1})
         buildSources()
+        // ★ 弹性空隙放在这里 ⇒「输出目录 + 路径 + 选择目录」整组被推到**行右侧**、
+        //   贴着"选择目录"按钮（原来空隙在路径标签上，把它顶到了复选框旁边 ✗）
+        srcRow.add(SDL3.createLabel({text: ""}), {grow: 1, shrink: 0, align: 1})
         srcRow.add(SDL3.createLabel({text: "输出目录：", font_size: 13}), {grow: 0, shrink: 0, align: 1})
         dirLbl = SDL3.createLabel({text: outdir, font_size: 12, truncate: 1, max_w: 320.0})
         dirLbl.set_tip(outdir)
-        srcRow.add(dirLbl, {grow: 1, shrink: 1, align: 1})
+        // grow:0（不再抢剩余空间） + shrink:1（窗口变窄时由它让位 ⇒ 配合 max_w 走省略号）
+        srcRow.add(dirLbl, {grow: 0, shrink: 1, align: 1})
         dirBtn = SDL3.createButton({w: 88, h: 28, text: "选择目录", font_size: 13})
         dirBtn.on_click(func() { onPickDir() })
         srcRow.add(dirBtn, {grow: 0, shrink: 0, basis: 88, align: 3})
@@ -847,13 +851,8 @@ struct MusicDlApp {
         dlSelBtn.on_click(func() { onDownloadSelected() })
         dlSelBtn.set_enabled(false)
         row3.add(dlSelBtn, {grow: 0, shrink: 0, basis: 120, align: 3})
-        selAllBtn = SDL3.createButton({w: 70, h: 30, text: "全选", font_size: 13})
-        selAllBtn.on_click(func() { table.check_all(); updateCount(); SDL3.markFrameRedraw() })
-        row3.add(selAllBtn, {grow: 0, shrink: 0, basis: 70, align: 3})
-        selNoneBtn = SDL3.createButton({w: 70, h: 30, text: "全不选", font_size: 13})
-        selNoneBtn.on_click(func() { table.uncheck_all(); updateCount(); SDL3.markFrameRedraw() })
-        row3.add(selNoneBtn, {grow: 0, shrink: 0, basis: 70, align: 3})
-        // 歌词开关：默认开。只影响"下载"类动作（"只下歌词"是右键菜单里的独立入口）
+        // 歌词开关：紧跟在两个下载按钮后面（它是"下载"的选项，语义上属于下载这一组），
+        // 后面用一条竖线把"下载动作"与"表格选择"分开，避免三类控件挤成一团（2026-10-07 调整 ✓）
         lyricBox = SDL3.createCheckBox({text: "同时下载歌词", checked: true, font_size: 13})
         lyricBox.set_tip("下载音频时顺带存一份同名 .lrc（酷我官方歌词，含译文行）")
         lyricBox.on_change(func(bool v) {
@@ -861,6 +860,17 @@ struct MusicDlApp {
             SDL3.markFrameRedraw()
         })
         row3.add(lyricBox, {grow: 0, shrink: 0, align: 1})
+        // 分组间隔：本来想用一条竖向 Separator，但**实测 Separator 放进 HBox 里不渲染**
+        //   （thickness/color/alpha/basis/align 各组合都试过，仍不可见 ⇒ 疑似布局没给它非零高度）
+        //   ⇒ 改用"嵌套 HBox + 左内边距"制造视觉间隔，效果等价且可靠 ✓
+        var selGroup = SDL3.createHBox({h: 32, padX: 14, padY: 0, spacing: 8})
+        selAllBtn = SDL3.createButton({w: 70, h: 30, text: "全选", font_size: 13})
+        selAllBtn.on_click(func() { table.check_all(); updateCount(); SDL3.markFrameRedraw() })
+        selGroup.add(selAllBtn, {grow: 0, shrink: 0, basis: 70, align: 3})
+        selNoneBtn = SDL3.createButton({w: 70, h: 30, text: "全不选", font_size: 13})
+        selNoneBtn.on_click(func() { table.uncheck_all(); updateCount(); SDL3.markFrameRedraw() })
+        selGroup.add(selNoneBtn, {grow: 0, shrink: 0, basis: 70, align: 3})
+        row3.add(selGroup, {grow: 0, shrink: 0, align: 3})
         countLbl = SDL3.createLabel({text: "已选 0 / 0 首", font_size: 13})
         row3.add(countLbl, {grow: 1, shrink: 1, align: 2})
         root.add(row3, {grow: 0, shrink: 0, align: 3})
