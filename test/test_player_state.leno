@@ -13,6 +13,7 @@ import dirs
 import files
 import strings
 import "../kuwo_lyric.leno" as kwo       // 只为测逐字包的**解码**（内层那一步 ✓）
+import "../dl_engine.leno" as eng        // 测"找本地文件"（定位/删除要用 ✓）
 use pl.Player
 
 var fails = 0
@@ -233,6 +234,22 @@ main() {
     check("覆盖重读：文件换了 ⇒ **自动重读**（逐字条 = 3 ✓）", s4.lyric_word_count() == 3 and s4.lyric_text_at(0) == "逐字版")
     files.delete(dirs.join(tdir3, nm3 + ".mp3"))
     files.delete(dirs.join(tdir3, nm3 + ".lrc"))
+
+    // ---- ⑰ 找本地文件（★★★ 定位/删除要用 ✓ 2026-10-08）----
+    //   为什么按"前缀扫目录"而不是"按格式列拼文件名"：落盘扩展名由**服务端给的格式**定 ✓ 拼不准 ✗
+    string tdir5 = dirs.join(_tmpdir(), "leno_find_test")
+    dirs.mkdir_p(tdir5)
+    files.write(dirs.join(tdir5, "找歌 - 歌手.mp3"), "x")
+    files.write(dirs.join(tdir5, "找歌 - 歌手.lrc"), "[00:00.00]x\n")
+    files.write(dirs.join(tdir5, "别的 - 歌手.flac"), "x")
+    Array[string] row5 = ["id", "找歌", "歌手", "专辑", "3:00", "mp3", "1"]
+    string got5 = eng.find_local(row5, tdir5)
+    check("找本地：按「歌名 - 歌手」前缀找到音频 ✓", got5 != "" and got5.slice(got5.len() - 4, got5.len()) == ".mp3")
+    check("找本地：同名 .lrc **不算**（那是歌词 ✓）", eng.find_local(["id", "没这首", "歌手"], tdir5) == "")
+    check("找本地：目录不存在 ⇒ 空串（不崩 ✓）", eng.find_local(row5, dirs.join(_tmpdir(), "根本没有这个目录")) == "")
+    files.delete(dirs.join(tdir5, "找歌 - 歌手.mp3"))
+    files.delete(dirs.join(tdir5, "找歌 - 歌手.lrc"))
+    files.delete(dirs.join(tdir5, "别的 - 歌手.flac"))
 
     //   ★ 逐字数据的**校验**（2026-10-08 ✓ 实测酷我这份数据很脏 ⇒ 逐句判、不可信就退回线性 ✓）
     //     为什么必须校验：脏句会让刷色"卡在第一个字"✗（用户实测：第一句都唱完了、逐字还在开头 ✓）

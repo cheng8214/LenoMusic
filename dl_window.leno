@@ -24,6 +24,7 @@
 //     （原先每点一次"下载"就 `new` 一个 DlWindow + 一个新窗口 ⇒ 点两下就是两个框 ✗）
 import "SDL3" as SDL3
 import dirs
+import files
 import strings
 import threads
 import "./dl_engine.leno" as eng
@@ -39,6 +40,42 @@ func hasflag(Array[string] flags, string name): bool {
 
 // 打开目录（资源管理器/文件管理器定位）。失败无处可报 ⇒ 返回 bool 让调用方提示
 // （主界面的右键菜单"打开下载目录"也用这一个实现 ⇒ 不两处漂移 ✓）
+// 在资源管理器里**定位**（选中）这个文件 ✓
+//   ⚠⚠ 不能拿 `openfolder` 那套 ✗：Windows 上 `cmd /c start "" "<文件>"` 会用**默认程序打开它** ✗
+//      （用户实测点名 ✓）⇒ 必须走 `explorer /select,"<文件>"` ✓
+export func reveal(string path): bool {
+    if path == "" { return false }
+    if not files.exists(path) { return false }
+    string cmd = ""
+    if _os() == "windows" {
+        cmd = "explorer /select,\"" + path + "\""
+    } else if _os() == "macos" {
+        cmd = "open -R \"" + path + "\""
+    } else {
+        // Linux：没有统一的"选中"⇒ 退而打开它所在目录 ✓（自己截最后一段分隔符 ✓ 不依赖 dirname ✓）
+        string dir = path
+        int i = path.len() - 1
+        while i >= 0 {
+            string ch = path.slice(i, i + 1)
+            if ch == "/" or ch == "\\" {
+                dir = path.slice(0, i)
+                i = -1
+            } else {
+                i = i - 1
+            }
+        }
+        if dir == "" { dir = "/" }
+        cmd = "xdg-open \"" + dir + "\""
+    }
+    bool ok = true
+    try {
+        _exec(cmd)
+    } catch e {
+        ok = false
+    }
+    return ok
+}
+
 export func openfolder(string path): bool {
     if path == "" { return false }
     string cmd = ""

@@ -476,6 +476,30 @@ func hasflag(Array[string] flags, string name): bool {
 //     ② 插值 `$"{e}"`         —— 就是 msg 全文（**多行**：首行是原因，后面是 [位置] 与 [调用栈]）
 //     ③ 直接取字段 `e.line` / `e.file`
 //   这里取②的**首行**：塞进状态栏一行最合适；要看位置/栈，用 `print(e)` 或取 `e.msg`。
+// 本地有没有这一首（找到 ⇒ 完整路径；没有 ⇒ ""）—— 给界面的"定位 / 删除"用 ✓
+//   ⚠ 为什么不"按搜索行的格式列拼一个确切文件名" ✗：落盘的扩展名由**服务端给的格式**定
+//     （`realext` ✓ 见 dl_entry_shard 里那段），跟搜索行里的"格式"列**不一定一致** ⇒ 拼名字会漏 ✗
+//   ⇒ 按"<歌名> - <歌手>.*"扫目录前缀匹配 ✓（顺手排掉 .lrc ✓ 那是歌词不是音频 ✓）
+export func find_local(Array[string] job, string outdir): string {
+    if job.len() <= F_ARTIST { return "" }
+    if not dirs.exists(outdir) { return "" }
+    string base = kuwo.sanitizefilename(job[F_NAME] + " - " + job[F_ARTIST])
+    if base == "" { return "" }
+    var names = dirs.listdir(outdir)
+    for names to nm {
+        string s = _str(nm)
+        if s.len() > base.len() + 1 {
+            if s.slice(0, base.len()) == base {
+                if s.slice(s.len() - 4, s.len()) != ".lrc" {
+                    string full = dirs.join(outdir, s)
+                    if files.exists(full) { return full }
+                }
+            }
+        }
+    }
+    return ""
+}
+
 export func errmsg(any e): string {
     string t = $"{e}"
     if t == "" { return "未知错误" }
