@@ -4,6 +4,11 @@
 //   · dl_engine 复用 kuwo_core.leno（CLI 同款）+ kuwo_des.leno（官方接口 DES 加密）
 //   · 本文件只管界面与交互；跨线程的数据一律是**纯字符串数组**（见 dl_engine 头部约定）
 //
+// 分层（2026-10-07 把下载窗口拧出 ⇒ 三个文件各管一层 ✓）
+//   dl_engine.leno    ← 纯逻辑：网络 / 取直链 / 落盘 / 行格式（不 import SDL3 ⇒ 可单测 ✓）
+//   dl_window.leno    ← 下载窗口：对话框 + 任务表 + 总进度 + 开始/暂停/取消/打开目录 ✓
+//   musicdl_gui.leno  ← **本文件**：主界面 + "要下哪些歌"的判定 + 起线程（见下面 ⚠）
+//
 // 界面结构
 //   Window
 //   ├── TitleBar（自绘标题栏）
@@ -15,13 +20,18 @@
 //       ├── ProgressBar（搜索/下载的"忙"指示）
 //       └── HBox 状态栏：状态文字 + 操作提示
 //
-//   下载对话框（模态）：任务表 + 总进度 + 当前任务 + 开始/暂停/取消/打开目录/关闭
+//   下载对话框（模态）：**本体在 dl_window.leno**（任务表 + 总进度 + 当前任务 + 五个按钮）
+//     本文件只做三件事：判定"要下哪些歌" → 把数据与状态栏交给它 → 每 120ms 调它的 tick() ✓
 //
 // 线程模型（照 cleaner_master / cache_cleaner 的套路）
 //   搜索：threads.start(search_worker, ...) + channel 回传命中数 + 120ms 定时器排空
-//   下载：threads.start(dl_worker, ...) + channel 回传逐片进度 + 命令通道做暂停/取消
+//   下载：**多首歌并行** —— threads.start(dl_worker_shard, ..., shard, nshards) × N 个 worker
+//         （N = dl_engine.dl_workers(任务数)，各领一份 i % N == shard 的任务）+ 共用一个 channel
+//         回传逐片进度（消息带全量下标）+ **每个 worker 一条**命令通道做暂停/取消 ✓
 //   worker 必须是**本文件的具名全局函数**（理由见下方包装函数的注释），UI 线程只做
 //   "排空 channel + 刷控件" ✓
+//   ⚠ 下载窗口拆出去后这条约束照旧成立：**起线程的仍是本文件**（dl_worker_shard 也留在本文件），
+//     窗口只置一个 `wantStart` 意图、由本文件的定时器接手起线程（详见 dl_window.leno 文件头 ⚠）
 //
 // 运行：cd D:\CLeno\Leno 后
 //   build\leno.exe leno_gui\应用\音乐下载器\musicdl_gui.leno
@@ -31,19 +41,16 @@ import dirs
 import strings
 import threads
 import "./dl_engine.leno" as eng
+import "./dl_window.leno" as dlw
+import "./dl_settings.leno" as dlset        // 设置：读/写/钳位（纯逻辑 ⇒ 能被 test/ 单测 ✓）
+import "./dl_settings_win.leno" as dlswin    // "设置"弹窗（SDL3）—— 标题栏右侧 ⚙ 打开 ✓
 
 use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, CheckBox, Table, ProgressBar, HBox, VBox, Edit, SpinBox, Separator, Scancode)
+use dlw.DlWindow
+use dlset.DlSettings
 
-// ==================== 表格列 ← 歌曲行字段（见 dl_engine 的 SONG_ROW 注释） ====================
-// 行：0 id / 1 歌名 / 2 歌手 / 3 专辑 / 4 时长 / 5 格式 / 6 大小 / 7 字节
-const int F_ID = 0
-const int F_NAME = 1
-const int F_ARTIST = 2
-const int F_ALBUM = 3
-const int F_DURATION = 4
-const int F_EXT = 5
-const int F_SIZETEXT = 6
-const int F_BYTES = 7
+// 歌曲行的列下标（F_ID / F_NAME / …）已收敛到 dl_engine.leno 的 `export const` ⇒ 用 `eng.F_xxx` ✓
+// （原先本文件自己复制了一份；下载窗口再拆一个文件就会变成三份 ⇒ 单一事实来源 ✓）
 
 // ==================== 线程入口包装（必须写在**本文件**里！） ====================
 // ⚠ 实测踩坑：`threads.start(eng.search_entry, ...)` 会**当场**抛错
@@ -56,36 +63,10 @@ func search_worker(Array[string] srcids, string keyword, int limit, any ch): Arr
     return eng.search_entry(srcids, keyword, limit, ch)
 }
 
-func dl_worker(Array[Array[string]] jobs, string outdir, any ch, any cmd, Array[string] flags): Array[string] {
-    return eng.dl_entry(jobs, outdir, ch, cmd, flags)
-}
-
-// flags 里有没有某项（与 dl_engine 的同名私有函数各管各的，不跨模块）
-func hasflag(Array[string] flags, string name): bool {
-    for flags to f {
-        if f == name { return true }
-    }
-    return false
-}
-
-// 打开目录（资源管理器/文件管理器定位）。失败无处可报 ⇒ 返回 bool 让调用方提示
-func openfolder(string path): bool {
-    if path == "" { return false }
-    string cmd = ""
-    if _os() == "windows" {
-        cmd = "cmd /c start \"\" \"" + path + "\""
-    } else if _os() == "macos" {
-        cmd = "open \"" + path + "\""
-    } else {
-        cmd = "xdg-open \"" + path + "\""
-    }
-    bool ok = true
-    try {
-        _exec(cmd)
-    } catch e {
-        ok = false
-    }
-    return ok
+// ⚠ 下载窗口（dl_window.leno）的"开始"也走这个入口 —— 起线程的必须还是本文件 ✓
+//   shard / nshards = 本 worker 领第几份 / 共几份（**多首歌并行**，切法见 dl_engine.dl_entry_shard ✓）
+func dl_worker_shard(Array[Array[string]] jobs, string outdir, any ch, any cmd, Array[string] flags, int shard, int nshards): Array[string] {
+    return eng.dl_entry_shard(jobs, outdir, ch, cmd, flags, shard, nshards)
 }
 
 // ==================== 主结构 ====================
@@ -125,34 +106,21 @@ struct MusicDlApp {
     string searchErr = ""            // 搜索失败原因（worker 报错时记下，别让"没搜到结果"盖掉真因 ✓）
     int busyPhase = 0                // 进度条脉冲相位（"忙"指示）
 
-    // ===== 下载对话框状态（控件引用在弹窗里赋值，关闭时置 null） =====
-    bool dlOpen = false
-    bool dlClosing = false
-    bool dlStarted = false
-    bool dlPaused = false
-    bool dlFinished = false
-    bool dlCancelling = false
-    int dlDone = 0
-    int dlFail = 0
-    Array[Array[string]] dlJobs
-    Array[string] dlStatus           // 每任务状态文字
-    Array[int] dlGot                 // 每任务已下字节
-    Array[int] dlExp                 // 每任务期望字节
-    Thread? dlThread = null
-    Channel? dlCh = null
-    Channel? dlCmd = null
-    Table? dlTable = null
-    ProgressBar? dlBar = null
-    Label? dlInfo = null
-    Label? dlStat = null
-    Array[string] dlFlags             // 本轮任务标志（"lyric" / "lyriconly"）
-    int dlLrc = 0                     // 本轮已拿到的歌词数
+    // ===== 下载窗口（2026-10-07 拧成独立模块 dl_window.leno ✓）=====
+    //   窗口自带它的控件与每任务进度状态；本文件只持有它、每 120ms 调一次 tick() ✓
+    //   从外面只碰三个字段：`jobs` / `flags`（交给它）与 `wantStart`（见 dlStartIfWanted ✓）
+    DlWindow? dl = null
+
+    // ===== 设置（dl_settings.leno 纯逻辑 + dl_settings_win.leno 弹窗 ✓）=====
+    //   `workers` = 并行下载线程数（**多首歌同时下**）；启动时读一次，改设置后立刻重读 ✓
+    //   入口是**标题栏里那个齿轮动作按钮**（actions: [{id:"settings", icon:"gear"}] ✓）
+    DlSettings cfg
 
     // ==================== 数据辅助 ====================
 
     // 歌曲行 → 表格行（表格列顺序见 setupUI 里的 headers）
     func tablerow(Array[string] s): Array[string] {
-        return ["", s[F_NAME], s[F_ARTIST], s[F_ALBUM], eng.fmtduration(_int(s[F_DURATION])), s[F_EXT], s[F_SIZETEXT]]
+        return ["", s[eng.F_NAME], s[eng.F_ARTIST], s[eng.F_ALBUM], eng.fmtduration(_int(s[eng.F_DURATION])), s[eng.F_EXT], s[eng.F_SIZETEXT]]
     }
 
     func fillTable() {
@@ -189,7 +157,7 @@ struct MusicDlApp {
         Array[int] checked = table.get_checked_rows()
         int bytes = 0
         for checked to i {
-            if i >= 0 and i < songs.len() { bytes = bytes + _int(songs[i][F_BYTES]) }
+            if i >= 0 and i < songs.len() { bytes = bytes + _int(songs[i][eng.F_BYTES]) }
         }
         countLbl.set_text("已选 " + _str(checked.len()) + " / " + _str(songs.len()) + " 首 · 合计约 " + strings.fmt_size(bytes))
         dlCheckedBtn.set_enabled(checked.len() > 0)
@@ -266,7 +234,10 @@ struct MusicDlApp {
     func onTick() {
         try {
             pollSearch()
-            pollDownload()
+            dlStartIfWanted()          // 下载窗口点了"开始" ⇒ 由**本文件**起线程（语言硬约束 ✓）
+            if dl is DlWindow => w {
+                if w.open { w.tick() }  // 排空下载通道 + 刷新窗口（窗口本体在 dl_window.leno ✓）
+            }
             pulseBusy()
         } catch e {
             stateLbl.set_text("刷新出错：" + eng.errmsg(e))
@@ -315,7 +286,19 @@ struct MusicDlApp {
         finishSearch()
     }
 
-    // ==================== 下载：启动 / 进度 / 对话框 ====================
+    // ==================== 下载：判定"要下哪些歌" + 起线程 ====================
+    // 窗口本体（任务表 / 总进度 / 按钮 / 每任务状态）已在 dl_window.leno；本文件只做四件事：
+    //   ① "要下哪些歌"的判定（勾选 / 选中行 / 只下歌词 —— 属业务策略 ✓）
+    //   ② 输出目录先建（write 到不存在的目录会抛异常，见 docs/移植音乐下载器实录与待办.md B2）
+    //   ③ threads.start 起线程（worker 入口必须与本调用同文件 ⇒ 见 dlStartIfWanted ✓）
+    //   ④ 把数据与状态栏交给窗口：`dl = dlw.open_download(...)`
+
+    // 本轮要不要带歌词：看工具栏那个勾选框（默认勾上）
+    func downloadflags(): Array[string] {
+        Array[string] flags = []
+        if lyricBox.is_checked() { flags.add("lyric") }
+        return flags
+    }
 
     func startDownload(Array[Array[string]] jobs, Array[string] flags) {
         if jobs.len() == 0 {
@@ -323,24 +306,8 @@ struct MusicDlApp {
             SDL3.markFrameRedraw()
             return
         }
-        // 目录必须先建：write 到不存在的目录会抛异常（见 docs/移植音乐下载器实录与待办.md B2）
-        if not dirs.exists(outdir) {
-            try {
-                dirs.mkdir_p(outdir)
-            } catch e {
-                stateLbl.set_text("无法创建输出目录：" + outdir)
-                SDL3.markFrameRedraw()
-                return
-            }
-        }
-        showDownloadDialog(jobs, flags)
-    }
-
-    // 本轮要不要带歌词：看工具栏那个勾选框（默认勾上）
-    func downloadflags(): Array[string] {
-        Array[string] flags = []
-        if lyricBox.is_checked() { flags.add("lyric") }
-        return flags
+        if not ensuredir() { return }
+        dl = dlw.open_download(jobs, flags, outdir, stateLbl, cfg.workers)   // 并行上限来自**设置** ✓
     }
 
     func onDownloadChecked() {
@@ -363,16 +330,8 @@ struct MusicDlApp {
             SDL3.markFrameRedraw()
             return
         }
-        if not dirs.exists(outdir) {
-            try {
-                dirs.mkdir_p(outdir)
-            } catch e {
-                stateLbl.set_text("无法创建输出目录：" + outdir)
-                SDL3.markFrameRedraw()
-                return
-            }
-        }
-        showDownloadDialog(jobs, ["lyriconly"])
+        if not ensuredir() { return }
+        dl = dlw.open_download(jobs, ["lyriconly"], outdir, stateLbl, cfg.workers)   // 同上：上限来自设置 ✓
     }
 
     func onLyricSelected() {
@@ -384,317 +343,38 @@ struct MusicDlApp {
         onDownloadLyricOnly(jobs)
     }
 
-    // —— 下载对话框（模态）——
-    func showDownloadDialog(Array[Array[string]] jobs, Array[string] flags) {
-        bool lyriconly = hasflag(flags, "lyriconly")
-        string title = if lyriconly then "下载歌词" else "下载"
-        int dw = 820
-        int dh = 440
-        int tbH = SDL3.DIALOG_TB_H
-        var dlg = SDL3.createDialogWindow({title: title, w: dw, h: tbH + dh})
-        TitleBar tb = SDL3.dialogTitleBar(dlg, title)
-        var droot = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, padX: 16, padY: 14, spacing: 8})
-        dlg.setRootAt(droot, 0, tb.get_h())
-
-        // 重置本轮状态
-        dlOpen = true
-        dlClosing = false
-        dlStarted = false
-        dlPaused = false
-        dlFinished = false
-        dlCancelling = false
-        dlDone = 0
-        dlFail = 0
-        dlLrc = 0
-        dlJobs = jobs
-        dlFlags = flags
-        dlStatus = []
-        dlGot = []
-        dlExp = []
-        int totalExp = 0
-        Array[Array[string]] rows = []
-        for jobs to j {
-            int exp = _int(j[F_BYTES])
-            if exp <= 0 { exp = 1 }
-            dlGot.add(0)
-            dlExp.add(exp)
-            dlStatus.add("等待中")
-            totalExp = totalExp + exp
-            // "只下歌词"模式：格式/大小那两列没有意义 ⇒ 显示 "-"（歌词约几十 KB，不值得标）
-            rows.add([eng.songlabel(j), if lyriconly then "-" else j[F_EXT], if lyriconly then "-" else j[F_SIZETEXT], "0%", "等待中"])
-        }
-
-        Table dt = SDL3.createTable({
-            headers: ["歌曲", "格式", "大小", "进度", "状态"],
-            col_widths: [330.0, 60.0, 90.0, 64.0, 220.0],
-            aligns: [0, 1, 2, 1, 0],
-            header_aligns: [0, 1, 2, 1, 0],
-            zebra: true, row_h: 26, header_h: 28, font_size: 13,
-            sortable: false, col_reorder: false, resizable: false,
-            empty_text: "没有任务"
-        })
-        dt.set_rows(rows)
-        dlTable = dt
-        droot.add(dt, {grow: 1, shrink: 1, align: 3})
-
-        ProgressBar bar = SDL3.createProgressBar({h: 16, show_text: true, font_size: 12})
-        bar.set_value(0.0)
-        dlBar = bar
-        droot.add(bar, {grow: 0, shrink: 0, align: 3})
-
-        string infotext = "共 " + _str(jobs.len()) + " 首"
-        if lyriconly {
-            infotext = infotext + "，点「开始下载歌词」开始（只抓 .lrc，不碰音频）"
-        } else {
-            infotext = infotext + "，点「开始下载」开始（合计约 " + strings.fmt_size(totalExp) + "）"
-            if hasflag(flags, "lyric") { infotext = infotext + "，并顺带下载歌词" }
-        }
-        Label info = SDL3.dialogLabel(infotext, 12)
-        dlInfo = info
-        droot.add(info, {grow: 0, shrink: 0, align: 0})
-        Label stat = SDL3.dialogLabel("下载中会实时显示每一首的进度；暂停/取消随时可用", 12)
-        dlStat = stat
-        droot.add(stat, {grow: 0, shrink: 0, align: 0})
-
-        Button startBtn = SDL3.createButton({w: 130, h: 32, text: (if lyriconly then "开始下载歌词" else "开始下载"), type: "primary", font_size: 13})
-        Button pauseBtn = SDL3.createButton({w: 90, h: 32, text: "暂停", type: "dark", font_size: 13})
-        Button cancelBtn = SDL3.createButton({w: 90, h: 32, text: "取消", type: "dark", font_size: 13})
-        Button openBtn = SDL3.createButton({w: 110, h: 32, text: "打开目录", type: "dark", font_size: 13})
-        Button closeBtn = SDL3.createButton({w: 90, h: 32, text: "关闭", type: "dark", font_size: 13})
-        pauseBtn.set_enabled(false)
-        cancelBtn.set_enabled(false)
-        droot.add(SDL3.dialogButtonRow([startBtn, pauseBtn, cancelBtn, openBtn, closeBtn], 10), {grow: 0, shrink: 0, align: 3})
-
-        startBtn.on_click(func() {
-            if dlStarted { return }
-            startBtn.set_enabled(false)
-            pauseBtn.set_enabled(true)
-            cancelBtn.set_enabled(true)
-            dlStart()
-        })
-        pauseBtn.on_click(func() {
-            if not dlStarted or dlFinished { return }
-            if dlPaused {
-                // 继续：worker 挂在命令通道的 receive 上，发一条 resume 就继续
-                dlPaused = false
-                pauseBtn.set_text("暂停")
-                if dlCmd is Channel { dlCmd.try_send("resume") }
-                if dlStat is Label { dlStat.set_text("已继续") }
-            } else {
-                dlPaused = true
-                pauseBtn.set_text("继续")
-                if dlCmd is Channel { dlCmd.try_send("pause") }
-                if dlStat is Label { dlStat.set_text("已暂停（当前分片下完后停在原处，可继续）") }
-            }
+    // 输出目录必须先存在（上面两个入口共用一份 ✓ —— 原先这段建目录的代码抄了两遍）
+    func ensuredir(): bool {
+        if dirs.exists(outdir) { return true }
+        try {
+            dirs.mkdir_p(outdir)
+        } catch e {
+            stateLbl.set_text("无法创建输出目录：" + outdir)
             SDL3.markFrameRedraw()
-        })
-        cancelBtn.on_click(func() {
-            if not dlStarted or dlFinished { return }
-            dlCancelling = true
-            if dlCmd is Channel { dlCmd.try_send("cancel") }
-            if dlStat is Label { dlStat.set_text("正在取消…") }
-            SDL3.markFrameRedraw()
-        })
-        openBtn.on_click(func() {
-            if not openfolder(outdir) {
-                if dlStat is Label { dlStat.set_text("打开目录失败：" + outdir) }
-            }
-        })
-        closeBtn.on_click(func() { dlClose() })
-        // 标题栏 ✕ 必须自己接（TitleBar 只置 closeRequested ✓）
-        tb.on_close(func() { dlClose() })
-
-        // ⚠ runModal = pushModal + win.run()，主循环已跑时 run() 立即返回 ⇒ 这里**不阻塞**，
-        //   收尾动作必须写在按钮/事件回调里（cleaner_master 踩过："点确认什么也不发生" ✗）
-        SDL3.runModal(dlg,
-            func(Event ev): bool {
-                if ev.isQuit() { return false }
-                if ev.isWindowClose() { dlClose(); return false }
-                if ev.isKeyDown() and ev.scancode() == Scancode.ESCAPE { dlClose(); return false }
-                if dlClosing { return false }
-                return true
-            },
-            func(Renderer r) { SDL3.dialogFramePaint(r, dw, tbH + dh) }
-        )
-        SDL3.markFrameRedraw()
-    }
-
-    // 真正启动下载 worker（按钮回调与自测入口共用；重复调用无副作用）
-    func dlStart() {
-        if dlStarted { return }
-        dlStarted = true
-        dlFinished = false
-        dlCancelling = false
-        dlDone = 0
-        dlFail = 0
-        dlPaused = false
-        if dlStat is Label { dlStat.set_text("开始下载…") }
-        dlCh = threads.channel(65536)
-        dlCmd = threads.channel(64)
-        dlThread = threads.start(dl_worker, dlJobs, outdir, dlCh, dlCmd, dlFlags)
-        SDL3.markFrameRedraw()
-    }
-
-    // 关闭对话框：还在下就补发取消（worker 会自己退出），然后让事件处理器返回 false
-    func dlClose() {
-        if dlStarted and not dlFinished {
-            if dlCmd is Channel { dlCmd.try_send("cancel") }
+            return false
         }
-        dlOpen = false
-        dlClosing = true
-        dlTable = null
-        dlBar = null
-        dlInfo = null
-        dlStat = null
-        SDL3.markFrameRedraw()
+        return true
     }
 
-    // 排空下载通道 + 刷新对话框控件（弹窗没开就直接返回）
-    func pollDownload() {
-        if not dlOpen { return }
-        if dlCh is Channel {
-            var m = dlCh.try_receive()
-            int n = 0
-            while m != null and n < 4000 {
-                if m is Array => mv { applydlmsg(mv) }
-                m = dlCh.try_receive()
-                n = n + 1
+    // ⚠ 下载窗口的"开始"必须由**本文件**真正起线程：线程入口只能是**起线程那个文件**的
+    //   具名全局函数（跨模块会当场抛"线程入口必须是当前文件的函数 ✗"，见文件头的实测记录），
+    //   所以窗口只置 `wantStart`，本函数在 120ms 定时器里接手 ⇒ 谁起线程谁持有入口 ✓
+    func dlStartIfWanted() {
+        if dl is DlWindow => w {
+            if not w.wantStart { return }
+            w.wantStart = false
+            // **多首歌并行**：切成 n 份，n 个 worker 同时下（切法与取舍见 dl_engine.dl_entry_shard ✓）
+            //   上限来自**设置**（dl_settings.leno ✓）；任务数比上限少就少开 ✓
+            int n = eng.dl_workers(w.jobs.len(), cfg.workers)
+            Channel msgch = threads.channel(65536)   // 所有 worker 共用（消息带全量下标 ⇒ UI 按 idx 归位 ✓）
+            Array[Thread] ts = []
+            Array[Channel] cs = []
+            for n to k {
+                Channel cmdch = threads.channel(64)  // **每个 worker 一条**命令通道（暂停/取消要人人发到 ✓）
+                ts.add(threads.start(dl_worker_shard, w.jobs, outdir, msgch, cmdch, w.flags, k, n))
+                cs.add(cmdch)
             }
-        }
-        refreshDl()
-        // 收尾：worker 结束且通道排空 ⇒ join 取权威结果
-        if dlStarted and not dlFinished {
-            bool running = false
-            if dlThread is Thread {
-                if dlThread.state() == "running" { running = true }
-            }
-            if running { return }
-            if dlCh is Channel {
-                if dlCh.len() > 0 { return }
-            }
-            dlFinished = true
-            string sum = ""
-            if dlThread is Thread {
-                try {
-                    var r = dlThread.join() as Array[string]
-                    if r != null and r.len() >= 3 {
-                        sum = "成功 " + r[0] + " 首，失败 " + r[1] + " 首，歌词 " + r[2] + " 首"
-                    }
-                } catch e {
-                    sum = "线程异常：" + eng.errmsg(e)
-                }
-            }
-            dlThread = null
-            if dlCh is Channel { dlCh.close() }
-            dlCh = null
-            if dlBar is ProgressBar { dlBar.set_value(100.0) }
-            if dlStat is Label {
-                if dlCancelling {
-                    dlStat.set_text("已取消：" + sum + "（已下完的文件保留在 " + outdir + "）")
-                } else {
-                    dlStat.set_text("下载结束：" + sum + "（文件在 " + outdir + "）")
-                }
-            }
-            if dlInfo is Label { dlInfo.set_text("全部任务已处理完，可「打开目录」查看") }
-            stateLbl.set_text("下载结束：" + sum)
-            SDL3.markFrameRedraw()
-        }
-    }
-
-    // 一条进度消息 → 状态数组
-    func applydlmsg(Array mv) {
-        string kind = _str(mv[0])
-        int idx = _int(mv[1])
-        if kind == "resolve" {
-            setstatus(idx, "取直链…")
-        } else if kind == "start" {
-            setstatus(idx, "下载中…")
-            int exp = _int(mv[3])
-            if exp > 0 and idx >= 0 and idx < dlExp.len() { dlExp[idx] = exp }
-            if dlInfo is Label {
-                if idx >= 0 and idx < dlJobs.len() {
-                    dlInfo.set_text("正在下载：" + eng.songlabel(dlJobs[idx]))
-                }
-            }
-        } else if kind == "progress" {
-            if idx >= 0 and idx < dlGot.len() {
-                dlGot[idx] = _int(mv[2])
-                int tot = _int(mv[3])
-                if tot > 0 { dlExp[idx] = tot }
-            }
-        } else if kind == "lyric" {
-            // 歌词落盘：字节数单独记，状态行补一句（音频状态在前，歌词在后 ✓）
-            int lb = _int(mv[2])
-            dlLrc = dlLrc + 1
-            string cur = ""
-            if idx >= 0 and idx < dlStatus.len() { cur = dlStatus[idx] }
-            if cur == "等待中" or cur == "下载中…" {
-                setstatus(idx, "歌词 " + strings.fmt_size(lb))
-            } else {
-                setstatus(idx, cur + " +歌词")
-            }
-        } else if kind == "done" {
-            int got = _int(mv[2])
-            if idx >= 0 and idx < dlGot.len() { dlGot[idx] = got }
-            setstatus(idx, "完成 " + strings.fmt_size(got))
-            dlDone = dlDone + 1
-        } else if kind == "fail" {
-            setstatus(idx, "失败：" + _str(mv[4]))
-            dlFail = dlFail + 1
-        } else if kind == "cancelled" {
-            setstatus(idx, "已取消")
-            if dlInfo is Label { dlInfo.set_text("已取消剩余任务（已下完的文件保留）") }
-        } else if kind == "fatal" {
-            if dlStat is Label { dlStat.set_text("下载器出错：" + _str(mv[4])) }
-        }
-    }
-
-    func setstatus(int idx, string text) {
-        if idx >= 0 and idx < dlStatus.len() { dlStatus[idx] = text }
-    }
-
-    // 刷新任务表 + 总进度条（每 120ms 一次）
-    // 两种口径：正常下载按**字节**加权；"只下歌词"没有分片进度 ⇒ 按**任务条数**推进
-    func refreshDl() {
-        bool lyriconly = hasflag(dlFlags, "lyriconly")
-        int got = 0
-        int exp = 0
-        int done = 0
-        int i = 0
-        while i < dlJobs.len() {
-            int g = 0
-            int e = 1
-            if i < dlGot.len() { g = dlGot[i] }
-            if i < dlExp.len() and dlExp[i] > 0 { e = dlExp[i] }
-            got = got + g
-            exp = exp + e
-            bool finished = false
-            if i < dlStatus.len() and (strings.has(dlStatus[i], "完成") or strings.has(dlStatus[i], "歌词") or strings.has(dlStatus[i], "失败") or strings.has(dlStatus[i], "取消")) {
-                finished = true
-            }
-            if finished { done = done + 1 }
-            if dlTable is Table {
-                int pct = 0
-                if lyriconly {
-                    if finished { pct = 100 }
-                } else {
-                    pct = g * 100 / e
-                    if pct > 100 { pct = 100 }
-                }
-                dlTable.set_cell(i, 3, _str(pct) + "%")
-                if i < dlStatus.len() { dlTable.set_cell(i, 4, dlStatus[i]) }
-            }
-            i = i + 1
-        }
-        if dlBar is ProgressBar {
-            float v = 0.0
-            if lyriconly {
-                if dlJobs.len() > 0 { v = 100.0 * _float(done) / _float(dlJobs.len()) }
-            } else if exp > 0 {
-                v = 100.0 * _float(got) / _float(exp)
-            }
-            if v > 100.0 { v = 100.0 }
-            dlBar.set_value(v)
+            w.attach(ts, msgch, cs)
         }
     }
 
@@ -756,7 +436,8 @@ struct MusicDlApp {
             return
         }
         if id == "open" {
-            if not openfolder(outdir) { stateLbl.set_text("打开目录失败：" + outdir) }
+            // 打开目录的实现随下载窗口一起搬到了 dl_window.leno（那里也有"打开目录"按钮 ⇒ 一份 ✓）
+            if not dlw.openfolder(outdir) { stateLbl.set_text("打开目录失败：" + outdir) }
             SDL3.markFrameRedraw()
             return
         }
@@ -773,6 +454,20 @@ struct MusicDlApp {
                 SDL3.markFrameRedraw()
             }
         }, {default_location: outdir})
+    }
+
+    // ==================== 设置 ====================
+
+    // 打开「⚙ 设置」（在搜索行最右侧）：真改了就把新值立刻接上，并回一句到状态栏 ✓
+    //   · 线程数只影响**下一次**开始下载（正在下的那批照旧 ✓）—— 设置窗口里也写着这句
+    //   · 纯逻辑（读/写/钳位）在 dl_settings.leno，画界面在 dl_settings_win.leno ✓
+    func onSettings() {
+        if dlswin.show_settings_window() {
+            cfg = dlset.load()
+            string extra = if cfg.lyric then "，默认带歌词" else ""
+            stateLbl.set_text("设置已保存：并行 " + _str(cfg.workers) + " 线程" + extra)
+            SDL3.markFrameRedraw()
+        }
     }
 
     // ==================== UI 构建 ====================
@@ -798,7 +493,15 @@ struct MusicDlApp {
     }
 
     func setupUI() {
-        titleBar = SDL3.createTitleBar({title: "Leno 音乐下载器", height: 32, font_size: 14})
+        // 标题栏右侧按钮组里加一个**齿轮动作按钮**（"⚙ 设置"）：与最小化/最大化/关闭同一排 ✓
+        //   icon: "gear" 是 LenoSDL3 的内置矢量图标 ⇒ 不需要任何图片资源 ✓
+        titleBar = SDL3.createTitleBar({
+            title: "Leno 音乐下载器", height: 32, font_size: 14,
+            actions: [{id: "settings", icon: "gear", tip: "设置：并行下载线程数、默认是否带歌词"}]
+        })
+        titleBar.on_action(func(string id) {
+            if id == "settings" { onSettings() }
+        })
         win.add(titleBar)
         float titleH = titleBar.get_h()
 
@@ -820,6 +523,7 @@ struct MusicDlApp {
         limitSpin = SDL3.createSpinBox({w: 86, h: 32, min: 5, max: 50, step: 5, value: 20, int_mode: true, font_size: 13})
         limitSpin.set_tip("每个音源最多取多少条（酷我接口的 rn 参数）")
         row1.add(limitSpin, {grow: 0, shrink: 0, basis: 86, align: 3})
+        // 设置入口已移到**标题栏右侧的齿轮按钮**（上面的 actions: [{id:"settings", icon:"gear"}] ✓）
         root.add(row1, {grow: 0, shrink: 0, align: 3})
 
         // ---- 音源 + 输出目录行 ----
@@ -934,7 +638,14 @@ struct MusicDlApp {
         // 默认输出目录 = 脚本目录/downloads（与 CLI 版一致，两边的下载文件放一处）
         outdir = dirs.script_dir() + _sep() + "downloads"
 
+        // 读设置（文件不存在 / 坏了 ⇒ 出厂默认 ✓，见 dl_settings.load）—— **setupUI 之前**读，
+        //   这样"默认带歌词"能直接套到工具栏那个勾选框上 ✓
+        cfg = dlset.load()
+
         setupUI()
+        // ⚠ setupUI 之后才能碰控件：套上设置里的"默认带歌词"，并在状态栏报一下并行度 ✓
+        lyricBox.set_checked(cfg.lyric)
+        stateLbl.set_text("就绪（并行 " + _str(cfg.workers) + " 线程；右上「⚙ 设置」可改）")
         // 全局 120ms 一拍：搜索进度、下载进度、"忙"指示（定时器是模块级全局的 ⇒ 模态对话框
         // 打开期间照样触发，所以下载进度条能在模态窗里动起来 ✓）
         win.addTimer(120, func() { onTick() })

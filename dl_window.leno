@@ -1,0 +1,429 @@
+// dl_window.leno — 音乐下载器：**下载窗口**（从 musicdl_gui.leno 拧出来的独立模块 ✓）
+//
+// 分层（照 电脑清理大师 的 cleaner_detail.leno、Trae签到 的 trae_core.leno 同款 ✓）：
+//   dl_engine.leno    ← **纯逻辑**：网络 / 取直链 / 落盘 / 行格式（不 import SDL3 ⇒ 可单测 ✓）
+//   dl_window.leno    ← **本文件**：下载对话框（窗口 + 任务表 + 总进度 + 按钮 + 每 120ms 刷新）
+//   musicdl_gui.leno  ← 主界面：搜索、勾选、右键菜单；"要下哪些歌"由它判定后把数据交进来 ✓
+//
+// ⚠ 一处**必须留在主界面**的东西：`threads.start` 及其 worker 入口
+//   实测（musicdl_gui 里记着原话）：线程入口必须是**起线程那个文件**的具名全局函数 ——
+//   跨模块会当场抛「线程入口必须是当前文件的函数 ✗ 子线程不会加载别的模块的全局变量」
+//   ⇒ 本模块只把"用户点了开始"这层意图暴露成 `wantStart`；主界面在 120ms 定时器里
+//     真正起 N 个线程（**多首歌并行**），再把它们与各自的命令通道用 `attach()` 交回本窗口 ✓
+//     （谁起线程谁持有入口 ✓；命令必须**人人发一条** ⇒ 见 sendcmd ✓）
+//
+// ⚠ 另一处不搬的：**"要下哪些歌"的判定**（勾选的行 / 选中行 / 只下歌词）属主界面业务策略
+//   ⇒ 留在 musicdl_gui.leno（cleaner_detail 的分工同款：本模块"给数据就画" ✓）
+import "SDL3" as SDL3
+import strings
+import threads
+import "./dl_engine.leno" as eng
+use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, Table, ProgressBar, VBox, Scancode)
+
+// flags 里有没有某项（与主界面、引擎层的同名私有函数各管各的，不跨模块 ✓）
+func hasflag(Array[string] flags, string name): bool {
+    for flags to f {
+        if f == name { return true }
+    }
+    return false
+}
+
+// 打开目录（资源管理器/文件管理器定位）。失败无处可报 ⇒ 返回 bool 让调用方提示
+// （主界面的右键菜单"打开下载目录"也用这一个实现 ⇒ 不两处漂移 ✓）
+export func openfolder(string path): bool {
+    if path == "" { return false }
+    string cmd = ""
+    if _os() == "windows" {
+        cmd = "cmd /c start \"\" \"" + path + "\""
+    } else if _os() == "macos" {
+        cmd = "open \"" + path + "\""
+    } else {
+        cmd = "xdg-open \"" + path + "\""
+    }
+    bool ok = true
+    try {
+        _exec(cmd)
+    } catch e {
+        ok = false
+    }
+    return ok
+}
+
+// ==================== 下载窗口 ====================
+
+export struct DlWindow {
+    // ---- 本轮任务（打开时由主界面给定；之后只读）----
+    Array[Array[string]] jobs
+    Array[string] flags
+    string outdir = ""
+    bool lyriconly = false
+    int maxw = 4                     // 并行线程数上限（**设置**里的值，主界面传进来 ⇒ 只显示口径 ✓）
+
+    // ---- 运行状态 ----
+    bool open = false                // 窗口开着（tick() 的总开关 ✓）
+    bool closing = false             // 模态该收了（事件回调据此返回 false ✓）
+    bool started = false
+    bool paused = false
+    bool finished = false
+    bool cancelling = false
+    bool wantStart = false           // 置 true ⇒ 主界面负责 threads.start（语言硬约束，见文件头 ⚠）
+    int done = 0
+    int fail = 0
+    int lrc = 0                      // 本轮已拿到的歌词数
+
+    // ---- 每任务进度 ----
+    Array[string] status             // 每任务状态文字
+    Array[int] got                   // 每任务已下字节
+    Array[int] exp                   // 每任务期望字节
+
+    // ---- 控件（build() 里赋值；`open` 为 true 之后才会被 tick/回调碰到 ✓）----
+    Window dlg
+    Table table
+    ProgressBar bar
+    Label info
+    Label stat
+
+    // ---- 与主界面 / worker 的连线（**多首歌并行**：N 个 worker ✓）----
+    Label? hostLbl = null            // 主界面状态栏：结束时回写一句（open 时传进来一次 ✓）
+    Array[Thread] threads            // 本次所有 worker（看完没完要看**全部** ✓）
+    Channel? ch = null               // 所有 worker **共用**的进度消息通道（消息带全量下标 ⇒ 按 idx 归位 ✓）
+    Array[Channel] cmds              // **每个 worker 一条**命令通道（一条被某个 worker 取走，别的就收不到了 ✗）
+
+    // —— 构建窗口并进模态 ——
+    // ⚠ runModal = pushModal + win.run()，主循环已跑时 run() 立即返回 ⇒ 这里**不阻塞**，
+    //   收尾动作必须写在按钮/事件回调里（cleaner_master 踩过："点确认什么也不发生" ✗）
+    func build() {
+        string title = if lyriconly then "下载歌词" else "下载"
+        int dw = 820
+        int dh = 440
+        int tbH = SDL3.DIALOG_TB_H
+        dlg = SDL3.createDialogWindow({title: title, w: dw, h: tbH + dh})
+        TitleBar tb = SDL3.dialogTitleBar(dlg, title)
+        var droot = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, padX: 16, padY: 14, spacing: 8})
+        dlg.setRootAt(droot, 0, tb.get_h())
+
+        // 重置本轮状态
+        closing = false
+        started = false
+        paused = false
+        finished = false
+        cancelling = false
+        wantStart = false
+        done = 0
+        fail = 0
+        lrc = 0
+        status = []
+        got = []
+        exp = []
+        int totalExp = 0
+        Array[Array[string]] rows = []
+        for jobs to j {
+            int e = _int(j[eng.F_BYTES])
+            if e <= 0 { e = 1 }
+            got.add(0)
+            exp.add(e)
+            status.add("等待中")
+            totalExp = totalExp + e
+            // "只下歌词"模式：格式/大小那两列没有意义 ⇒ 显示 "-"（歌词约几十 KB，不值得标）
+            rows.add([eng.songlabel(j), if lyriconly then "-" else j[eng.F_EXT], if lyriconly then "-" else j[eng.F_SIZETEXT], "0%", "等待中"])
+        }
+
+        table = SDL3.createTable({
+            headers: ["歌曲", "格式", "大小", "进度", "状态"],
+            col_widths: [330.0, 60.0, 90.0, 64.0, 220.0],
+            aligns: [0, 1, 2, 1, 0],
+            header_aligns: [0, 1, 2, 1, 0],
+            zebra: true, row_h: 26, header_h: 28, font_size: 13,
+            sortable: false, col_reorder: false, resizable: false,
+            empty_text: "没有任务"
+        })
+        table.set_rows(rows)
+        droot.add(table, {grow: 1, shrink: 1, align: 3})
+
+        bar = SDL3.createProgressBar({h: 16, show_text: true, font_size: 12})
+        bar.set_value(0.0)
+        droot.add(bar, {grow: 0, shrink: 0, align: 3})
+
+        // 并行度走引擎那一处口径（任务少就少开 ✓，上限来自**设置** ✓）—— 顺带让用户看得见"是并行在下" ✓
+        int nw = eng.dl_workers(jobs.len(), maxw)
+        string infotext = "共 " + _str(jobs.len()) + " 首"
+        if nw > 1 { infotext = infotext + "，" + _str(nw) + " 个线程并行下" }
+        if lyriconly {
+            infotext = infotext + "，点「开始下载歌词」开始（只抓 .lrc，不碰音频）"
+        } else {
+            infotext = infotext + "，点「开始下载」开始（合计约 " + strings.fmt_size(totalExp) + "）"
+            if hasflag(flags, "lyric") { infotext = infotext + "，并顺带下载歌词" }
+        }
+        info = SDL3.dialogLabel(infotext, 12)
+        droot.add(info, {grow: 0, shrink: 0, align: 0})
+        stat = SDL3.dialogLabel("下载中会实时显示每一首的进度；暂停/取消随时可用", 12)
+        droot.add(stat, {grow: 0, shrink: 0, align: 0})
+
+        Button startBtn = SDL3.createButton({w: 130, h: 32, text: (if lyriconly then "开始下载歌词" else "开始下载"), type: "primary", font_size: 13})
+        Button pauseBtn = SDL3.createButton({w: 90, h: 32, text: "暂停", type: "dark", font_size: 13})
+        Button cancelBtn = SDL3.createButton({w: 90, h: 32, text: "取消", type: "dark", font_size: 13})
+        Button openBtn = SDL3.createButton({w: 110, h: 32, text: "打开目录", type: "dark", font_size: 13})
+        Button closeBtn = SDL3.createButton({w: 90, h: 32, text: "关闭", type: "dark", font_size: 13})
+        pauseBtn.set_enabled(false)
+        cancelBtn.set_enabled(false)
+        droot.add(SDL3.dialogButtonRow([startBtn, pauseBtn, cancelBtn, openBtn, closeBtn], 10), {grow: 0, shrink: 0, align: 3})
+
+        startBtn.on_click(func() {
+            if started { return }
+            started = true
+            finished = false
+            cancelling = false
+            paused = false
+            done = 0
+            fail = 0
+            startBtn.set_enabled(false)
+            pauseBtn.set_enabled(true)
+            cancelBtn.set_enabled(true)
+            stat.set_text("开始下载…")
+            // ⚠ 这里**不起线程**：threads.start 与其 worker 入口必须同一个文件（见文件头 ⚠）
+            //   ⇒ 只置意图，主界面在定时器里起线程、再把 Thread/Channel 用 attach() 交回来 ✓
+            wantStart = true
+            SDL3.markFrameRedraw()
+        })
+        pauseBtn.on_click(func() {
+            if not started or finished { return }
+            if paused {
+                // 继续：**每个** worker 都挂在各自命令通道的 receive 上 ⇒ 得人人发一条才都继续 ✓
+                paused = false
+                pauseBtn.set_text("暂停")
+                sendcmd("resume")
+                stat.set_text("已继续")
+            } else {
+                paused = true
+                pauseBtn.set_text("继续")
+                sendcmd("pause")
+                stat.set_text("已暂停（当前分片下完后停在原处，可继续）")
+            }
+            SDL3.markFrameRedraw()
+        })
+        cancelBtn.on_click(func() {
+            if not started or finished { return }
+            cancelling = true
+            sendcmd("cancel")
+            stat.set_text("正在取消…")
+            SDL3.markFrameRedraw()
+        })
+        openBtn.on_click(func() {
+            if not openfolder(outdir) {
+                stat.set_text("打开目录失败：" + outdir)
+            }
+        })
+        closeBtn.on_click(func() { close() })
+        // 标题栏 ✕ 必须自己接（TitleBar 只置 closeRequested ✓）
+        tb.on_close(func() { close() })
+
+        SDL3.runModal(dlg,
+            func(Event ev): bool {
+                if ev.isQuit() { return false }
+                if ev.isWindowClose() { close(); return false }
+                if ev.isKeyDown() and ev.scancode() == Scancode.ESCAPE { close(); return false }
+                if closing { return false }
+                return true
+            },
+            func(Renderer r) { SDL3.dialogFramePaint(r, dw, tbH + dh) }
+        )
+        // ⚠ `open` 放在**控件都建好之后**：tick() 的总开关就是它（早置会让 tick 摸到空控件 ✗）
+        open = true
+        SDL3.markFrameRedraw()
+    }
+
+    // 主界面起好线程/通道后交回本窗口（语言硬约束的接口，见文件头 ⚠）
+    func attach(Array[Thread] ts, Channel msgch, Array[Channel] cmdchs) {
+        threads = ts
+        ch = msgch
+        cmds = cmdchs
+    }
+
+    // 把一条命令发给**每个** worker（多 worker 各有一条命令通道 ⇒ 少发一个它就不动 ✗）
+    func sendcmd(string what) {
+        for cmds to c {
+            if c is Channel { c.try_send(what) }
+        }
+    }
+
+    // 关闭窗口：还在下就补发取消（worker 会自己退出），然后让事件处理器返回 false
+    func close() {
+        if started and not finished {
+            sendcmd("cancel")
+        }
+        open = false
+        closing = true
+        SDL3.markFrameRedraw()
+    }
+
+    // 排空下载通道 + 刷新控件（主界面每 120ms 调一次 ✓）
+    func tick() {
+        if not open { return }
+        if ch is Channel {
+            var m = ch.try_receive()
+            int n = 0
+            while m != null and n < 4000 {
+                if m is Array => mv { applymsg(mv) }
+                m = ch.try_receive()
+                n = n + 1
+            }
+        }
+        refresh()
+        // 收尾：**所有** worker 都结束、且通道排空 ⇒ 逐个 join 取权威结果（写法照 文件搜索 ✓）
+        if started and not finished {
+            int running = 0
+            for threads to t {
+                if t is Thread {
+                    if t.state() == "running" { running = running + 1 }
+                }
+            }
+            if running > 0 { return }
+            if ch is Channel {
+                if ch.len() > 0 { return }
+            }
+            finished = true
+            int okSum = 0
+            int failSum = 0
+            int lrcSum = 0
+            string errtext = ""
+            for threads to t {
+                if t is Thread {
+                    try {
+                        var r = t.join() as Array[string]
+                        if r != null and r.len() >= 3 {
+                            okSum = okSum + _int(r[0])
+                            failSum = failSum + _int(r[1])
+                            lrcSum = lrcSum + _int(r[2])
+                        }
+                    } catch e {
+                        // 某个 worker 异常：按"一条失败"计，但仍然把原因露出来（别整段吞掉 ✓）
+                        failSum = failSum + 1
+                        if errtext == "" { errtext = eng.errmsg(e) }
+                    }
+                }
+            }
+            threads = []
+            string sum = "成功 " + _str(okSum) + " 首，失败 " + _str(failSum) + " 首，歌词 " + _str(lrcSum) + " 首"
+            if errtext != "" { sum = sum + "（线程异常：" + errtext + "）" }
+            if ch is Channel { ch.close() }
+            ch = null
+            cmds = []
+            bar.set_value(100.0)
+            if cancelling {
+                stat.set_text("已取消：" + sum + "（已下完的文件保留在 " + outdir + "）")
+            } else {
+                stat.set_text("下载结束：" + sum + "（文件在 " + outdir + "）")
+            }
+            info.set_text("全部任务已处理完，可「打开目录」查看")
+            // 主界面状态栏也回一句（窗口一关就只剩它了 ⇒ 别让结果随窗口消失 ✓）
+            if hostLbl is Label { hostLbl.set_text("下载结束：" + sum) }
+            SDL3.markFrameRedraw()
+        }
+    }
+
+    // 一条进度消息 → 状态数组（消息格式见 dl_engine 头部 ✓）
+    func applymsg(Array mv) {
+        string kind = _str(mv[0])
+        int idx = _int(mv[1])
+        if kind == "resolve" {
+            setstatus(idx, "取直链…")
+        } else if kind == "start" {
+            setstatus(idx, "下载中…")
+            int e = _int(mv[3])
+            if e > 0 and idx >= 0 and idx < exp.len() { exp[idx] = e }
+            if idx >= 0 and idx < jobs.len() {
+                info.set_text("正在下载：" + eng.songlabel(jobs[idx]))
+            }
+        } else if kind == "progress" {
+            if idx >= 0 and idx < got.len() {
+                got[idx] = _int(mv[2])
+                int tot = _int(mv[3])
+                if tot > 0 { exp[idx] = tot }
+            }
+        } else if kind == "lyric" {
+            // 歌词落盘：字节数单独记，状态行补一句（音频状态在前，歌词在后 ✓）
+            int lb = _int(mv[2])
+            lrc = lrc + 1
+            string cur = ""
+            if idx >= 0 and idx < status.len() { cur = status[idx] }
+            if cur == "等待中" or cur == "下载中…" {
+                setstatus(idx, "歌词 " + strings.fmt_size(lb))
+            } else {
+                setstatus(idx, cur + " +歌词")
+            }
+        } else if kind == "done" {
+            int gotb = _int(mv[2])
+            if idx >= 0 and idx < got.len() { got[idx] = gotb }
+            setstatus(idx, "完成 " + strings.fmt_size(gotb))
+            done = done + 1
+        } else if kind == "fail" {
+            setstatus(idx, "失败：" + _str(mv[4]))
+            fail = fail + 1
+        } else if kind == "cancelled" {
+            setstatus(idx, "已取消")
+            info.set_text("已取消剩余任务（已下完的文件保留）")
+        } else if kind == "fatal" {
+            stat.set_text("下载器出错：" + _str(mv[4]))
+        }
+    }
+
+    func setstatus(int idx, string text) {
+        if idx >= 0 and idx < status.len() { status[idx] = text }
+    }
+
+    // 刷新任务表 + 总进度条（每 120ms 一次）
+    // 两种口径：正常下载按**字节**加权；"只下歌词"没有分片进度 ⇒ 按**任务条数**推进
+    func refresh() {
+        int gotb = 0
+        int expb = 0
+        int ndone = 0
+        int i = 0
+        while i < jobs.len() {
+            int g = 0
+            int e = 1
+            if i < got.len() { g = got[i] }
+            if i < exp.len() and exp[i] > 0 { e = exp[i] }
+            gotb = gotb + g
+            expb = expb + e
+            bool finishedOne = false
+            if i < status.len() and (strings.has(status[i], "完成") or strings.has(status[i], "歌词") or strings.has(status[i], "失败") or strings.has(status[i], "取消")) {
+                finishedOne = true
+            }
+            if finishedOne { ndone = ndone + 1 }
+            int pct = 0
+            if lyriconly {
+                if finishedOne { pct = 100 }
+            } else {
+                pct = g * 100 / e
+                if pct > 100 { pct = 100 }
+            }
+            table.set_cell(i, 3, _str(pct) + "%")
+            if i < status.len() { table.set_cell(i, 4, status[i]) }
+            i = i + 1
+        }
+        float v = 0.0
+        if lyriconly {
+            if jobs.len() > 0 { v = 100.0 * _float(ndone) / _float(jobs.len()) }
+        } else if expb > 0 {
+            v = 100.0 * _float(gotb) / _float(expb)
+        }
+        if v > 100.0 { v = 100.0 }
+        bar.set_value(v)
+    }
+}
+
+// 打开下载窗口：构建 UI、进模态、返回窗口实例（调用方持有它，每 120ms 调 tick() ✓）
+//   jobs / flags 由主界面判定好再传进来（本模块不碰"选哪些歌"的策略 ✓）
+//   hostLbl     = 主界面状态栏：下载结束时回写一句（窗口关掉后结果仍看得见 ✓）
+//   maxworkers  = 并行线程数上限（来自**设置**，见 dl_settings.leno ✓）
+export func open_download(Array[Array[string]] jobs, Array[string] flags, string outdir, Label hostLbl, int maxworkers): DlWindow {
+    DlWindow w = new DlWindow()
+    w.jobs = jobs
+    w.flags = flags
+    w.outdir = outdir
+    w.hostLbl = hostLbl
+    w.maxw = maxworkers
+    w.lyriconly = hasflag(flags, "lyriconly")
+    w.build()
+    return w
+}

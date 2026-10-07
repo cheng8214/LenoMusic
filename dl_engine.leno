@@ -8,6 +8,16 @@
 //
 // 歌曲行（SONG_ROW）字段顺序 —— GUI 的表格列、下载任务都按它取值，改这里必须同步改 GUI：
 //   0 id / 1 歌名 / 2 歌手 / 3 专辑 / 4 时长(秒) / 5 格式 / 6 列表标注大小 / 7 标注字节数
+// 下标常量就定义在这里（2026-10-07：从 musicdl_gui 收进来 —— 原先 GUI 自己复制了一份约定，
+//   下载窗口再拆成独立文件就会变成三份 ⇒ 一处定义，调用方写 `eng.F_BYTES` ✓）
+export const int F_ID = 0
+export const int F_NAME = 1
+export const int F_ARTIST = 2
+export const int F_ALBUM = 3
+export const int F_DURATION = 4
+export const int F_EXT = 5
+export const int F_SIZETEXT = 6
+export const int F_BYTES = 7
 //
 // 进度消息（channel 里的 Array[string]，固定 5 段；kind 在第 0 段）：
 //   ["search", 音源id, 命中数, "",   ""]
@@ -38,6 +48,32 @@ use kuwo.SongInfo
 const int CHUNK = 1048576
 // 单个分片请求的最大重试次数（网络抖动/服务端偶发 5xx）
 const int MAXRETRY = 3
+// **多首歌并行**的 worker **出厂默认**上限（2026-10-07）：每个 worker 一条 HTTP 连接、
+//   各推自己的 1MB 分片。4 路对家用宽带足够；再多只是互相抢带宽，还可能被服务端限流 ✓
+//   ⚠ 真正生效的值来自**设置**（dl_settings.leno，可在"设置"窗口里改）—— 这里只是默认值 ✓
+//   （写法照 文件搜索 的"多个 worker 各领一批"，见 dl_entry_shard ✓）
+export const int DL_DEFAULT_WORKERS = 4
+
+// 本次该开几个 worker：任务数 与 用户设置的上限 取小（任务少就少开 ✓）
+//   · `maxworkers` ≤ 0 ⇒ 回落出厂默认（设置没读到/被清空也不会开 0 个线程 ✗）
+//   · 主界面用它起线程、下载窗口用它显示"N 个线程并行下" ⇒ 口径只在这一处 ✓
+export func dl_workers(int jobcount, int maxworkers): int {
+    int maxw = maxworkers
+    if maxw < 1 { maxw = DL_DEFAULT_WORKERS }
+    if jobcount < 1 { return 1 }
+    if jobcount > maxw { return maxw }
+    return jobcount
+}
+
+// 并行切法（**规范性定义**，只此一处）：第 `shard` 个 worker 是否负责第 `idx` 个任务
+//   · `dl_entry_shard` 里用的是**步进**写法（从 shard 起、每次 +nshards）—— 与本法等价且更快；
+//     两者的一致性由 test/test_parallel_dl.leno **对拍**（不重不漏 ✓）
+//   · 取模（而不是连续切片）：长短任务自动交错均衡，不会出现"某一路全是大家伙" ✗
+export func dl_mine(int idx, int shard, int nshards): bool {
+    if nshards < 1 { nshards = 1 }
+    if idx < 0 { return false }
+    return idx % nshards == shard
+}
 
 // ==================== 音源注册表 ====================
 // 行格式：[id, 显示名, "1"/"0" 是否可用, 说明]
@@ -187,7 +223,9 @@ export func search_entry(Array[string] srcids, string keyword, int limit, any ch
 //
 // 返回落盘字节数；>0 = 成功，-2 = 被取消，其余(-1) = 失败。
 // 进度经 ch 上报，控制命令经 cmd 收。
-func dl_one(HttpClient client, string link, string outpath, any ch, int jobIdx, any cmd): int {
+// ⚠ 导出是给**无 GUI 的并行测试**直接调用的（test/test_parallel_dl.leno：把"直链"指向本机
+//   服务端 ⇒ 离线就能压 N 线程并行、共用通道按 idx 归位、取消广播）；产品路径仍只走 dl_entry_shard ✓
+export func dl_one(HttpClient client, string link, string outpath, any ch, int jobIdx, any cmd): int {
     int got = fsize(outpath)          // 本地已有的部分 ⇒ 从这里续传
     int total = -1                    // 远端真实总长（来自 Content-Range），未知 = -1
     int retries = 0
@@ -250,13 +288,26 @@ func dl_one(HttpClient client, string link, string outpath, any ch, int jobIdx, 
     }
 }
 
-// ==================== ③ 下载 worker ====================
-// jobs = 歌曲行数组；返回 [成功数, 失败数, 歌词数]（字符串，跨线程回传免收窄 ✓）
+// ==================== ③ 下载 worker（**多首歌并行**）====================
+// jobs = 歌曲行数组；返回 **[本 worker 那一份]** 的 [成功数, 失败数, 歌词数]（字符串，跨线程回传免收窄 ✓）
 // flags 见文件头"任务标志"
-export func dl_entry(Array[Array[string]] jobs, string outdir, any ch, any cmd, Array[string] flags): Array[string] {
+//
+// 并行口径（2026-10-07，写法照 文件搜索 的"多个 worker 各领一批" ✓）：
+//   · `nshards` 个 worker 同时跑，第 `shard` 个只处理下标满足 `i % nshards == shard` 的任务
+//     —— 用**取模**而不是连续切片：长短任务自动交错均衡，不会出现"某一路全是大家伙" ✗
+//   · 所有 worker **共用一个 ch**：消息第 1 段始终是**全量下标** ⇒ UI 侧按 idx 归位即可 ✓
+//   · 暂停/取消得**每个 worker 一条 cmd 通道**（一条被某个 worker 取走，别的就永远收不到 ✗）
+//   · 每个 worker 自带 HttpClient（net 的客户端不是线程安全的 ✓）；解析走 jsons（无模块全局 ✓）、
+//     DES 表是只读查找表 ✓ ⇒ 并行不踩共享状态（LenoWeb 有"8 线程并发 HTTP"的现成回归 ✓）
+export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any cmd, Array[string] flags, int shard, int nshards): Array[string] {
+    if nshards < 1 { nshards = 1 }
+    if shard < 0 { shard = 0 }
     int ok = 0
     int fail = 0
     int lrcok = 0
+    // 本 worker 那一份的任务数：出错提前返回时报它（报总任务数会把失败数放大 N 倍 ✗）
+    int mine = (jobs.len() - shard + nshards - 1) / nshards
+    if mine < 0 { mine = 0 }
     bool wantlyric = hasflag(flags, "lyric") or hasflag(flags, "lyriconly")
     bool lyriconly = hasflag(flags, "lyriconly")
     // 目录必须先建：write 到不存在的目录会抛异常（docs/移植音乐下载器实录与待办.md B2 同款坑）
@@ -265,18 +316,18 @@ export func dl_entry(Array[Array[string]] jobs, string outdir, any ch, any cmd, 
             dirs.mkdir_p(outdir)
         } catch e {
             sendmsg(ch, ["fatal", "0", "0", "0", "无法创建目录：" + outdir])
-            return ["0", _str(jobs.len()), "0"]
+            return ["0", _str(mine), "0"]
         }
     }
     HttpClient client = net.createClient()
     if not client.isOk() {
         sendmsg(ch, ["fatal", "0", "0", "0", "网络客户端初始化失败"])
-        return ["0", _str(jobs.len()), "0"]
+        return ["0", _str(mine), "0"]
     }
     client.setUserAgent(kuwo.useragent())
     client.setTimeout(30000)
     client.setSSLVerify(false, false)
-    int i = 0
+    int i = shard
     while i < jobs.len() {
         if waitcmd(cmd) == "cancel" {
             sendmsg(ch, ["cancelled", _str(i), "0", "0", ""])
@@ -301,7 +352,7 @@ export func dl_entry(Array[Array[string]] jobs, string outdir, any ch, any cmd, 
                 fail = fail + 1
                 sendmsg(ch, ["fail", _str(i), "0", "0", "这首没有歌词"])
             }
-            i = i + 1
+            i = i + nshards          // 下一首仍归本 worker（取模分片 ⇒ 步子就是 nshards ✓）
             continue
         }
 
@@ -348,10 +399,15 @@ export func dl_entry(Array[Array[string]] jobs, string outdir, any ch, any cmd, 
                 sendmsg(ch, ["lyric", _str(i), _str(lb), "0", lrcout])
             }
         }
-        i = i + 1
+        i = i + nshards              // 取模分片：下一首 = i + nshards ✓
     }
     client.close()
     return [_str(ok), _str(fail), _str(lrcok)]
+}
+
+// 单 worker 版 = 1 份的第 0 份 ⇒ **CLI 版（musicdl.leno）与单任务原样不动** ✓
+export func dl_entry(Array[Array[string]] jobs, string outdir, any ch, any cmd, Array[string] flags): Array[string] {
+    return dl_entry_shard(jobs, outdir, ch, cmd, flags, 0, 1)
 }
 
 // 歌词抓取包一层 try：worker 线程**绝不能进 error 态**（否则 join 抛异常、UI 侧收尾逻辑全乱）

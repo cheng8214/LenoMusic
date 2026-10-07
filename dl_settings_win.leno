@@ -1,0 +1,107 @@
+// dl_settings_win.leno — 音乐下载器的**设置弹窗**（SDL3；纯逻辑在 dl_settings.leno ⇒ 可单测 ✓）
+//
+// 分层照 电脑清理大师：`cleaner_whitelist.leno`（纯逻辑，能被 test/ 直接单测）/ `cleaner_detail.leno`（SDL3 弹窗）
+//   ⇒ 本文件只负责"画出来 + 把结果存下去"，存哪儿、怎么钳位一律问 dl_settings ✓
+//
+// 打开方式：主界面工具栏右侧的「⚙ 设置」→ `show_settings_window()` ✓
+// 返回：true = 用户点了保存**且已写盘成功**（调用方据此重读配置、刷新界面 ✓）
+import "SDL3" as SDL3
+import strings
+import "./dl_settings.leno" as cfg
+use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, SpinBox, CheckBox, HBox, VBox, Scancode)
+use cfg.DlSettings
+
+struct SettingsDialog {
+    bool saved = false       // 点了保存且写盘成功
+    bool closing = false     // 模态该收了（事件回调据此返回 false ✓）
+    SpinBox spin
+    CheckBox lyr
+    Label note
+
+    // ⚠ runModal = pushModal + win.run()，主循环已跑时 run() 立即返回 ⇒ 这里**不阻塞**，
+    //   收尾动作必须写在按钮/事件回调里（cleaner_master 踩过："点确认什么也不发生" ✗）
+    func build() {
+        string title = "设置"
+        int dw = 560
+        int dh = 252
+        int tbH = SDL3.DIALOG_TB_H
+        var dlg = SDL3.createDialogWindow({title: title, w: dw, h: tbH + dh})
+        TitleBar tb = SDL3.dialogTitleBar(dlg, title)
+        var root = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, padX: 20, padY: 16, spacing: 10})
+        dlg.setRootAt(root, 0, tb.get_h())
+
+        DlSettings cur = cfg.load()
+
+        // ---- 并行下载线程数（**多首歌同时下**）----
+        var row1 = SDL3.createHBox({h: 34, padX: 0, padY: 0, spacing: 10})
+        row1.add(SDL3.createLabel({text: "并行下载线程数（多首歌同时下）", font_size: 13}), {grow: 1, shrink: 1, align: 1})
+        spin = SDL3.createSpinBox({w: 96, h: 30, min: cfg.WORKERS_MIN, max: cfg.WORKERS_MAX, step: 1,
+                                   value: cur.workers, int_mode: true, font_size: 13})
+        spin.set_tip("同时下几首：1–" + _str(cfg.WORKERS_MAX) + "。太大只会互相抢带宽，还可能被服务端限流")
+        row1.add(spin, {grow: 0, shrink: 0, basis: 96, align: 3})
+        root.add(row1, {grow: 0, shrink: 0, align: 3})
+
+        // ---- 默认带歌词（启动时套到工具栏那个勾选框上 ✓）----
+        lyr = SDL3.createCheckBox({text: "默认同时保存歌词（.lrc）", checked: cur.lyric, font_size: 13})
+        root.add(lyr, {grow: 0, shrink: 0, align: 1})
+
+        // ---- 说明（存哪儿 / 什么时候生效）----
+        root.add(SDL3.dialogLabel("配置文件：" + cfg.store_path(), 11), {grow: 0, shrink: 0, align: 0})
+        note = SDL3.dialogLabel("线程数对**下一次**开始下载生效（正在下的那批不动）", 11)
+        root.add(note, {grow: 1, shrink: 1, align: 0})
+
+        // ---- 按钮行 ----
+        Button resetBtn = SDL3.createButton({w: 100, h: 32, text: "恢复默认", type: "dark", font_size: 13})
+        Button cancelBtn = SDL3.createButton({w: 90, h: 32, text: "取消", type: "dark", font_size: 13})
+        Button okBtn = SDL3.createButton({w: 90, h: 32, text: "保存", type: "primary", font_size: 13})
+        root.add(SDL3.dialogButtonRow([resetBtn, cancelBtn, okBtn], 10), {grow: 0, shrink: 0, align: 3})
+
+        resetBtn.on_click(func() {
+            DlSettings d = new DlSettings()
+            spin.set_value(_float(d.workers))
+            lyr.set_checked(d.lyric)
+            note.set_text("已填回默认值（点「保存」才写盘 ✓）")
+            SDL3.markFrameRedraw()
+        })
+        cancelBtn.on_click(func() { finish(false) })
+        okBtn.on_click(func() {
+            DlSettings s = new DlSettings()
+            s.workers = cfg.clamp_workers(_int(spin.get_text()))
+            s.lyric = lyr.is_checked()
+            if cfg.save(s) {
+                finish(true)
+            } else {
+                // 写盘失败要说清"存在哪儿"，否则用户只能看到"点了没反应" ✗
+                note.set_text("保存失败（目录不可写？）：" + cfg.store_path())
+                SDL3.markFrameRedraw()
+            }
+        })
+        // 标题栏 ✕ 必须自己接（TitleBar 只置 closeRequested ✓）
+        tb.on_close(func() { finish(false) })
+
+        SDL3.runModal(dlg,
+            func(Event ev): bool {
+                if ev.isQuit() { return false }
+                if ev.isWindowClose() { finish(false); return false }
+                if ev.isKeyDown() and ev.scancode() == Scancode.ESCAPE { finish(false); return false }
+                if closing { return false }
+                return true
+            },
+            func(Renderer r) { SDL3.dialogFramePaint(r, dw, tbH + dh) }
+        )
+        SDL3.markFrameRedraw()
+    }
+
+    func finish(bool ok) {
+        saved = ok
+        closing = true
+        SDL3.markFrameRedraw()
+    }
+}
+
+// 打开"设置"窗口（模态）。返回 true = 用户点了保存且**已写盘成功** ✓
+export func show_settings_window(): bool {
+    SettingsDialog d = new SettingsDialog()
+    d.build()
+    return d.saved
+}

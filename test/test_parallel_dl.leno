@@ -1,0 +1,360 @@
+// test_parallel_dl.leno — **无 GUI** 的多首歌并行下载测试（离线：本机 HTTP 服务端 ✓）
+//
+// 跑：cd D:\CLeno\Leno 后
+//   build\leno.exe leno_gui\应用\音乐下载器\test\test_parallel_dl.leno
+//
+// 为什么能离线测（2026-10-07 加了"多首歌并行"之后补的）：
+//   "并行"那一层的风险全在**机制**上 —— N 个线程、**共用一条**进度通道（按 idx 归位）、
+//   **每线程一条**命令通道（取消/暂停得人人发到）、`state()` + `join()` 汇总；
+//   这些与"取直链"无关 ⇒ 把"直链"指向本机服务端即可无外网、可重复地压 ✓
+//
+// ⚠ 测并行耗时的**唯一正确姿势**（踩过一次）：**每个任务一个独立服务端**。
+//   单个服务端一次只服务一条连接（accept 循环里处理完才 accept 下一个），就算客户端
+//   100% 并行，它也会把 N 个请求排成队 ⇒ 总耗时照样 ≈ N×延迟，测不出东西来 ✗
+//   （这条经验 LenoWeb 的 _testkit.leno 里也写着："/slow/ 路由 + N 个独立服务端"）
+//
+// 四组断言：
+//   ① 并行度口径：`dl_workers`（任务少就少开 / 上限来自设置 / 上限非法回落默认）+ 设置钳位
+//   ② 分片切法：引擎里的**步进**写法 与 规范定义 `dl_mine` **对拍**，且全量下标不重不漏
+//   ③ **真并行**：4 个线程各下一首、**4 个各自独立的服务端**（每个响应前延迟 200ms）
+//        · 汇总 join 结果、每个 idx 都收到进度消息、4 个文件逐字节正确
+//        · 墙钟 ≈ 1×200ms 而不是 4×200ms ⇒ **确实同时在跑**（串行会 ≥800ms ✓）
+//   ④ **取消广播**：给每个 worker 的**各一条**命令通道发 cancel ⇒ 两个都停在第 1 首；
+//        漏发一个的话那个 worker 会把 3 首全下完（断言 done 数会立刻爆掉 ✓）
+import threads
+import sockets
+import strings
+import dirs
+import files
+import times
+import "web_net" as net
+import "../dl_engine.leno" as eng
+import "../dl_settings.leno" as cfg
+
+// ==================== 断言（与 LenoWeb 的 _testkit 同形：够用就好 ✓）====================
+int PASSED = 0
+int FAILED = 0
+
+func ok(string name, bool cond) {
+    if cond {
+        PASSED = PASSED + 1
+        print("  [ok] " + name)      // 成功的也打一行：耗时类断言的**实测值**就在名字里 ✓
+    } else {
+        FAILED = FAILED + 1
+        print("  [FAIL] " + name)
+    }
+}
+
+func eq(string name, any got, any want) {
+    if _str(got) == _str(want) {
+        PASSED = PASSED + 1
+    } else {
+        FAILED = FAILED + 1
+        print("  [FAIL] " + name)
+        print("         got  = [" + _str(got) + "]")
+        print("         want = [" + _str(want) + "]")
+    }
+}
+
+// ==================== 本机 HTTP 服务端（**每个任务一个** ⇒ 并行才测得出来 ✓）====================
+int BASE_PORT = 39831        // 第 i 首的服务端跑在 BASE_PORT + i
+int TOTAL = 8192             // 每首的字节数（远小于 CHUNK ⇒ 一次请求下完 ✓）
+
+// 确定性的 n 字节正文：第 i 字节 = '0' + (i % 10) ⇒ 可**逐字节**核对"没下串、没截断" ✓
+func body_of(int n): string {
+    Array[int] b = []
+    for n to i { b.add(48 + (i % 10)) }
+    return strings.from_bytes(b)
+}
+
+// 服务端（跑在子线程）：单线程 accept 循环，每个连接回一份 200 全量正文
+//   · **忽略 Range** ⇒ 走 dl_one 的"服务端不支持 Range ⇒ 整体覆盖写"分支（结果同样正确 ✓）
+//   · delayms > 0 ⇒ 每次响应前先睡一会儿 —— 把"并行 vs 串行"变成**可测的时间差** ✓
+//   · 请求路径含 /quit ⇒ 回一份就退出（方便收尾，照 _testkit 的 /quit ✓）
+func server_entry(int port, int maxreq, int delayms) {
+    var srv = sockets.listen("127.0.0.1", port)
+    if srv == null { return }
+    string body = body_of(TOTAL)
+    string resp = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: " +
+                  _str(body.byte_len()) + "\r\nConnection: close\r\n\r\n" + body
+    int n = 0
+    while n < maxreq {
+        var cli = srv.accept()
+        if cli == null { break }
+        cli.set_timeout(3000)
+        string req = ""
+        int g = 0
+        while g < 50 {
+            if strings.has(req, "\r\n\r\n") { break }
+            string part = cli.recv(4096)
+            if part == null or part == "" { break }
+            req = req + part
+            g = g + 1
+        }
+        if req == "" {                    // 就绪探针：连上就关 ⇒ 别占着 delay 白等 ✓
+            cli.close()
+            n = n + 1
+            continue
+        }
+        if strings.has(req, "/quit") {
+            cli.send(resp)
+            cli.close()
+            break
+        }
+        if delayms > 0 { threads.sleep(delayms) }
+        cli.send(resp)
+        cli.close()
+        n = n + 1
+    }
+    srv.close()
+}
+
+// 起 n 个独立服务端（端口 BASE_PORT + k），等全部就绪 ✓
+func start_servers(int baseport, int n, int delayms): Array[Thread] {
+    Array[Thread] out = []
+    for n to k {
+        out.add(threads.start(server_entry, baseport + k, 128, delayms))
+    }
+    for n to k {
+        if not wait_up(baseport + k) {
+            print("  [FAIL] 服务端 " + _str(baseport + k) + " 没起来")
+            FAILED = FAILED + 1
+        }
+    }
+    return out
+}
+
+// 服务端就绪检测（反复 connect，成功即说明 listener 已起 ✓ 照 _testkit.waitUp）
+func wait_up(int port): bool {
+    int t = 0
+    while t < 100 {
+        var p = sockets.connect("127.0.0.1", port)
+        if p != null {
+            p.close()
+            return true
+        }
+        threads.sleep(50)
+        t = t + 1
+    }
+    return false
+}
+
+// 逐个补一条 /quit 让服务端线程收尾
+func stop_servers(int baseport, int n, Array[Thread] ts) {
+    for n to k {
+        var c = sockets.connect("127.0.0.1", baseport + k)
+        if c != null {
+            c.send("GET /quit HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            c.recv(64)
+            c.close()
+        }
+    }
+    for ts to t {
+        if t is Thread {
+            try {
+                t.join()
+            } catch e {
+                print("")        // 服务端线程异常退出：它本来就结束了，记一行继续 ✓
+            }
+        }
+    }
+}
+
+// ==================== worker（必须是**本文件**的具名全局函数 ✓）====================
+// 与 GUI 里的 dl_worker_shard 同构，只把"取直链"换成本机 URL ⇒ 可离线跑 ✓
+//   第 i 首的直链 = http://127.0.0.1:(baseport+i)/song_i（**每首一个独立服务端** ✓）
+func dl_worker(int shard, int nshards, int njobs, int baseport, string outdir, Channel prog, Channel cmd, Channel res) {
+    var client = net.createClient()
+    if not client.isOk() {
+        res.send(["-1", "0", "0"])
+        return
+    }
+    client.setTimeout(8000)
+    int done = 0
+    int cancelled = 0
+    int i = 0
+    while i < njobs {
+        if not eng.dl_mine(i, shard, nshards) {
+            i = i + 1
+            continue
+        }
+        string url = "http://127.0.0.1:" + _str(baseport + i) + "/song" + _str(i)
+        string outpath = dirs.join(outdir, "song" + _str(i) + ".bin")
+        int got = eng.dl_one(client, url, outpath, prog, i, cmd)
+        if got > 0 { done = done + 1 }
+        if got == -2 {
+            cancelled = cancelled + 1
+            break        // 与 dl_entry_shard 的处理一致：取消就收摊 ✓
+        }
+        i = i + 1
+    }
+    client.close()
+    res.send([_str(done), _str(cancelled), "0"])
+}
+
+// 排空进度通道（主线程当"UI 侧"）：按 idx 归位计数 ⇒ 共用通道不串台就能证明 ✓
+func drain(Channel ch, Array[int] perIdx, int njobs): int {
+    int n = 0
+    var m = ch.try_receive()
+    while m != null {
+        if m is Array => mv {
+            int idx = _int(mv[1])
+            if idx >= 0 and idx < njobs { perIdx[idx] = perIdx[idx] + 1 }
+            n = n + 1
+        }
+        m = ch.try_receive()
+    }
+    return n
+}
+
+func count_running(Array[Thread] ts): int {
+    int n = 0
+    for ts to t {
+        if t is Thread {
+            if t.state() == "running" { n = n + 1 }
+        }
+    }
+    return n
+}
+
+// 汇总各 worker 的 [成功数, 取消数]（多线程下就是逐个 join 求和 —— 与窗口 tick() 同做法 ✓）
+func collect(Array[Channel] res): Array[int] {
+    int okcnt = 0
+    int cancelled = 0
+    for res to ch {
+        if ch is Channel => c {
+            var r = c.receive()
+            if r is Array => rr {
+                if rr.len() >= 3 {
+                    okcnt = okcnt + _int(rr[0])
+                    cancelled = cancelled + _int(rr[1])
+                }
+            }
+        }
+    }
+    return [okcnt, cancelled]
+}
+
+// 起 n 个 worker（每个领一份）+ 各一条命令通道 + 各一条结果通道
+func start_workers(int n, int njobs, int baseport, string outdir, Channel prog, Array[Thread] ts, Array[Channel] cmds, Array[Channel] res) {
+    for n to k {
+        Channel cm = threads.channel(16)
+        Channel rs = threads.channel(4)
+        ts.add(threads.start(dl_worker, k, n, njobs, baseport, outdir, prog, cm, rs))
+        cmds.add(cm)
+        res.add(rs)
+    }
+}
+
+main() {
+    print("=== 多首歌并行下载（无 GUI · 离线本机服务端）===")
+
+    // ---------- ① 并行度口径 ----------
+    eq("dl_workers：任务少就少开", eng.dl_workers(2, 4), 2)
+    eq("dl_workers：上限来自设置", eng.dl_workers(10, 4), 4)
+    eq("dl_workers：上限给了 0 ⇒ 回落出厂默认", eng.dl_workers(10, 0), eng.DL_DEFAULT_WORKERS)
+    eq("dl_workers：没任务也给 1（绝不开 0 个线程）", eng.dl_workers(0, 8), 1)
+    eq("设置钳位：下限", cfg.clamp_workers(-5), cfg.WORKERS_MIN)
+    eq("设置钳位：上限", cfg.clamp_workers(999), cfg.WORKERS_MAX)
+
+    // ---------- ② 分片切法：步进写法与 dl_mine 对拍，且不重不漏 ----------
+    int splitbad = 0
+    for 1:5 to ns {
+        int nj = 11
+        Array[int] seen = []
+        for nj to k { seen.add(0) }
+        for ns to sh {
+            int i = sh
+            while i < nj {
+                seen[i] = seen[i] + 1          // 每个下标只能被一个 worker 认领
+                i = i + ns
+            }
+        }
+        for nj to k { if seen[k] != 1 { splitbad = splitbad + 1 } }
+        for ns to sh {
+            for nj to i {
+                if eng.dl_mine(i, sh, ns) != ((i % ns) == sh) { splitbad = splitbad + 1 }
+            }
+        }
+    }
+    eq("分片：不重不漏 + 与 dl_mine 对拍（nshards 1..5）", splitbad, 0)
+
+    // ---------- ③ 真并行：4 首同时下（**4 个独立服务端**，每个延迟 200ms）----------
+    string outdir = dirs.join(_tmpdir(), "leno_parallel_dl_test")
+    dirs.mkdir_p(outdir)
+    int njobs = 4
+    Array[Thread] srvs = start_servers(BASE_PORT, njobs, 200)
+    Channel prog = threads.channel(4096)
+    Array[Thread] ts = []
+    Array[Channel] cmds = []
+    Array[Channel] res = []
+    float t0 = times.ms()
+    start_workers(njobs, njobs, BASE_PORT, outdir, prog, ts, cmds, res)
+    Array[int] perIdx = []
+    for njobs to k { perIdx.add(0) }
+    while count_running(ts) > 0 {
+        drain(prog, perIdx, njobs)
+        threads.sleep(10)
+    }
+    drain(prog, perIdx, njobs)                 // 收尾再排一次（别丢最后几条 ✓）
+    float elapsed = times.ms() - t0
+    Array[int] agg = collect(res)
+    eq("4 首都下完（各 worker 汇总 ✓）", agg[0], njobs)
+    eq("没有被取消的", agg[1], 0)
+    int missing = 0
+    for njobs to k { if perIdx[k] < 1 { missing = missing + 1 } }
+    eq("每个 idx 都收到了进度消息（共用通道按 idx 归位 ✓）", missing, 0)
+    int sizebad = 0
+    for njobs to k {
+        string p = dirs.join(outdir, "song" + _str(k) + ".bin")
+        string got = ""
+        try {
+            got = files.read(p)
+        } catch e {
+            got = ""
+        }
+        if got.byte_len() != TOTAL { sizebad = sizebad + 1 }
+        if got != body_of(TOTAL) { sizebad = sizebad + 1 }     // 逐字节（并行下没串台 ✓）
+    }
+    eq("4 个文件长度与内容都对", sizebad, 0)
+    ok("并行确实省时间：4×200ms 串行要 ≥800ms，实测 " + _str(_int(elapsed)) + "ms < 600ms", elapsed < 600.0)
+    stop_servers(BASE_PORT, njobs, srvs)
+
+    // ---------- ④ 取消**广播**（每人一条命令通道）----------
+    int port2 = BASE_PORT + 50
+    string outdir2 = dirs.join(_tmpdir(), "leno_parallel_dl_cancel")
+    dirs.mkdir_p(outdir2)
+    int nj2 = 6            // 2 个 worker × 各 3 首（服务端每响一次慢 300ms ⇒ 全下完 ≈900ms）
+    int nw2 = 2
+    Array[Thread] srvs2 = start_servers(port2, nj2, 300)
+    Channel prog2 = threads.channel(4096)
+    Array[Thread] ts2 = []
+    Array[Channel] cmds2 = []
+    Array[Channel] res2 = []
+    Array[int] sink = []
+    float t2 = times.ms()
+    start_workers(nw2, nj2, port2, outdir2, prog2, ts2, cmds2, res2)
+    threads.sleep(150)
+    // **人人发一条**：漏发一个，那个 worker 就会把 3 首全下完 ⇒ 下面的 done 数立刻爆掉 ✓
+    for cmds2 to c {
+        if c is Channel => cc { cc.try_send("cancel") }
+    }
+    while count_running(ts2) > 0 {
+        drain(prog2, sink, 0)
+        threads.sleep(20)
+    }
+    float el2 = times.ms() - t2
+    Array[int] agg2 = collect(res2)
+    eq("取消后两个 worker 都停在第 1 首之后（done 合计 2 / 6）", agg2[0], 2)
+    eq("两个 worker 都收到了取消（各 1）", agg2[1], 2)
+    ok("取消生效得够快：实测 " + _str(_int(el2)) + "ms < 800ms（漏发一条的话另一个会下到 ≈900ms ✗）", el2 < 800.0)
+    stop_servers(port2, nj2, srvs2)
+
+    print("")
+    print("通过 " + _str(PASSED) + " / 失败 " + _str(FAILED))
+    if FAILED > 0 {
+        print("test_parallel_dl FAILED")
+        _exit(1)
+    }
+    print("test_parallel_dl passed")
+}

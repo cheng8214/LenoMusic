@@ -1,0 +1,44 @@
+// test_settings.leno — 设置的**真文件读写**回归（纯逻辑、无 SDL3 ⇒ 无 GUI 可跑 ✓）
+//
+// 跑：cd D:\CLeno\Leno 后
+//   build\leno.exe leno_gui\应用\音乐下载器\test\test_settings.leno
+//
+// ⚠ 会真写配置文件（%APPDATA%\LenoMusicDl\settings.json）：**测完把原值写回去**，不留痕 ✓
+//   （这也是"配置坏了不该让应用起不来"的另一面：读写必须真的经过文件系统才算测过 ✓）
+import strings
+import "../dl_settings.leno" as cfg
+use cfg.DlSettings
+
+main() {
+    print("=== 设置读写（真文件）===")
+    print("   " + cfg.store_path())
+
+    DlSettings keep = cfg.load()          // 先记下原来的（测完放回去 ✓）
+
+    DlSettings probe = new DlSettings()
+    probe.workers = 7
+    probe.lyric = not keep.lyric
+    assert_eq(cfg.save(probe), true)
+    DlSettings back = cfg.load()
+    assert_eq(back.workers, 7)
+    assert_eq(back.lyric, not keep.lyric)
+
+    // 越界值：**落盘前**就该被钳住 ⇒ 文件里永远不出现非法值 ✓
+    DlSettings wild = new DlSettings()
+    wild.workers = 999
+    cfg.save(wild)
+    assert_eq(cfg.load().workers, cfg.WORKERS_MAX)
+
+    DlSettings low = new DlSettings()
+    low.workers = -3
+    cfg.save(low)
+    assert_eq(cfg.load().workers, cfg.WORKERS_MIN)
+
+    // 还原用户原来的设置
+    cfg.save(keep)
+    DlSettings fin = cfg.load()
+    assert_eq(fin.workers, keep.workers)
+    assert_eq(fin.lyric, keep.lyric)
+
+    print("test_settings passed")
+}

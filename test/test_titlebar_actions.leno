@@ -1,0 +1,43 @@
+// test_titlebar_actions.leno — 标题栏"动作按钮"的**离线**回归（纯逻辑：解析 + 内置图标名判定 ✓）
+//
+// 跑：cd D:\CLeno\Leno 后
+//   build\leno.exe leno_gui\应用\音乐下载器\test\test_titlebar_actions.leno
+//
+// ⚠ 这里**不建窗口、不初始化 SDL**：只压两个纯函数（`parseTitleBarActions` / `is_builtin_icon`）——
+//   几何/命中/绘制必须真窗口，那部分靠应用里真点一遍看（--check 只保证语义 ✓）
+import strings
+import "sdl_titlebar" as tb
+use tb.TitleBarAction
+
+main() {
+    print("=== 标题栏动作按钮（离线：解析 + 内置图标判定）===")
+
+    // ① 解析：id / icon / tip / enabled 都要落位；**没有 id 的丢掉** ✓
+    Array[Dict] src = []
+    src.add({id: "settings", icon: "gear", tip: "设置"})
+    src.add({id: "theme", image: "images/moon.png", tip: "主题", enabled: false})
+    src.add({icon: "gear", tip: "没有 id ⇒ 应当被丢掉"})
+    Array[TitleBarAction] acts = tb.parseTitleBarActions(src)
+    assert_eq(acts.len(), 2)
+    assert_eq(acts[0].id, "settings")
+    assert_eq(acts[0].icon, "gear")
+    assert_eq(acts[0].tip, "设置")
+    assert_eq(acts[0].enabled, true)
+    assert_eq(acts[1].id, "theme")
+    assert_eq(acts[1].icon, "images/moon.png")   // `image` 键也认（菜单那套键名 ✓）
+    assert_eq(acts[1].enabled, false)
+
+    // ② 内置矢量名判定 —— 库与应用都靠它区分"矢量名 vs 图片路径" ✓
+    assert_eq(tb.is_builtin_icon("gear"), true)
+    assert_eq(tb.is_builtin_icon("settings"), true)
+    assert_eq(tb.is_builtin_icon("menu"), true)
+    assert_eq(tb.is_builtin_icon("sun"), true)
+    assert_eq(tb.is_builtin_icon("images/x.png"), false)
+    assert_eq(tb.is_builtin_icon(""), false)
+
+    // ③ 空输入不炸（应用里 actions 默认就是空 ✓）
+    Array[Dict] none = []
+    assert_eq(tb.parseTitleBarActions(none).len(), 0)
+
+    print("test_titlebar_actions passed")
+}

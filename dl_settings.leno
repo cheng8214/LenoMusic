@@ -1,0 +1,83 @@
+// dl_settings.leno — 音乐下载器的**设置**（纯逻辑：读写配置 + 取值钳位；**不 import SDL3 ⇒ 可单测 ✓**）
+//
+// 分层照 电脑清理大师：`cleaner_whitelist.leno`（纯逻辑，能被 test/ 直接单测）/ `cleaner_detail.leno`（SDL3 弹窗）
+//   ⇒ 本文件只回答"配置是什么、存哪儿、怎么读怎么写"，画界面是 dl_settings_win.leno 的事 ✓
+//
+// 存放位置（与 cleaner_whitelist 同款）：
+//   Windows  ：%APPDATA%\LenoMusicDl\settings.json
+//   Linux/macOS：$XDG_CONFIG_HOME 或 ~/.config/LenoMusicDl/settings.json
+//   ⚠ 不放在应用目录：打包后应用目录可能是只读的、或每次运行都换个临时目录 ✓
+import dirs
+import jsons
+import files
+
+// 并行下载线程数的**硬范围**（设置窗口与钳位共用 ⇒ 口径只此一处 ✓）
+export const int WORKERS_MIN = 1
+export const int WORKERS_MAX = 16
+
+export struct DlSettings {
+    int workers = 4      // 并行下载线程数（**多首歌同时下**）；默认值见 dl_engine.DL_DEFAULT_WORKERS
+    bool lyric = true    // 启动时默认勾上"同时下载歌词"
+}
+
+// 钳到合法范围（设置窗口的输入、配置文件的脏值都过这里 ✓）
+export func clamp_workers(int n): int {
+    if n < WORKERS_MIN { return WORKERS_MIN }
+    if n > WORKERS_MAX { return WORKERS_MAX }
+    return n
+}
+
+// 配置目录（平台判断只有这一份 ✓ —— 与 cleaner_whitelist 的 store_path 同路数）
+func app_dir(): string {
+    if _os() == "windows" {
+        return dirs.join(_env_or("APPDATA", _tmpdir()), "LenoMusicDl")
+    }
+    string base = _env_or("XDG_CONFIG_HOME", "")
+    if base == "" {
+        string home = _env_or("HOME", "")
+        if home == "" { base = _tmpdir() } else { base = dirs.join(home, ".config") }
+    }
+    return dirs.join(base, "LenoMusicDl")
+}
+
+export func store_path(): string {
+    return dirs.join(app_dir(), "settings.json")
+}
+
+// 读配置：文件不存在 / 坏了 / 字段超范围 ⇒ **一律回落默认**（配置坏了不该让应用起不来 ✓）
+export func load(): DlSettings {
+    DlSettings s = new DlSettings()
+    string p = store_path()
+    if not dirs.stat(p).exists { return s }
+    var d = null
+    try {
+        d = jsons.read_file(p)
+    } catch e {
+        return s
+    }
+    if d is Dict[string, any] => m {
+        if m.has("workers") {
+            s.workers = clamp_workers(jsons.get_int(m, "workers", s.workers))
+        }
+        if m.has("lyric") {
+            s.lyric = jsons.get_bool(m, "lyric", s.lyric)
+        }
+    }
+    return s
+}
+
+// 写配置（先钳位再落盘 ⇒ 文件里永远不会出现非法值 ✓）
+export func save(DlSettings s): bool {
+    int w = clamp_workers(s.workers)
+    try {
+        dirs.mkdir_p(app_dir())     // 目录从 app_dir() 推导（平台判断只有一份 ✓）
+    } catch e {
+        return false
+    }
+    try {
+        jsons.write_file(store_path(), {version: 1, workers: w, lyric: s.lyric})
+    } catch e {
+        return false
+    }
+    return true
+}
