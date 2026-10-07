@@ -11,6 +11,7 @@ import "../player.leno" as pl
 import "../player_bar.leno" as pb        // 只测它的纯逻辑 playable_count（不建控件 ✓）
 import dirs
 import files
+import strings
 use pl.Player
 
 var fails = 0
@@ -180,6 +181,21 @@ main() {
     check("试听歌词：**文件晚到也能补读** ✓（不换歌/不重启 ✓）", s3.lyric_count() == 2)
     check("试听歌词：补读后取词正确 ✓", s3.lyric_text_at(1) == "第二句")
     files.delete(dirs.join(tdir2, "晚到 - 歌手.lrc"))
+
+    // ---- ⑫ 歌词折行（2026-10-08 新增 ✓ 纯算术 ⇒ 能离线测 ✓）----
+    //   为什么要有：一句 30+ 字的歌词在"当前句"17pt 下会**顶到浮层边上** ✗（实测 ✓）
+    //   规则：中文/全角 = 2 单元、其余 = 1 单元；放不下就在**字与字之间**断 ✓
+    var wp = pl.wrap_units("一二三四五", 6)          // 每字 2 单元 ⇒ 一行 3 字
+    check("折行：五个汉字、限 6 单元 ⇒ 两段（3+2 ✓）", wp.len() == 2 and wp[0] == "一二三" and wp[1] == "四五")
+    var wa = pl.wrap_units("abcdefg", 4)
+    check("折行：ASCII 限 4 ⇒ 两段（4+3 ✓）", wa.len() == 2 and wa[0] == "abcd" and wa[1] == "efg")
+    //   ⚠ 上限传 3 是**测不到**的：实现里小于 4 会兜底成 4 ✗（第一版用例就栽在这 ✓）
+    var wm = pl.wrap_units("ab你cd", 5)              // a=1 b=2 你=4 c=5 ⇒ 满；d 另起
+    check("折行：混排按单元算（ab你c 占满 5 单元 ✓）", wm.len() == 2 and wm[0] == "ab你c" and wm[1] == "d")
+    check("折行：能放下就**不折** ✓", pl.wrap_units("短句", 20).len() == 1)
+    check("折行：空串 ⇒ 空表（不崩 ✓）", pl.wrap_units("", 10).len() == 0)
+    check("折行：上限过小按 4 兜底（不死循环 ✗）", pl.wrap_units("一二三", 1).len() >= 2)
+    check("判宽：汉字算宽 ✓ / ASCII 算窄 ✓", pl.is_wide_cp(strings.codepoint_at("你", 0)) and not pl.is_wide_cp(strings.codepoint_at("a", 0)))
 
     // ---- 清理临时文件（别在用户机器上留垃圾 ✓）----
     var left = dirs.listdir(dir)

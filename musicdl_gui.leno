@@ -411,6 +411,22 @@ struct MusicDlApp {
                 SDL3.requestExit()
             }
         }
+        // ★ 歌词面板里点了"立即下载歌词" ⇒ 由**本文件**去下（要起线程 + 开下载窗口，只有这里能做 ✓）
+        //   ⚠ 拿得到歌曲 ID 的前提：当前这首**在搜索结果里**（试听时记下的那行 ✓ gPrevRow）
+        //     列表里的歌（磁盘文件名）没有 ID ✗ ⇒ 老实说清"去搜索结果里右键"✓ 不瞎猜 ✗
+        if pbar is PlayerBar => pbLyr {
+            if pbLyr.wantLyricFetch {
+                pbLyr.wantLyricFetch = false
+                string nowTag = pbLyr.cur_tag()
+                if gPrevRow.len() > eng.F_ARTIST and eng.songlabel(gPrevRow) == nowTag {
+                    onDownloadLyricOnly([gPrevRow])
+                    stateLbl.set_text("去下这首的歌词：" + nowTag)
+                } else {
+                    stateLbl.set_text("这首不在搜索结果里（" + nowTag + "）⇒ 到搜索结果里右键「下载歌词」")
+                }
+                SDL3.markFrameRedraw()
+            }
+        }
         try {
             pollSearch()
             pollBgDownload()           // 试听配套的"整首下载"回信（进度/完成 ✓）
@@ -533,6 +549,7 @@ struct MusicDlApp {
     //   走的是与搜索/下载完全相同的"线程 + 通道 + 120ms 排空"套路 ✓
     func startPreview(Array[string] one) {
         if one.len() <= eng.F_ARTIST { return }
+        gPrevRow = one                                      // 记下"试听的是哪一行"⇒ 歌词面板能据此补下歌词 ✓
         string ext = "mp3"
         if one.len() > eng.F_EXT and one[eng.F_EXT] != "" { ext = one[eng.F_EXT] }
         string out = dirs.join(_tmpdir(), "leno_preview_" + one[eng.F_ID] + "." + ext)
@@ -1207,6 +1224,11 @@ Channel? gBgDlCh = null
 Thread? gBgDlThread = null
 string gBgDlTag = ""
 bool gBgDlRunning = false
+
+// 最近一次"试听"的那一行（搜索结果里的整行 ✓）
+//   为什么记它：歌词面板的"立即下载歌词"要**歌曲 ID** ✓；只有搜索结果的行才带 ID ✓
+//   列表里的歌是磁盘文件名（没有 ID ✗）⇒ 那种情况只能提示用户去搜索结果里右键 ✓ 不瞎猜 ✗
+Array[string] gPrevRow = []
 // 悬停自检（本仓无头环境点不到、移不动鼠标 ⇒ 用注入 ✓）：
 //   `DHOVER=1` ⇒ 第 2 拍把指针移到播放键上，配合 `DSHOT` 截图即可验"悬停色到底画没画" ✓
 //   用法：DCROP=110 DSHOT=<png> DSHOT_AT=30 DHOVER=1 build\leno.exe <本文件> ✓

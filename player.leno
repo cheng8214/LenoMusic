@@ -15,6 +15,53 @@ use audio.Sound
 //   ⚠ 按**最后**一处 `" - "` 切：歌名自己带 `" - "` 也不怕（`A - B - 歌手` ⇒ 歌名 `A - B` ✓）
 //   ⚠ 拆不出（用户自己丢进来的歌 / 名字里没有分隔符）⇒ 歌手 ""、整条当歌名 ✓ —— 不硬猜 ✗
 
+// ==================== 歌词折行（纯逻辑 ✓ 能离线单测）====================
+// 为什么要有：一句 30+ 字的歌词，在"当前句"17pt 下会**超出浮层宽度顶到边上** ✗（先前实测 ✓）
+//   ⚠ 判宽**不量字体**（那样就得有 Font、离线测不了 ✗）—— 改用**可视单元**：
+//     中文/日文/韩文/全角标点 = 2 单元，其余 = 1 单元 ✓（CJK 大致就是半角两倍宽 ✓ 够准 ✓）
+//     调用方按字号换算上限：1 单元 ≈ 字号 ÷ 2（`max_units = 可用宽 ÷ (字号/2)` ✓）
+
+// 这个码点占"两个半角单元"吗（常用 CJK 范围；够了 ✓ 冷僻区不追求 ✓）
+// ⚠ 用十进制写（十六进制字面量在这个语言里没把握 ✗ 别赌 ✓），注释里标 16 进制便于核对 ✓
+export func is_wide_cp(int cp): bool {
+    if cp < 0 { return false }
+    if cp >= 4352 and cp <= 4447 { return true }          // 0x1100-0x115F 谚文字母
+    if cp >= 11904 and cp <= 42191 { return true }        // 0x2E80-0xA4CF 部首/汉字/假名/注音…
+    if cp >= 44032 and cp <= 55203 { return true }        // 0xAC00-0xD7A3 谚文音节
+    if cp >= 63744 and cp <= 64255 { return true }        // 0xF900-0xFAFF 兼容汉字
+    if cp >= 65072 and cp <= 65135 { return true }        // 0xFE30-0xFE6F 全角标点
+    if cp >= 65280 and cp <= 65376 { return true }        // 0xFF00-0xFF60 全角形式
+    if cp >= 65504 and cp <= 65510 { return true }        // 0xFFE0-0xFFE6 全角符号
+    if cp >= 131072 { return true }                       // ≥0x20000 扩展汉字
+    return false
+}
+
+// 一句歌词按单元折成 1..N 段（空串 ⇒ 空表 ✓；`maxUnits` 太小按 4 兜底 ✓ 免得死循环 ✗）
+export func wrap_units(string text, int maxUnits): Array[string] {
+    Array[string] parts = []
+    if text == null { return parts }
+    int total = text.len()
+    if total == 0 { return parts }
+    if maxUnits < 4 { maxUnits = 4 }
+    string cur = ""
+    int w = 0
+    int i = 0
+    while i < total {
+        int cw = 1
+        if is_wide_cp(strings.codepoint_at(text, i)) { cw = 2 }
+        if w + cw > maxUnits and cur != "" {         // 放不下就断（**断在字与字之间** ✓ 不切半个字）
+            parts.add(cur)
+            cur = ""
+            w = 0
+        }
+        cur = cur + text.sub_str(i, 1)
+        w = w + cw
+        i = i + 1
+    }
+    if cur != "" { parts.add(cur) }
+    return parts
+}
+
 // 去掉扩展名（找**最后**一个点 ✓）："a.b.mp3" ⇒ "a.b"；没有点 ⇒ 原样 ✓
 export func strip_ext(string name): string {
     if name == null { return "" }

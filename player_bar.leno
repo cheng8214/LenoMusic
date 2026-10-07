@@ -106,6 +106,22 @@ export struct PlayerBar {
     float lrcSmooth = 0.0        // 当前句 → 下一句 的进度 0..1（**平滑上滚**就靠它 ✓）
     float lrcWheel = 0.0         // 用户滚轮翻出来的偏移（行 ✓；换句时慢慢归零 ✓）
     float lrcFade = 0.0          // 换句淡入 0..1（新句"亮起来"✓）
+
+    // ---- 折行窗口缓存（2026-10-08 ✓ 只在**换句/换歌**时重算 ✗ 不是每帧 ✓）----
+    //   每句按字号折成 1..N 个"文本行" ⇒ 展平成两个平行数组（句号 / 文本）即可 ✓
+    //   为什么不存 `Array[Array[string]]`：那种嵌套数组当**字段**赋值时类型推不出来 ✗（本仓踩过 ✓）
+    int lrcWinCur = -999         // 这份缓存是按哪一句算的
+    string lrcWinTrack = "\x01"  // 以及哪一首
+    Array[int] lrcRowLine = []   // 第 k 个"文本行"属于第几句 ✓
+    Array[string] lrcRowText = []// 第 k 个"文本行"的内容 ✓
+    float lrcCurRow = 0.0        // 当前句在这串文本行里的**中心**位置（居中基准 ✓）
+    int lrcCurRows = 1           // 当前句折了几行（平滑滚动与高亮条高度都按它 ✓）
+    bool wantLyricFetch = false  // ★ 面板里"立即下载歌词"被点了 ⇒ 宿主（主界面）看到就去下 ✓
+    // 面板里两个"小药丸"的位置（**画布内坐标** ✓ 与 Canvas.on_click 给的一致 ✓；不画时给负值 ✓）
+    float pillBackX = -1.0
+    float pillBackY = -1.0
+    float pillFetchX = -1.0
+    float pillFetchY = -1.0
     float lastBoxH = -1.0        // 上次给外层盒子的高度（不变就别再 set/刷帧 ✗）
 
     float discAngle = 0.0        // 唱片当前角度（度 ✓）
@@ -361,8 +377,22 @@ export struct PlayerBar {
                 if lrcWheel < -60.0 { lrcWheel = -60.0 }
                 SDL3.markFrameRedraw()
             })
-            // 点某句 ⇒ 跳到那一句（**只有完整文件能跳** ✓ 闸门同进度条 ✓）
-            lrcView.on_click(func(float lx, float ly, int btn) { jump_lyric(ly) })
+            // 点击：先看两颗药丸（回到当前句 / 立即下载歌词 ✓），否则当"点某句 ⇒ 跳那一句" ✓
+            lrcView.on_click(func(float lx, float ly, int btn) {
+                if pillBackY >= 0.0 and ly >= pillBackY and ly <= pillBackY + 26.0
+                   and lx >= pillBackX and lx <= pillBackX + 104.0 {
+                    lrcWheel = 0.0                     // ★ ④ 回到当前句（抵消手翻的偏移 ✓）
+                    SDL3.markFrameRedraw()
+                    return
+                }
+                if pillFetchY >= 0.0 and ly >= pillFetchY and ly <= pillFetchY + 32.0
+                   and lx >= pillFetchX and lx <= pillFetchX + 138.0 {
+                    wantLyricFetch = true              // ★ ⑤ 交给宿主去下（本文件碰网络线程会越界 ✗）
+                    SDL3.markFrameRedraw()
+                    return
+                }
+                jump_lyric(ly)
+            })
 
             // 音量：只在这里改（tick 不碰滑块 ⇒ 不会跟用户对着拽 ✓ 见文件头 ⚠①）
             volSld.on_change(func(float v) {
@@ -502,6 +532,10 @@ export struct PlayerBar {
             lrcWheel = lrcWheel * 0.5           // 手动偏移慢慢归零（不永久偏着 ✓）
         }
         lrcSmooth = q.lyric_progress()
+        // ③ 折行窗口：换句 / 换歌 / 之前还是空的（歌词刚补读到 ✓）⇒ 重算一次（不是每帧 ✓）
+        if changed or lrcWinCur != li or lrcWinTrack != q.current_name() or (lrcRowText.len() == 0 and q.lyric_count() > 0) {
+            rebuild_lrc_window(q)
+        }
         if lrcFade < 1.0 {
             lrcFade = lrcFade + 0.16
             if lrcFade > 1.0 { lrcFade = 1.0 }
@@ -510,67 +544,161 @@ export struct PlayerBar {
         if q.playing or changed or lrcFade < 1.0 { SDL3.markFrameRedraw() }
     }
 
-    // ==================== 自绘：歌词浮层（2026-10-08 ✓ 从 ListBox 换成画布）====================
-    //   为什么换掉 `ListBox`：它整表**一套字号/行高** ⇒ 做不出"当前句放大 + 邻近句淡出" ✗（用户点名 ✓）
-    //   画什么（由下到上）：
-    //     ① 圆角白底 + 细边（画布是透明的 ⇒ 底得自己画 ✓）
-    //     ② 每句一行：离"当前句"越远 ⇒ 字号档越小、越淡（假景深 ✓）；范围外**不画** ✓（省渲染 ✓）
-    //     ③ 当前句：大号深色 + 淡蓝高亮条 + 左缘竖条 ⇒ "正在唱"一眼可见 ✓
-    //     ④ 上下两条**渐隐带**（用底色叠出来 ✓）⇒ 句子是淡出，不是被硬切 ✗
-    //   ⚠ 平滑上滚：整块按 `lrcSmooth`（句内进度 ✓）+ `lrcWheel`（手动翻 ✓）整体平移 ✓
-    func draw_lyrics(Renderer r, float ox, float oy, float cw, float ch) {
-        if cw < 60.0 or ch < 60.0 { return }
-        r.setColor(#FFFFFFFF)
-        r.fillRoundedRect(ox, oy, cw, ch, 10.0)
-        r.setColor(#E2E5EBFF)
-        r.drawRoundedRect(ox + 0.5, oy + 0.5, cw - 1.0, ch - 1.0, 10.0)
-        int n = 0
-        if p is Player => q { n = q.lyric_count() }
-        if n <= 0 {
-            r.drawTextCentered(lrcFontMid, "这首歌没有歌词", ox, cw, oy + ch * 0.5 - 18.0, #9AA0AEFF)
-            r.drawTextCentered(lrcFontSmall, "下载时勾上「同时下载歌词」就能带上", ox, cw, oy + ch * 0.5 + 6.0, #B6BCC8FF)
-            return
-        }
+    // ==================== 折行窗口：把"当前句 ±6 句"摊成文本行（2026-10-08 ✓）====================
+    //   为什么摊平：折行后"一句"可能占 1..N 行 ⇒ 后面画/点/居中全按**文本行**算最简单 ✓
+    //   重算时机：换句 / 换歌 / 之前还是空的（歌词刚补读 ✓）—— **不是每帧** ✗
+    func rebuild_lrc_window(Player q) {
         int cur = lastLrcLine
-        if cur < 0 { cur = 0 }                 // 还没唱到第一句 ⇒ 先把第一句摆中线（不然整块空白 ✗）
-        float centerY = oy + ch * 0.50
-        float shift = (_float(cur) + lrcSmooth - lrcWheel) * LRC_ROW
-        // ⚠ 别把这两个变量叫 `from` / `to` ✗ —— `to` 是语言关键字（`for a : b to k` ✓），
-        //   `from` 也会让解析器犯迷糊（实测报"期望变量名" ✓）
+        if cur < 0 { cur = 0 }
+        lrcWinCur = cur
+        lrcWinTrack = q.current_name()
+        lrcRowLine = []
+        lrcRowText = []
+        lrcCurRow = 0.0
+        lrcCurRows = 1
+        int n = q.lyric_count()
+        if n <= 0 { return }
         int lo = cur - 6
         int hi = cur + 6
         if lo < 0 { lo = 0 }
         if hi > n - 1 { hi = n - 1 }
         int i = lo
         while i <= hi {
-            float y = centerY + _float(i) * LRC_ROW - shift
-            if y > oy - 20.0 and y < oy + ch + 20.0 {
-                string tx = ""
-                if p is Player => q2 { tx = q2.lyric_text_at(i) }
-                int dist = i - cur
+            int dist = i - cur
+            if dist < 0 { dist = -dist }
+            float fsz = 12.5
+            if dist == 0 { fsz = 17.0 } eif dist == 1 { fsz = 14.0 }
+            // 可用宽度 ÷ 半个字号 = 允许多少"半角单元"（留 34px 给左右留白 + 竖条 ✓）
+            int units = _int((LRC_W - 34.0) / (fsz * 0.5))
+            Array[string] ps = pl.wrap_units(q.lyric_text_at(i), units)
+            if ps.len() == 0 { ps = [""] }
+            if i == cur {
+                lrcCurRows = ps.len()
+                lrcCurRow = _float(lrcRowLine.len()) + (_float(ps.len()) - 1.0) * 0.5
+            }
+            int k = 0
+            while k < ps.len() {
+                lrcRowLine.add(i)
+                lrcRowText.add(ps[k])
+                k = k + 1
+            }
+            i = i + 1
+        }
+    }
+
+    // ==================== 自绘：歌词浮层（2026-10-08 ✓ 从 ListBox 换成画布）====================
+    //   为什么换掉 `ListBox`：它整表**一套字号/行高** ⇒ 做不出"当前句放大 + 邻近句淡出" ✗（用户点名 ✓）
+    //   画什么（由下到上）：
+    //     ① 圆角白底 + 细边（画布是透明的 ⇒ 底得自己画 ✓）
+    //     ② **长句折行**：一句按字号折成 1..N 个文本行（先前超长句会顶到边上 ✗）
+    //     ③ 离"当前句"越远 ⇒ 字号档越小、越淡（假景深 ✓）；范围外**不画** ✓（省渲染 ✓）
+    //     ④ 当前句：大号 + 淡蓝高亮条（盖住它**折后的所有行** ✓）+ 左缘竖条 ✓
+    //        ★ 且按**句内进度逐字刷色**（未唱=冷灰、已唱=深色，从同一个起点画 ⇒ 前缀正好盖住 ✓）
+    //     ⑤ 上下两条**渐隐带**（用底色叠出来 ✓）⇒ 句子是淡出，不是被硬切 ✗
+    //     ⑥ 手翻过 ⇒ 右下角一颗"回到当前句"药丸 ✓；没歌词 ⇒ 一颗"立即下载歌词"药丸 ✓
+    //   ⚠ 平滑上滚：整块按 `lrcSmooth`（句内进度 ✓，折行的当前句按行数摊平 ✓）+ `lrcWheel` 平移 ✓
+    func draw_lyrics(Renderer r, float ox, float oy, float cw, float ch) {
+        if cw < 60.0 or ch < 60.0 { return }
+        r.setColor(#FFFFFFFF)
+        r.fillRoundedRect(ox, oy, cw, ch, 10.0)
+        r.setColor(#E2E5EBFF)
+        r.drawRoundedRect(ox + 0.5, oy + 0.5, cw - 1.0, ch - 1.0, 10.0)
+        pillBackX = -1.0
+        pillBackY = -1.0
+        pillFetchX = -1.0
+        pillFetchY = -1.0
+        int n = 0
+        if p is Player => q { n = q.lyric_count() }
+        if n <= 0 {
+            // ---- 没歌词：给一句说明 + **一颗能直接下歌词的药丸**（复用宿主的"只下歌词"流程 ✓）----
+            r.drawTextCentered(lrcFontMid, "这首歌没有歌词", ox, cw, oy + ch * 0.5 - 40.0, #9AA0AEFF)
+            float bw = 138.0
+            float bh = 32.0
+            float bx = ox + (cw - bw) * 0.5
+            float by = oy + ch * 0.5 - 4.0
+            r.setColor(#EAF1FCFF)
+            r.fillRoundedRect(bx, by, bw, bh, 16.0)
+            r.setColor(#C8D9F2FF)
+            r.drawRoundedRect(bx + 0.5, by + 0.5, bw - 1.0, bh - 1.0, 16.0)
+            r.drawTextCentered(lrcFontMid, "立即下载歌词", ox, cw, by + 8.0, #2A6CC8FF)
+            pillFetchX = bx - ox
+            pillFetchY = by - oy
+            r.drawTextCentered(lrcFontSmall, "（拿不到这首的行信息时，请到搜索结果里右键「下载歌词」）", ox, cw, by + bh + 12.0, #B6BCC8FF)
+            return
+        }
+        // 浮层刚开、或 tick 还没轮到 ⇒ 就地补算一次（不然会画成空白 ✗）
+        if lrcRowText.len() == 0 {
+            if p is Player => q2 { rebuild_lrc_window(q2) }
+        }
+        int cur = lastLrcLine
+        if cur < 0 { cur = 0 }
+        float centerY = oy + ch * 0.50
+        float smoothRows = 0.0
+        if lrcCurRows > 0 { smoothRows = lrcSmooth / _float(lrcCurRows) }
+        float shift = (lrcCurRow + smoothRows - lrcWheel) * LRC_ROW
+        // ---- ④ 当前句的高亮条：盖住它折后的**所有**文本行 ----
+        float bandTop = centerY + (lrcCurRow - (_float(lrcCurRows) - 1.0) * 0.5) * LRC_ROW - shift - 15.0
+        float bandH = _float(lrcCurRows) * LRC_ROW - 6.0
+        float a = lrcFade
+        r.setColorFloat(0.29, 0.51, 0.86, 0.09 + 0.11 * a)
+        r.fillRoundedRect(ox + 8.0, bandTop, cw - 16.0, bandH, 8.0)
+        r.setColorFloat(0.24, 0.51, 0.86, 0.30 + 0.60 * a)
+        r.fillRoundedRect(ox + 10.0, bandTop + 6.0, 3.0, bandH - 12.0, 1.5)
+        // ---- ②③④ 逐"文本行"画字 ----
+        int curChars = 0
+        if p is Player => q3 { curChars = q3.lyric_text_at(cur).len() }
+        int sungTotal = _int(lrcSmooth * _float(curChars) + 0.5)   // 当前句唱到第几个字（逐字刷色 ✓）
+        int charsBefore = 0                                        // 当前句里、本行之前有多少字 ✓
+        int ri = 0
+        while ri < lrcRowText.len() {
+            float y = centerY + _float(ri) * LRC_ROW - shift
+            if y > oy - 24.0 and y < oy + ch + 24.0 {
+                string tx = lrcRowText[ri]
+                int li = lrcRowLine[ri]
+                int dist = li - cur
                 if dist < 0 { dist = -dist }
                 if dist == 0 {
-                    float a = lrcFade
-                    r.setColorFloat(0.29, 0.51, 0.86, 0.09 + 0.11 * a)
-                    r.fillRoundedRect(ox + 8.0, y - 16.0, cw - 16.0, 32.0, 8.0)
-                    r.setColorFloat(0.24, 0.51, 0.86, 0.30 + 0.60 * a)
-                    r.fillRoundedRect(ox + 10.0, y - 11.0, 3.0, 22.0, 1.5)
-                    r.drawTextCentered(lrcFontBig, tx, ox, cw, y - 12.0, #1B2233FF)
+                    // 当前句：整行先画"未唱"冷灰 ✓ 再从**同一 x** 画已唱的部分 ⇒ 前缀字形一致、正好盖住 ✓
+                    float y0 = y - 12.0
+                    // ⚠ `measureString` 是**多返回值** ⇒ 必须解构 ✗（`m[0]` 会报"对象不支持索引" ✓ 实测崩过）
+                    var[float, float](w0, _h0) = lrcFontBig.measureString(tx)
+                    float tx0 = ox + (cw - w0) * 0.5
+                    r.drawText(lrcFontBig, tx, tx0, y0, #A9B7CCFF)
+                    int rc = tx.len()
+                    int sung = sungTotal - charsBefore
+                    if sung > rc { sung = rc }
+                    if sung > 0 {
+                        r.drawText(lrcFontBig, tx.slice(0, sung), tx0, y0, #1B2233FF)
+                    }
+                    charsBefore = charsBefore + rc
                 } eif dist == 1 {
                     r.drawTextCentered(lrcFontMid, tx, ox, cw, y - 9.0, #6A7183FF)
                 } else {
                     r.drawTextCentered(lrcFontSmall, tx, ox, cw, y - 8.0, #A2A8B5AA)
                 }
             }
-            i = i + 1
+            ri = ri + 1
         }
+        // ---- ⑤ 上下渐隐带 ----
         int k = 0
         while k < 5 {
-            float a = 0.92 - _float(k) * 0.185
-            r.setColorFloat(1.0, 1.0, 1.0, a)
+            float fa = 0.92 - _float(k) * 0.185
+            r.setColorFloat(1.0, 1.0, 1.0, fa)
             r.fillRect(ox + 1.0, oy + 1.0 + _float(k) * 5.0, cw - 2.0, 5.0)
             r.fillRect(ox + 1.0, oy + ch - 6.0 - _float(k) * 5.0, cw - 2.0, 5.0)
             k = k + 1
+        }
+        // ---- ⑥ 手翻走了 ⇒ 给一颗"回到当前句"（画在渐隐带**之后** ✓ 免得被压暗 ✗）----
+        if lrcWheel > 2.0 or lrcWheel < -2.0 {
+            float bw2 = 104.0
+            float bh2 = 26.0
+            float bx2 = ox + cw - bw2 - 12.0
+            float by2 = oy + ch - bh2 - 10.0
+            r.setColorFloat(0.55, 0.62, 0.74, 0.22)
+            r.fillRoundedRect(bx2, by2, bw2, bh2, 13.0)
+            r.drawTextCentered(lrcFontSmall, "回到当前句", bx2, bw2, by2 + 6.0, #4A5566FF)
+            pillBackX = bx2 - ox
+            pillBackY = by2 - oy
         }
     }
 
@@ -578,14 +706,17 @@ export struct PlayerBar {
     //   ⚠ 只有完整文件能跳（同进度条那道闸门 ✓）；试听态给一句说明 ✓
     func jump_lyric(float ly) {
         int n = 0
-        int cur = lastLrcLine
         if p is Player => q { n = q.lyric_count() }
         if n <= 0 { return }
-        if cur < 0 { cur = 0 }
+        if lrcRowText.len() == 0 { return }
         float centerY = lrcView.get_h() * 0.50
-        float shift = (_float(cur) + lrcSmooth - lrcWheel) * LRC_ROW
-        // 反解 y = centerY + i*ROW - shift ⇒ i = (y - centerY + shift) / ROW
-        int idx = _int((ly - centerY + shift) / LRC_ROW + 0.5)
+        float smoothRows = 0.0
+        if lrcCurRows > 0 { smoothRows = lrcSmooth / _float(lrcCurRows) }
+        float shift = (lrcCurRow + smoothRows - lrcWheel) * LRC_ROW
+        // 反解"第几个**文本行**"：y = centerY + ri*ROW - shift ⇒ ri = (y - centerY + shift)/ROW
+        int ri = _int((ly - centerY + shift) / LRC_ROW + 0.5)
+        if ri < 0 or ri >= lrcRowLine.len() { return }
+        int idx = lrcRowLine[ri]                 // 该文本行属于哪一句 ✓（折行也准 ✓）
         if idx < 0 or idx >= n { return }
         if p is Player => q2 {
             float t = q2.lyric_time(idx)
@@ -762,6 +893,16 @@ export struct PlayerBar {
         if p is Player => q { q.preview(path, title) }
         lastIdx = -1                     // 让 tick 下一拍必然刷一次（名字/状态立刻更新 ✓）
         SDL3.markFrameRedraw()
+    }
+
+    // 当前播放条上"是哪一首"的标签（试听名 / 曲名去扩展名 ✓）
+    //   宿主判"能不能给这首下歌词"要用：搜索结果的行能对上 ⇒ 才拿得到歌曲 ID ✓
+    func cur_tag(): string {
+        if p is Player => q {
+            if q.previewing { return q.previewName }
+            return pl.strip_ext(dirs.basename(q.current_name()))
+        }
+        return ""
     }
 
     // 当前曲目下标（-1 = 列表空 ✓）—— 宿主显示/自检都可读 ✓
