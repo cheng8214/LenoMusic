@@ -225,6 +225,45 @@ export func search_entry(Array[string] srcids, string keyword, int limit, any ch
 // 进度经 ch 上报，控制命令经 cmd 收。
 // ⚠ 导出是给**无 GUI 的并行测试**直接调用的（test/test_parallel_dl.leno：把"直链"指向本机
 //   服务端 ⇒ 离线就能压 N 线程并行、共用通道按 idx 归位、取消广播）；产品路径仍只走 dl_entry_shard ✓
+// ==================== ①.5 试听：只拉**前一段** ====================
+// 为什么这么干：实测"下载是**顺序追加写** ⇒ 截断文件**前缀自洽** ⇒ 能 load / 能播 / 能给位置" ✓
+//   ⇒ 试听只要前 1~2MB 就够听几十秒 ✓（比等整首快一个量级 ✓）
+// 返回落盘字节数（>0 成功；<0 失败）
+// ⚠ 本函数**不起线程**（语言硬约束：线程入口必须与调用方同文件 ✓）⇒ 由应用在自己的 worker 里调 ✓
+export func dl_preview(string songId, string outpath, int bytes, any ch, string tag): int {
+    if bytes < 65536 { bytes = 65536 }
+    HttpClient client = net.createClient()
+    if not client.isOk() { sendmsg(ch, ["fail", tag, "no-client"]); return -1 }
+    client.setUserAgent(kuwo.useragent())
+    client.setTimeout(30000)
+    client.setSSLVerify(false, false)
+
+    string link = ""
+    try { link = kuwo.getdirecturl(client, songId) } catch e { link = "" }
+    if link == "" { client.close(); sendmsg(ch, ["fail", tag, "no-link"]); return -1 }
+    int n = dl_preview_url(client, link, outpath, bytes, ch, tag)
+    client.close()
+    return n
+}
+
+// 试听的"拉取"那一半：**单独的直链** ⇒ 可离线测（把直链指向本机服务端即可 ✓，
+//   与 test/test_parallel_dl.leno 测 dl_one 是同一套路 ✓）
+export func dl_preview_url(HttpClient client, string link, string outpath, int bytes, any ch, string tag): int {
+    // 只要前 bytes 字节；服务端可能忽略 Range（回 200）⇒ 那也照收（可能收到整首，无妨 ✓）
+    client.replaceHeaders(["Range: bytes=0-" + _str(bytes - 1)])
+    Response r = client.get(link)
+    if r.statusCode != 200 and r.statusCode != 206 {
+        sendmsg(ch, ["fail", tag, "http " + _str(r.statusCode)])
+        return -1
+    }
+    string raw = r.rawBody()
+    int n = raw.byte_len()
+    if n <= 0 { sendmsg(ch, ["fail", tag, "0"]); return -1 }
+    files.write(outpath, raw)            // 覆盖写临时文件 ✓（binary 安全 ✓）
+    sendmsg(ch, ["ready", outpath, tag, _str(n)])   // 回传：文件路径 + 标签 + 字节数 ✓
+    return n
+}
+
 export func dl_one(HttpClient client, string link, string outpath, any ch, int jobIdx, any cmd): int {
     int got = fsize(outpath)          // 本地已有的部分 ⇒ 从这里续传
     int total = -1                    // 远端真实总长（来自 Content-Range），未知 = -1

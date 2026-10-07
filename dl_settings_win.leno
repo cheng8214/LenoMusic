@@ -60,7 +60,7 @@ struct SettingsDialog {
             DlSettings d = new DlSettings()
             spin.set_value(_float(d.workers))
             lyr.set_checked(d.lyric)
-            note.set_text("已填回默认值（点「保存」才写盘 ✓）")
+            note.set_text("已填回默认值（点「保存」才写盘）")
             SDL3.markFrameRedraw()
         })
         cancelBtn.on_click(func() { finish(false) })

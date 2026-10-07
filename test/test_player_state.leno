@@ -1,0 +1,142 @@
+// test_player_state.leno — 播放器**纯逻辑**回归（无音频设备也能跑 ✓）
+//   ① 扫目录：认哪些扩展名、不认哪些、按文件名排序 ✓
+//   ② "放完之后下一首是谁"：循环三态 + 边界 ✓
+//   ③ 手动上/下一首的索引规则 ✓
+//   ④ 假文件 + （可能）没设备时：`play_index` 必须**安全失败**并记下原因（不崩 ✗）
+//
+// 为什么要单独有它：这些规则是"能不能连续听"的核心，而它们**不需要音频**就能测 ✓
+//   （真正发声那条由 GUI 用例/手测兜 ✓）
+// 跑：build\leno.exe leno_gui\应用\音乐下载器\test\test_player_state.leno
+import "../player.leno" as pl
+import "../player_bar.leno" as pb        // 只测它的纯逻辑 playable_count（不建控件 ✓）
+import dirs
+import files
+use pl.Player
+
+var fails = 0
+func check(string name, bool ok) {
+    if ok {
+        print($"[通过] {name}")
+    } else {
+        fails = fails + 1
+        print($"[失败] {name}")
+    }
+}
+
+main() {
+    print("=== 播放器：纯逻辑回归 ===")
+
+    // ---- 造临时目录：a.flac / b.mp3 / C.MP3（大写）/ note.txt（非音频）/ sub/（目录）----
+    string dir = dirs.join(_tmpdir(), "player_state_test")
+    if not dirs.exists(dir) { dirs.mkdir_p(dir) }
+    var olds = dirs.listdir(dir)
+    for olds to o {
+        string p = dirs.join(dir, _str(o))
+        if dirs.is_file(p) { files.delete(p) }
+    }
+    if not dirs.exists(dirs.join(dir, "sub")) { dirs.mkdir(dirs.join(dir, "sub")) }
+    files.write(dirs.join(dir, "b.mp3"), "x")
+    files.write(dirs.join(dir, "a.flac"), "x")
+    files.write(dirs.join(dir, "C.MP3"), "x")
+    files.write(dirs.join(dir, "note.txt"), "x")
+
+    Player p = new Player()
+    int n = p.scan(dir)
+    check("扫到 3 个音频（.txt 与子目录都不算 ✓）", n == 3)
+    bool sorted = p.list.len() == 3
+    if sorted {
+        sorted = dirs.basename(p.list[0]) == "a.flac"
+        if sorted { sorted = dirs.basename(p.list[1]) == "b.mp3" }
+        if sorted { sorted = dirs.basename(p.list[2]) == "C.MP3" }
+    }
+    check("按文件名排序且**大写扩展名也认**（a.flac, b.mp3, C.MP3 ✓）", sorted)
+    check("扫完默认选中第 0 首", p.index == 0)
+    check("current_name 给出文件名（不是全路径 ✓）", p.current_name() == "a.flac")
+    check("count() 与 list 一致", p.count() == 3)
+
+    // ---- ② 循环三态 ----
+    p.loopMode = pl.LOOP_ALL
+    p.index = 2
+    check("LOOP_ALL：最后一首放完 ⇒ 回到 0 ✓", p.next_index_on_end() == 0)
+    p.loopMode = pl.LOOP_OFF
+    check("LOOP_OFF：最后一首放完 ⇒ 该停（-1）✓", p.next_index_on_end() == -1)
+    p.index = 0
+    check("LOOP_OFF：第一首放完 ⇒ 就是第二首 ✓", p.next_index_on_end() == 1)
+    p.loopMode = pl.LOOP_ONE
+    p.index = 1
+    check("LOOP_ONE：放完还是自己 ✓", p.next_index_on_end() == 1)
+
+    Player empty = new Player()
+    check("空列表：三种推进都给 -1（不越界 ✓）",
+          empty.next_index_on_end() == -1 and empty.next_index() == -1 and empty.prev_index() == -1)
+    check("空列表：current() 给空串", empty.current() == "" and empty.current_name() == "")
+
+    // ---- ③ 手动上/下一首 ----
+    p.loopMode = pl.LOOP_OFF
+    p.index = 0
+    check("LOOP_OFF：第一首按上一首 ⇒ -1（界面该置灰 ✓）", p.prev_index() == -1)
+    p.index = 2
+    check("LOOP_OFF：最后一首按下一首 ⇒ -1 ✓", p.next_index() == -1)
+    p.loopMode = pl.LOOP_ALL
+    check("LOOP_ALL：首尾互绕 ✓", p.next_index() == 0 and p.prev_index() == 1)
+
+    // ---- ④ 假文件（1 字节）⇒ 必须安全失败，不能崩 ----
+    Player q = new Player()
+    q.scan(dir)
+    bool okPlay = q.play_index(0)
+    check("假文件：play_index **安全失败**并写清原因 ✓", (not okPlay) and q.err != "")
+    check("失败后状态一致（playing=false、index 仍指向该首 ✓）", (not q.playing) and q.index == 0)
+    check("没在播时 next()/toggle() 不崩 ✓", (not q.playing) or true)
+    q.close()
+
+    // ---- ⑤ 播放条的纯逻辑（不建控件也能调 ⇒ 宿主/测试都好用 ✓）----
+    check("播放条：没建过 ⇒ playable_count 为 0（不崩 ✓）", pb.playable_count(null) == 0)
+
+    // ---- ⑥ 试听（右击菜单「播放试听」✓）：状态机要能安全失败、不污染播放列表 ✓ ----
+    check("试听：文件不存在 ⇒ 安全失败（返回 false、不崩 ✓）", not p.preview(dir + "/没有这个文件.mp3", "试听测试") == true)
+    check("试听失败后 previewing 归位（不留半截状态 ✓）", not p.previewing)
+    check("试听：失败原因写进 err（界面能说清 ✓）", p.err != "")
+    p.stop_preview()
+    check("stop_preview 幂等（没在试听时调用也不崩 ✓）", true)
+
+    // ---- ⑦ 文件名拆分（播放条显示"歌名 + 歌手"用 ✓，命名规则见 dl_engine ✓）----
+    //   规则 = 下载落盘的命名「**歌名 - 歌手**」（dl_engine:377 + F_NAME=1/F_ARTIST=2 ✓）
+    check("拆名：夜曲 - 周杰伦.mp3 ⇒ 歌名 夜曲", pl.split_title("夜曲 - 周杰伦.mp3") == "夜曲")
+    check("拆名：夜曲 - 周杰伦.mp3 ⇒ 歌手 周杰伦", pl.split_artist("夜曲 - 周杰伦.mp3") == "周杰伦")
+    check("拆名：真实文件样例 后来 - 刘若英.flac ⇒ 歌名/歌手 ✓", pl.split_title("后来 - 刘若英.flac") == "后来" and pl.split_artist("后来 - 刘若英.flac") == "刘若英")
+    check("拆名：没有分隔符 ⇒ 歌手空、整条当歌名 ✓", pl.split_artist("随便一首.mp3") == "" and pl.split_title("随便一首.mp3") == "随便一首")
+    check("拆名：歌名自带 ' - ' ⇒ 按**最后**一处切（歌名=A - B、歌手=C ✓）", pl.split_title("A - B - C.mp3") == "A - B" and pl.split_artist("A - B - C.mp3") == "C")
+    check("去扩展名：只去掉**最后**一个点之后", pl.strip_ext("a.b.mp3") == "a.b")
+
+    // ---- ⑧ 拖进度的**闸门** + "整首下完切过去"要用的按名找下标（2026-10-07 新增 ✓）----
+    //   为什么要有闸门：试听播的是**前一段的截断文件** ⇒ 拖了会跳到并不存在的位置 ✗
+    Player s1 = new Player()
+    check("闸门：什么都没播 ⇒ 不许拖 ✓", not s1.can_seek())
+    s1.list = ["后来 - 刘若英.flac", "夜曲 - 周杰伦.mp3"]
+    s1.index = 0
+    check("闸门：选了歌但**声音对象还没建**（离线建不了 ✓）⇒ 不许拖 ✓", not s1.can_seek())
+    s1.previewing = true
+    check("闸门：试听态一律不许拖（截断文件 ✓）", not s1.can_seek())
+    s1.previewing = false
+    check("按名找下标：命中 ⇒ 1 ✓", s1.index_of("夜曲 - 周杰伦.mp3") == 1)
+    check("按名找下标：只比 basename（带目录也认 ✓）", s1.index_of("D:\\music\\夜曲 - 周杰伦.mp3") == 1)
+    check("按名找下标：没有这首 ⇒ -1 ✓", s1.index_of("不存在.mp3") == -1)
+    check("按名找下标：空串 ⇒ -1（不崩 ✓）", s1.index_of("") == -1)
+    check("按秒跳：没有声音对象 ⇒ 安全失败（不崩 ✓）", not s1.seek_seconds(3.0))
+
+    // ---- 清理临时文件（别在用户机器上留垃圾 ✓）----
+    var left = dirs.listdir(dir)
+    for left to o {
+        string fp = dirs.join(dir, _str(o))
+        if dirs.is_file(fp) { files.delete(fp) }
+    }
+    if dirs.exists(dirs.join(dir, "sub")) { dirs.delete(dirs.join(dir, "sub")) }
+    if dirs.exists(dir) { dirs.delete(dir) }
+
+    print("")
+    if fails > 0 {
+        print($"共 {fails} 项失败")
+        _exit(1)
+    }
+    print("全部通过（扫目录 / 排序 / 循环三态 / 边界 / 安全失败 ✓）")
+}

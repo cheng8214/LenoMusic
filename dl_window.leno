@@ -23,6 +23,7 @@
 //   ⇒ **"不重复打开"因此成了主界面的责任**：见本文件末尾的 `reuse_if_open` ✓
 //     （原先每点一次"下载"就 `new` 一个 DlWindow + 一个新窗口 ⇒ 点两下就是两个框 ✗）
 import "SDL3" as SDL3
+import dirs
 import strings
 import threads
 import "./dl_engine.leno" as eng
@@ -90,6 +91,17 @@ export struct DlWindow {
     ProgressBar bar
     Label info
     Label stat
+    // ★ 按钮提成**字段**（2026-10-08 ✓）：先前是 build 里的局部变量 ⇒ 除了"开始"那一下，
+    //   别处（例如右键「重试」）改不动它们的可用态 ✗ ⇒ 现在统一由 `setRunningUi` 管 ✓
+    Button startBtn
+    Button pauseBtn
+    Button cancelBtn
+    Button openBtn
+    Button closeBtn
+
+    // ★ 右键「重试」要把**哪些下标**重下 —— 列在这里，由主界面起线程 ✓
+    //   （与 `wantStart` 同一条硬约束：`threads.start` 必须在起线程那个文件里 ✓ 见文件头 ⚠）
+    Array[int] retryList
 
     // ---- 与主界面 / worker 的连线（**多首歌并行**：N 个 worker ✓）----
     Label? hostLbl = null            // 主界面状态栏：结束时回写一句（open 时传进来一次 ✓）
@@ -152,9 +164,18 @@ export struct DlWindow {
             empty_text: "没有任务",
             // ★ 进度列 = **真进度条**（2026-10-07）：原先这列只能把进度写成文字"37%" ✗
             //   观感与下面那条总进度条**同源**（都出 sdl_progress.drawBar ✓）⇒ 不会一大一小两种样式
-            cell_types: ["", "", "", "progress", ""]
+            cell_types: ["", "", "", "progress", ""],
+            // ★ 每行前面挂个小音符（与主界面同款 ✓）：`image_path` = 图标列**默认图标**
+            //   ⇒ 一次给、换数据也不掉 ✓（不必逐行 set_row_image ✗ 见 sdl_table 的 imgDefault ✓）
+            image_col: 0, image_size: 16, image_gap: 6,
+            image_path: dirs.join(dirs.join(dirs.res_dir(), "images"), "music.png")
         })
         table.set_rows(rows)
+        // ★ 任务表右键菜单（2026-10-08 ✓ 用户反馈"下载里面也没有菜单" ✓）：
+        //   针对**某一行**的操作（重试这一首 / 复制文件名 / 打开目录 ✓）—— 原先只有底下那排
+        //   全局按钮，"这一首失败了想再下一次"只能整批重来 ✗
+        table.on_context_will_open(func(int row) { buildMenu(row) })
+        table.on_context_select(func(int row, string id) { onMenu(row, id) })
         droot.add(table, {grow: 1, shrink: 1, align: 3})
 
         bar = SDL3.createProgressBar({h: 16, show_text: true, font_size: 12})
@@ -176,11 +197,11 @@ export struct DlWindow {
         stat = SDL3.dialogLabel("下载中会实时显示每一首的进度；暂停/取消随时可用", 12)
         droot.add(stat, {grow: 0, shrink: 0, align: 0})
 
-        Button startBtn = SDL3.createButton({w: 130, h: 32, text: (if lyriconly then "开始下载歌词" else "开始下载"), type: "primary", font_size: 13})
-        Button pauseBtn = SDL3.createButton({w: 90, h: 32, text: "暂停", type: "dark", font_size: 13})
-        Button cancelBtn = SDL3.createButton({w: 90, h: 32, text: "取消", type: "dark", font_size: 13})
-        Button openBtn = SDL3.createButton({w: 110, h: 32, text: "打开目录", type: "dark", font_size: 13})
-        Button closeBtn = SDL3.createButton({w: 90, h: 32, text: "关闭", type: "dark", font_size: 13})
+        startBtn = SDL3.createButton({w: 130, h: 32, text: (if lyriconly then "开始下载歌词" else "开始下载"), type: "primary", font_size: 13})
+        pauseBtn = SDL3.createButton({w: 90, h: 32, text: "暂停", type: "dark", font_size: 13})
+        cancelBtn = SDL3.createButton({w: 90, h: 32, text: "取消", type: "dark", font_size: 13})
+        openBtn = SDL3.createButton({w: 110, h: 32, text: "打开目录", type: "dark", font_size: 13})
+        closeBtn = SDL3.createButton({w: 90, h: 32, text: "关闭", type: "dark", font_size: 13})
         pauseBtn.set_enabled(false)
         cancelBtn.set_enabled(false)
         if jobs.len() == 0 {
@@ -197,9 +218,7 @@ export struct DlWindow {
             paused = false
             done = 0
             fail = 0
-            startBtn.set_enabled(false)
-            pauseBtn.set_enabled(true)
-            cancelBtn.set_enabled(true)
+            setRunningUi(true)          // 统一口径：开始 ⇒ 灰掉「开始」、亮起「暂停/取消」✓
             stat.set_text("开始下载…")
             // ⚠ 这里**不起线程**：threads.start 与其 worker 入口必须同一个文件（见文件头 ⚠）
             //   ⇒ 只置意图，主界面在定时器里起线程、再把 Thread/Channel 用 attach() 交回来 ✓
@@ -346,6 +365,7 @@ export struct DlWindow {
             info.set_text("全部任务已处理完，可「打开目录」查看")
             // 主界面状态栏也回一句（窗口一关就只剩它了 ⇒ 别让结果随窗口消失 ✓）
             if hostLbl is Label { hostLbl.set_text("下载结束：" + sum) }
+            setRunningUi(false)          // 结束后「开始」重新可用（想整批再来一次也行 ✓ 配合右键重试 ✓）
             SDL3.markFrameRedraw()
         }
     }
@@ -398,6 +418,97 @@ export struct DlWindow {
 
     func setstatus(int idx, string text) {
         if idx >= 0 and idx < status.len() { status[idx] = text }
+    }
+
+    // ==================== 任务表右键菜单（2026-10-08 ✓）====================
+    //   用户原话："下载里面也没有菜单" ✓ —— 底下那排按钮都是**全局**的（开始/暂停/取消/打开/关闭 ✗）
+    //   ⇒ 针对**某一行**什么也做不了：失败了想单独再下一次、想复制文件名都得自己找 ✗
+    //   现在给任务表挂上：重试这一首 / 重试全部失败项 / 复制文件名 / 打开下载目录 ✓
+    func buildMenu(int row) {
+        table.clearContextItems()
+        bool failedRow = false
+        if row >= 0 and row < status.len() {
+            string st = status[row]
+            if strings.has(st, "失败") or strings.has(st, "取消") { failedRow = true }
+        }
+        if row >= 0 {
+            table.addContextItem({label: "重试这一首", id: "retryrow"})
+            // ⚠ 只能在"上一轮已结束"时重试（见 queueRetry 的注释 ✓）；且"完成"的行没什么好重试的
+            table.setContextItemEnabled("retryrow", failedRow and started and finished)
+            table.addContextItem({label: "重试全部失败项", id: "retryfail"})
+            table.setContextItemEnabled("retryfail", hasFailed() and started and finished)
+            table.addContextSeparator()
+            table.addContextItem({label: "复制文件名", id: "copyrow"})
+            table.addContextItem({label: "打开下载目录", id: "openfolder"})
+        }
+    }
+
+    // 还有"失败/取消"的任务吗（决定「重试全部失败项」能不能点 ✓）
+    func hasFailed(): bool {
+        for status.len() to i {
+            if strings.has(status[i], "失败") or strings.has(status[i], "取消") { return true }
+        }
+        return false
+    }
+
+    func onMenu(int row, string id) {
+        if id == "copyrow" {
+            if row < 0 or row >= jobs.len() { return }
+            string nm = eng.songlabel(jobs[row])
+            if not lyriconly and jobs[row].len() > eng.F_EXT and jobs[row][eng.F_EXT] != "" {
+                nm = nm + "." + jobs[row][eng.F_EXT]      // 落盘时就是这个名（见 dl_engine 的命名 ✓）
+            }
+            SDL3.setClipboardText(nm)
+            stat.set_text("已复制文件名：" + nm)
+            SDL3.markFrameRedraw()
+            return
+        }
+        if id == "openfolder" {
+            if not openfolder(outdir) { stat.set_text("打开目录失败：" + outdir) }
+            return
+        }
+        if id == "retryrow" { queueRetry([row]); return }
+        if id == "retryfail" {
+            Array[int] idxs = []
+            for status.len() to i {
+                if strings.has(status[i], "失败") or strings.has(status[i], "取消") { idxs.add(i) }
+            }
+            queueRetry(idxs)
+            return
+        }
+    }
+
+    // 排队重试：把那些行拨回「等待中」、进度清零，并置 `retryList` ⇒ 主界面在定时器里起线程 ✓
+    //   ⚠ 只允许"上一轮已结束"时重试 ✗：主界面重试时会 `attach()`，而 attach 是**整体替换**
+    //     threads/cmds —— 若还有 worker 在跑，它们就被顶掉且没人 join/收尾 ✗（菜单里那两项也据此置灰 ✓）
+    func queueRetry(Array[int] idxs) {
+        if idxs.len() == 0 { return }
+        if not finished {
+            stat.set_text("先等这一轮跑完再重试（免得把正在跑的线程顶掉）")
+            SDL3.markFrameRedraw()
+            return
+        }
+        for idxs to r {                      // ⚠ `for 数组 to r` 拿到的是**元素** ✓（这里元素就是下标 ✓）
+            if r >= 0 and r < status.len() { status[r] = "等待中" }
+            if r >= 0 and r < got.len() { got[r] = 0 }
+        }
+        retryList = idxs
+        started = true
+        finished = false
+        cancelling = false
+        paused = false
+        setRunningUi(true)
+        info.set_text("准备重试 " + _str(idxs.len()) + " 首…")
+        stat.set_text("正在重试 " + _str(idxs.len()) + " 首")
+        SDL3.markFrameRedraw()
+    }
+
+    // 运行态下的按钮可用性（开始 ⇄ 暂停/取消 ✓）—— 开始、重试、结束都走这一个口径 ✓
+    func setRunningUi(bool running) {
+        startBtn.set_enabled(not running and jobs.len() > 0)
+        pauseBtn.set_enabled(running)
+        cancelBtn.set_enabled(running)
+        if not running { pauseBtn.set_text("暂停") }
     }
 
     // 刷新任务表 + 总进度条（每 120ms 一次）

@@ -1,0 +1,752 @@
+// player_bar.leno — 音乐下载器：**播放条**（嵌在主界面里，表格下方、状态栏上方 ✓）
+//
+// ★ 布局（2026-10-07 按用户给的**酷狗播放条**参考重排 ✓）：
+//
+//   ┌───────────────────────────────────────────────────────────────────────────┐
+//   │▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬─────────────────────────────────────  顶：细进度线（h=3 ✓）│
+//   │ (转盘)  歌名                    ⏮  ▶  ⏭        ⇄  80% ▬▬  重扫  ≡        │
+//   │         歌手           0:00 / 03:20                                       │
+//   └───────────────────────────────────────────────────────────────────────────┘
+//      ↑ 左：专辑/唱片 + 歌名/歌手/时间    ↑ 中：控制按钮**居中**   ↑ 右：循环/音量/重扫/列表
+//
+//   · 左侧：**转动的唱片**（酷狗那种 ✓）+ 歌名一行、歌手一行、时间在歌手右侧
+//   · 中间：上一曲 / 播放暂停 / 下一曲 —— `justify: 1`（居中 ✓ 见 sdl_layout 的 JUSTIFY_CENTER）
+//   · 右侧：循环、音量、重扫，**列表图标放最右**（与酷狗一致 ✓）
+//   · 进度条**不单独占一行** ✗：做成顶部 3px 细线 ✓
+//
+// ★★ 歌单浮层（点"列表"图标**向上弹出** ✓ —— 这是用户定的形态）：
+//   · 播放条的外盒是 **`AnchorBox`**（绝对定位 ✓）：细线 `{left:0,right:0,top:0,h:3}`、
+//     主行 `{left:0,right:0,top:3,h:52}`、浮层 `{right:10, bottom:BAR_TOTAL+16, w:360, h:LIST_H}`
+//     —— `AnchorBox` 只给 `bottom` 时是"**底边**对齐父盒底边往上量"（`py = by+bh-b-ch` ✓ 见 relayout ✓），
+//     所以浮层**向上长** ✓；而且它**不裁剪**越界子项 ⇒ 摆到盒子上面没问题 ✓✓
+//   · 为什么"浮层"而不是"把布局撑高"✗：这框架的子控件尺寸在 `add` 时就被容器记下、之后每帧覆盖 ✗
+//     ⇒ 想改高度得 `remove`+`add` **连父盒一起**重挂 ✗（父盒在宿主手上 ✗）——浮层绕开了这一整套 ✓
+//   · 层级：**渲染顺序就是层级**（没有 z 轴 API ✓）。浮层画在播放条**之后**、且和表格/状态栏不重叠
+//     ⇒ 它就是"在所有控件上面" ✓（浮层下沿留 16px 缺口 ⇒ 连忙指示细线也不会压到它 ✓）
+//   · 失去焦点即收：宿主把窗口事件转给 `on_event()` ✓ —— 点在浮层外（或按 ESC）⇒ 收起 ✓
+//   · ⚠ 浮层收起时**必须真的 `remove`**：容器遍历子控件时**不看 `visible`** ✗
+//     ⇒ 留着一个"看不见的浮层"会把表格那一带的点击全吃掉 ✗✗
+//   · ⚠ 增删一律**不在事件回调里做**：那是在容器遍历子控件的过程中改数组 ✗
+//     ⇒ 回调只置 `wantPop`，真正的挂/摘放到 `tick()` 里（`apply_pop` ✓）
+//
+// 图标从哪来：`tools\gen_player_icons.leno` 离线生成的 PNG（`images/play.png` 等 ✓）
+//   · 生成物是**透明底 + 纯白** ⇒ 这里用 `image_tint` 上色，一套图标适配所有主题 ✓
+//   · ⚠ 别把图标画在**窗口后缓冲**上存 PNG —— 后缓冲没有 alpha ⇒ 存出来是**实心黑底** ✗✗（速查附录 A ✓）
+//
+// 分工（照本应用既有分层 ✓）：
+//   player.leno       —— 规则（列表/索引/循环/播放暂停/放完自动下一首 + 歌手歌名拆分）**可离线单测** ✓
+//   player_bar.leno   —— **本文件**：只画界面 + 把点击转成 player 的调用 ✓
+//   musicdl_gui.leno  —— 接线：给目录与图标目录、把 `bar.box` 加进根布局、120ms tick + 33ms animate、
+//                        并把窗口事件转给 `on_event()`（浮层"失去焦点即收"靠它 ✓）
+//
+// ⚠ 另两条手感相关的（实测得来）：
+//   ① `Slider.set_value()` **会触发 onChange**（sdl_slider.leno:92 ✓）⇒ tick 里每拍刷滑块值会反复回调、
+//      用户正拖着时还会被反拽 ✗ ⇒ 本文件 **tick 绝不碰滑块的值**（只刷显示用标签 ✓）
+//   ② 唱片的转动靠 33ms 的 `animate()`（120ms 一拍太卡 ✗）；不播时立刻返回 ⇒ 不白转 ✓
+import dirs
+import maths
+import SDL3
+import "sdl_progress" as prgb          // 复用"画进任意矩形"的观感（与进度条控件同源 ✓）
+import "./player.leno" as pl
+use pl.Player
+use SDL3.(Event, Renderer, Label, Button, Slider, ProgressBar, Canvas, ListBox, AnchorBox, HBox, VBox, Scancode)
+
+// 浮层尺寸与行高（✓）
+const float LIST_H = 154.0
+const float LIST_ROW = 22.0
+const float LIST_W = 360.0
+const float LIST_GAP = 16.0          // 浮层下沿与播放条上沿的缺口（躲开忙指示细线 ✓）
+// 播放条主行高度（进度条已并入本行 ✓ 见下面布局注释）
+const float BAR_H = 52.0
+// 总高 = 主行（**不再有单独那行细进度线** ✓ ⇒ 整体矮了 6px ✓）
+const float BAR_TOTAL = 52.0
+// 左侧"歌名 / 歌手"信息块的宽度 —— **一处定义、两处用**（块宽 basis + 标签截断上限 max_w ✓）
+//   ⚠ 这两个数**必须一致** ✗：`Label` 的截断上限是 `min(max_w, 盒子宽度)`（sdl_label.leno:242 ✓）
+//     ⇒ 写岔了（比如 max_w 200 但盒子只有 45）就又变成"只显示几个字"✗（2026-10-07 踩过 ✓）
+const float INFO_W = 200.0
+
+export struct PlayerBar {
+    // ===== 控件（build 之后才有值；字段默认值只能是常量 ⇒ 这里不初始化 ✓）=====
+    AnchorBox box                // 绝对定位外盒（浮层要靠它 ✓）
+    Canvas disc                  // 转盘（自绘 ✓）
+    Label songLbl
+    Label artistLbl
+    Label timeLbl
+    Label volLbl
+    Button btnList
+    Button btnPrev
+    Button btnPlay
+    Button btnNext
+    Button btnLoop
+    Slider volSld
+    Canvas seekBar               // 进度条改**自绘**（见 build 里的注释：控件版会被 grow 撑成大饼 ✗）
+    ListBox lb                   // 歌单（框架控件 ✓ 自带滚动/命中/文字 ✓；展开时才挂上 ✓）
+    Canvas capSink               // 浮层"登记员"：每帧渲染期登记**弹层捕获区**（见 apply_pop ✓）
+
+    // ===== 状态 =====
+    bool wantPop = false         // 用户**想要**浮层吗（点列表图标/点外面置它 ✓）
+    bool popOpen = false         // **实际**挂上去了没有（由 tick 里的 apply_pop 落地 ✓）
+
+    float discAngle = 0.0        // 唱片当前角度（度 ✓）
+
+    // ===== 特效状态（纯视觉；2026-10-07 ✓ —— 反正是自己画的，就让它活起来 ✓）=====
+    //   ⚠ 一条纪律：**特效不能让静止时也刷帧** ✗（见 animate 末尾的判定 ✓）
+    //     否则暂停中窗口也在 30fps 重绘 ⇒ 白烧 CPU ✓（本仓很在意这个 ✓）
+    float fxT = 0.0              // 特效时钟（秒；animate 每步 +0.033 ✓）
+    float sweep = 0.0            // 扫光相位 0..1（≈3.3 秒一趟 ✓）
+    float ring = 0.0             // 唱片"音波"相位 0..1（≈1.65 秒一圈 ✓）
+    bool seekHover = false       // 鼠标在进度条上吗 ✓
+    float hoverEase = 0.0        // 悬停缓动 0..1（别"啪"一下变粗 ✗ ⇒ 平滑逼近 ✓）
+    float clickFx = -1.0         // 点击涟漪起点（比例 0..1；< 0 = 没有 ✓）
+    float clickT = 0.0           // 涟漪进度 0..1 ✓
+    float dlPct = -1.0           // 后台"整首下载"进度 0..100（< 0 = 没有在下的 ✓）；显示在歌手行 ✓
+
+    bool lastPlaying = false     // 上一拍是否在播（用来判"要不要换播放/暂停图标" ✓）
+    int lastIdx = -1             // 上一次显示的曲目（变了才同步歌单选中 ✓）
+    string dir = ""              // 扫哪个目录（= 输出目录 downloads/ ✓）
+    string imgDir = ""           // 图标目录（宿主给：`dirs.join(dirs.res_dir(), "images")` ✓）
+    Player? p = null
+    Label? hostLbl = null        // 主界面状态栏（"正在播 xxx" / 出错都写这里 ✓）
+
+    // ==================== 构建（宿主 create 时调一次 ✓）====================
+    func build() {
+        if p == null { p = new Player() }
+
+        // 外盒：AnchorBox（绝对定位 ✓）—— 高度就是主行 + 细线；浮层向上溢出，不占它的高 ✓
+        box = SDL3.createAnchorBox({x: 0, y: 0, w: 0, h: BAR_TOTAL, padX: 0, padY: 0})
+
+        if p is Player => q {
+            q.scan(dir)
+
+            // ---- 主行（铺满宽度 ✓）----
+            //   ★ 布局（2026-10-07 用户建议后定稿）：
+            //     [转盘] [歌名/歌手] [========== 进度条 ==========] [0:00/0:00] [⏮▶⏭] [⇄ 80% ▬ 重扫 ≡]
+            //     进度条**不再独占一行** ✗ —— 原来它顶在最上面却是"0% 的空槽 + 大片留白" ✗
+            //     ⇒ 挪到"歌名之后"那段空白里 ✓：省掉一整行高度、中间也不再空 ✗✓
+            //     只读：拖拽定位是二期（要先看护"正在读的文件被换掉" ✓）
+            var row = SDL3.createHBox({h: BAR_H, padX: 0, padY: 0, spacing: 10})
+            //   ⚠⚠ 为什么用**画布自绘**而不是 `ProgressBar` 控件：
+            //     布局里 `grow: 1` 在 HBox 会**连高度一起撑满**（sdl_layout:213 `else if g > 0.0 { ch = innerH }` ✓）
+            //     ⇒ 控件版进度条会变成 60×52 的**圆饼** ✗（`drawBar` 用 h/2 当圆角 ⇒ 宽≈高就是圆 ✓）
+            //     ⇒ 改画布：画布照样 `grow` 吃满宽度 ✓，而**条子高度由我自己定**（垂直居中画 8px ✓）
+            //   ⚠ 轨道色走**浅色** ✓：本应用是浅色界面，深色轨道会像一条黑杠 ✗
+            //   ⚠⚠ **画布自己会画一块不透明的底** ✗：默认 `bgColor` 是深色、而 `applyTheme` 又会把它设成
+            //     "输入框底色"（sdl_canvas:107 `bgColor = th.bgInput` ✓）⇒ 浅色主题下就是**白白一块** ✗
+            //     （看着像"进度条带白底" ✓ 其实那是控件底、不是我画的条 ✗）
+            //     ⇒ 必须 `bg_color` 透明 ✓；且要用 **setter**（写 opts 会被主题覆盖 ✓ 同 Button 那次 ✗）
+            seekBar = SDL3.createCanvas({w: 400, h: BAR_H, pad: 0, border: false, border_width: 0})
+            seekBar.set_bg_color(#00000000)
+            seekBar.on_draw(func(Renderer r, float ox, float oy, float cw, float ch) {
+                float ratio = 0.0
+                bool playing = false
+                if p is Player => q {
+                    ratio = q.ratio()
+                    playing = q.playing
+                }
+                draw_seek(r, ox, oy, cw, ch, ratio, playing)
+            })
+            // 悬停 ⇒ 条子变粗（缓动在 animate 里做 ✓，这里只置标志 + 催一帧 ✓）
+            seekBar.on_mouse_enter(func(float cx, float cy) {
+                seekHover = true
+                SDL3.markFrameRedraw()
+            })
+            seekBar.on_mouse_leave(func() {
+                seekHover = false
+                SDL3.markFrameRedraw()
+            })
+            // ★ 点进度条 = **真去快进**（2026-10-07 ✅）—— 但**只有完整文件才允许** ✓：
+            //   · 试听放的是"前一段"的截断文件 ⇒ 拖了会跳到并不存在的位置 ✗ ⇒ 挡下来并说清原因 ✓
+            //   · 列表里的歌 = 已下完的完整文件 ⇒ 放行 ✓（闸门 = `Player.can_seek()` ✓）
+            //   ⚠ 涟漪照样冒（哪怕是挡下来的那次 ✓）—— "点了有反馈"比"点了没动静"好得多 ✓
+            seekBar.on_click(func(float cx, float cy, int btn) {
+                float w0 = seekBar.get_w()
+                float rr = 0.0
+                if w0 > 0.0 { rr = cx / w0 }
+                if rr < 0.0 { rr = 0.0 }
+                if rr > 1.0 { rr = 1.0 }
+                clickFx = rr
+                clickT = 0.0
+                if p is Player => q {
+                    if q.can_seek() {
+                        if q.seek_ratio(rr) {
+                            hostLbl?.set_text("已跳到 " + fmt_time(q.position()) + " / " + fmt_time(q.duration()) + "（" + _str(_int(rr * 100.0)) + "%）")
+                        } else {
+                            hostLbl?.set_text("这次没跳成（这首没读出时长？）")
+                        }
+                    } else if q.previewing {
+                        if dlPct >= 0.0 {
+                            hostLbl?.set_text("试听的是前一段（截断文件）⇒ 等整首下载完（" + _str(_int(dlPct)) + "%）就能拖了")
+                        } else {
+                            hostLbl?.set_text("试听的是前一段（截断文件）⇒ 整首下载完就能拖进度")
+                        }
+                    } else {
+                        hostLbl?.set_text("先播一首再拖进度")
+                    }
+                }
+                SDL3.markFrameRedraw()
+            })
+
+            // 左①：转动的唱片（44 见方 ✓）
+            //   ⚠ `align: 1` = **垂直居中**；在 HBox 里 `align: 3` 是"撑满交叉轴"⇒ 控件会被抻高 ✗
+            disc = SDL3.createCanvas({w: 44, h: 44, pad: 0, border: false, border_width: 0})
+            disc.set_bg_color(#00000000)     // 转盘画布同理：透明底（否则圆外的四个角是一块实心底 ✗）
+            disc.on_draw(func(Renderer r, float ox, float oy, float cw, float ch) {
+                draw_disc(r, ox + cw / 2.0, oy + ch / 2.0, (if cw < ch then cw else ch) / 2.0 - 1.0)
+            })
+            row.add(disc, {grow: 0, shrink: 0, basis: 44, align: 1})
+
+            // 左②：歌名 / 歌手（固定宽度块 ⇒ 右边腾出地方给进度条 ✓）
+            //   ⚠ 两行**都要 truncate**：不然长名字会压到邻居上 ✗（实测踩过）
+            //   ⚠⚠ 而且必须 `align: 3`（撑满交叉轴）—— **不是随便写的** ✗✗（2026-10-07 修）：
+            //     布局给子控件的宽度取自 `_natW[i]`，即 **`add()` 那一刻的自然宽度**，之后每帧照搬 ✗
+            //     （sdl_layout.leno:404 `float cw = _natW[i]`；**只有 `align == 3` 才给 `innerW`** ✓:409）
+            //     而 `Label` 的截断上限 = `min(max_w, 盒子宽度)`（sdl_label.leno:242 ✓）
+            //     ⇒ 先前用 `align: 0`：宽度被**冻结在建窗时的文字宽**（那会儿还没歌 ⇒ ~45px ✗）
+            //       ⇒ `min(200, 45) = 45` ⇒ 标题永远只剩「试听…」，右边空一大片 ✗✗（就是你看到的 ✓）
+            //     ⇒ 想"文字随块宽自动伸缩 + 超长才省略"：**align: 3 + max_w 与块宽同源** ✓（INFO_W ✓）
+            var info = SDL3.createVBox({h: 46, padX: 0, padY: 3, spacing: 2})
+            songLbl = SDL3.createLabel({text: song_text(q), font_size: 14, truncate: 1, max_w: INFO_W})
+            info.add(songLbl, {grow: 0, shrink: 0, align: 3})
+            artistLbl = SDL3.createLabel({text: artist_text(q, dlPct), font_size: 12, truncate: 1, max_w: INFO_W})
+            info.add(artistLbl, {grow: 0, shrink: 0, align: 3})
+            row.add(info, {grow: 0, shrink: 0, basis: INFO_W, align: 1})
+
+            // 中①：进度条 —— 吃掉"歌名之后"的空白 ✓（grow:1 ⇒ 剩余宽度全给它 ✓；
+            //   高度由画布里的 8px 条自己定 ✓ 不受 grow 影响 ✓）
+            row.add(seekBar, {grow: 1, shrink: 1, basis: 420, align: 1})
+            // 中②：时间紧跟进度条（不再塞在歌手行里 ✓）
+            timeLbl = SDL3.createLabel({text: "0:00 / 0:00", font_size: 12})
+            row.add(timeLbl, {grow: 0, shrink: 0, basis: 92, align: 1})
+
+            // 中：控制按钮（`justify: 1` = 居中 ✓；子项都 grow:0 它才生效 ✓）
+            var mid = SDL3.createHBox({h: BAR_H, padX: 0, padY: 0, spacing: 4, justify: 1})
+            btnPrev = icon_btn("prev", "上一曲", 34.0, 34.0)
+            btnPrev.on_click(func() {
+                if p is Player => w { w.prev() }
+                SDL3.markFrameRedraw()
+            })
+            btnPlay = icon_btn("play", "播放 / 暂停", 46.0, 34.0)
+            // 播放键给一层**极淡的主题蓝底** ⇒ 浅色页面上看得出它是主操作 ✓
+            //   ⚠ 别用 `image_tint` 去染它 ✗：tint 是**相乘**着色 ⇒ 深色图标只会更黑 ✓（本题的图标是深色的 ✓）
+            btnPlay.set_bg_color(#E6EEFAFF)
+            btnPlay.set_hover_color(#D6E4F7FF)
+            btnPlay.set_pressed_color(#C6DAF4FF)
+            btnPlay.on_click(func() {
+                if p is Player => w { w.toggle() }
+                SDL3.markFrameRedraw()
+            })
+            btnNext = icon_btn("next", "下一曲", 34.0, 34.0)
+            btnNext.on_click(func() {
+                if p is Player => w { w.next() }
+                SDL3.markFrameRedraw()
+            })
+            mid.add(btnPrev, {grow: 0, shrink: 0, basis: 34, align: 1})
+            mid.add(btnPlay, {grow: 0, shrink: 0, basis: 46, align: 1})
+            mid.add(btnNext, {grow: 0, shrink: 0, basis: 34, align: 1})
+            // ⚠ 这里**不能** grow ✗：空闲宽度已经全给进度条了 ✓
+            //   （否则两者各分一半 ⇒ 进度条只剩半截 ✗）
+            // ⚠⚠ **必须显式给 basis** ✗：Button 的"自然宽度"会把**图标**也算进去
+            //   （实测：三个按钮的容器自报 ≈248px，而它们的 `w` 加起来才 122 ⇒ 中间凭空多出 130px 空档 ✗）
+            //   给了 basis 之后布局才按我们要的宽度走 ✓（转盘 44 / 信息列 200 都是这么精确对上的 ✓）
+            row.add(mid, {grow: 0, shrink: 0, basis: 122, align: 1})
+
+            // 右：循环 / 音量 / 重扫 / **列表（最右，与酷狗一致 ✓）**
+            var right = SDL3.createHBox({h: BAR_H, padX: 0, padY: 0, spacing: 6})
+            btnLoop = icon_btn("loop_all", "循环：关 / 列表 / 单曲（点一下切一档）", 32.0, 26.0)
+            btnLoop.on_click(func() {
+                if p is Player => w {
+                    if w.loopMode == pl.LOOP_OFF { w.loopMode = pl.LOOP_ALL }
+                    eif w.loopMode == pl.LOOP_ALL { w.loopMode = pl.LOOP_ONE }
+                    else { w.loopMode = pl.LOOP_OFF }
+                }
+                SDL3.markFrameRedraw()
+            })
+            right.add(btnLoop, {grow: 0, shrink: 0, basis: 32, align: 1})
+
+            volLbl = SDL3.createLabel({text: "60%", font_size: 12})
+            right.add(volLbl, {grow: 0, shrink: 0, align: 1})
+            // ⚠ 滑块的"滑块"尺寸取自**字高**（sdl_slider.leno:235 `float th = fontH` ✓）⇒
+            //   默认 font_size=15 会让它变成一个大黑球 ✗ ⇒ 压到 11 才像样 ✓；配色也显式给 ✓
+            volSld = SDL3.createSlider({
+                w: 76, h: 20, min: 0, max: 100, value: q.volume * 100.0, step: 1, font_size: 11,
+                track_color: #3A4050FF, fill_color: #3C82DCFF, thumb_color: #D8DCE8FF
+            })
+            volSld.set_tip("音量（只影响本播放器，不动系统音量）")
+            right.add(volSld, {grow: 0, shrink: 0, basis: 76, align: 1})
+
+            Button btnScan = SDL3.createButton({w: 48, h: 26, text: "重扫", type: "dark", font_size: 12, radius: 6})
+            btnScan.set_tip("重新扫描输出目录（下完新歌后不用重启）")
+            btnScan.on_click(func() { rescan() })
+            right.add(btnScan, {grow: 0, shrink: 0, basis: 48, align: 1})
+
+            btnList = icon_btn("list", "播放列表（点开/收起）", 30.0, 26.0)
+            btnList.on_click(func() { toggle_pop() })
+            right.add(btnList, {grow: 0, shrink: 0, basis: 30, align: 1})
+            // 同样显式给宽：28(循环) + 6 + 34(音量%) + 6 + 76(滑块) + 6 + 48(重扫) + 6 + 30(列表) ≈ 240 ✓
+            row.add(right, {grow: 0, shrink: 0, basis: 240, align: 1})
+
+            box.add(row, {left: 0, right: 0, top: 0, h: BAR_H})
+
+            // ---- 歌单浮层：框架 `ListBox`（自带滚动/命中/文字 ✓；**先不挂**，展开时才挂 ✓）----
+            // ★ 浮层的"登记员"（2026-10-07 修"穿透"）：一块**透明**画布，和浮层同矩形、同挂同摘 ✓
+            //   它唯一的活：每帧渲染期 `setPopupCapture(浮层矩形)` ✓
+            //   为什么非它不可：容器派发是"挨个发给所有子控件"（sdl_layout:428 ✓ 没有 z 序 ✗）
+            //     ⇒ 不登记的话，浮层底下的 table 也会跟着响应（悬停高亮/提示、右键菜单都可能穿出来 ✗✗）
+            //   为什么是"每帧登记"：框架每帧渲染前会 clear（sdl_window:1611 ✓ 见 SDL3.leno 的说明 ✓）
+            //   ⚠ 画布默认有**不透明底** ⇒ 必须显式透明（速查 ④.5 ✓）
+            //   ⚠ 必须排在 `lb` **之前** add：AnchorBox 按插入顺序渲染 ⇒ 它在浮层下面（不遮字 ✓）
+            capSink = SDL3.createCanvas({w: LIST_W, h: LIST_H, pad: 0, border: false, border_width: 0})
+            capSink.set_bg_color(#00000000)
+            capSink.on_draw(func(Renderer r, float ox, float oy, float cw, float ch) {
+                SDL3.setPopupCapture(lb.x, lb.y, lb.w, lb.h)
+            })
+
+            lb = SDL3.createListBox({
+                w: LIST_W, h: LIST_H, item_h: LIST_ROW, font_size: 13, mode: 0,
+                items: list_items(q),
+                tip: "点一首就播它；滚轮翻页"        // ⚠ ListBox 没有 set_tip，只能在 opts 里给 ✓
+            })
+            // ⚠ **故意不用 `lb.on_change` 来点歌** ✗ —— 单选模式下它"点已选中行不回调"
+            //   （sdl_listbox.leno:348 `if not is_selected(idx)` ✓），而浮层展开时当前曲正是选中行
+            //   ⇒ 点"正在播的那首"会静悄悄没反应 ✗（用户报的正是这个 ✓）
+            //   现在改由本文件 `on_event` 自己按纵坐标算行号点歌（见那里 ✓），一条通路、好懂 ✓
+
+            // 音量：只在这里改（tick 不碰滑块 ⇒ 不会跟用户对着拽 ✓ 见文件头 ⚠①）
+            volSld.on_change(func(float v) {
+                if p is Player => w { w.set_volume(v / 100.0) }
+                volLbl.set_text(_str(_int(v)) + "%")
+            })
+            sync_icons(q)
+        }
+    }
+
+    // 建一个"只有图标"的按钮（24px 图标 1:1 显示 ⇒ 最清晰 ✓）
+    //   ★ 平时**完全透明**、悬停/按下才淡淡一层白 ✓ —— 这就是图标按钮该有的手感 ✓
+    //   ⚠ `background: false` 会**连悬停底一起跳过** ✗（469 行整段被门控掉 ✓）⇒ 看着"没有 hover" ✗
+    //     正解：`background: true`（保留绘制 ✓）+ **透明**的 `bg_color`（平时看不见 ✓）
+    //     + 显式 `hover_color` / `pressed_color`（移上去/按下去那层淡白 ✓）
+    //   ⚠ 同时要关掉 `shadow` / `border`：否则透明底上会冒出一圈阴影/白边 ✗（472 / 489 行 ✓）
+    //   ⚠ `background` 是**开关**（true/false），不是颜色 ✗（给底色要写 `bg_color` ✓ 见 sdl_button:196）
+    //   ⚠ 别再指望"图标自动变亮"那种 hover ✗：`iconOnly` 的自动效果只是给图标提一点亮 ✓
+    //     （sdl_button:552 ✓），而图标本来就接近纯白 ⇒ 肉眼看不出来 ✗
+    func icon_btn(string name, string tip, float w, float h): Button {
+        // ★ 这一段照抄 `leno_gui\应用\电脑清理大师\cleaner_master.leno:221-240` 的结论 ✓（同一个坑 ✓）：
+        //   ① `background: false` 不行 ✗ —— 它把"背景 + **hover** + 按压"整块跳过（sdl_button:470 ✓）
+        //      ⇒ 看着"没有 hover" ✗（本仓那两处也有同样记录 ✓）
+        //   ② 只靠框架那个"纯图标自动高亮块"也不行 ✗ —— 它是**白色** #FFFFFF23 ✓
+        //      而**本应用界面是浅色的**（页面底色 #F0F0F5 ✓ 实测取色 240,240,245 ✓）⇒ 白压白 = 看不见 ✗✗
+        //      （`file_manager` 用它有效果，是因为那边页面底色不同 ✓；我们这边必须显式给色 ✓）
+        //   ③ 正解：`background: true` + **与页面同色**的 `bg_color`（平时＝看不出来 ✓）
+        //      + 显式 `hover_color` / `pressed_color`（比页面略深一点 ✓ 深色图标上很显眼 ✓）
+        Button b = SDL3.createButton({
+            w: w, h: h, text: "", font_size: 12, tip: tip,
+            background: true,
+            bg_color: #F0F0F5FF,                 // 与页面同色 ⇒ 平时"没有底" ✓
+            hover_color: #E2E5EBFF,              // 悬停：略深的一层 ✓
+            pressed_color: #D3D7DEFF,            // 按下：再深一点 ✓
+            border: false, shadow: false,        // 别冒白边/阴影 ✗（浅色页面上很脏 ✓）
+            image_path: icon_path(name)
+        })
+        return b
+    }
+
+    func icon_path(string name): string {
+        if imgDir == "" { return name + ".png" }
+        return dirs.join(imgDir, name + ".png")
+    }
+
+    // 歌单要显示的曲目名（与 `Player.list` **同序** ⇒ 下标一一对应 ✓）
+    func list_items(Player q): Array[string] {
+        Array[string] items = []
+        for q.count() to i { items.add(q.name_at(i)) }
+        return items
+    }
+
+    // 点在某控件矩形里吗（浮层"外面"判定用 ✓）
+
+    // 点在某控件矩形里吗（浮层"外面"判定用 ✓）
+    func in_rect(float rx, float ry, float rw, float rh, float mx, float my): bool {
+        return mx >= rx and mx <= rx + rw and my >= ry and my <= ry + rh
+    }
+
+    // ==================== 窗口事件（宿主转交 ✓）：浮层"失去焦点即收" ====================
+    //   返回 true = 这一击被浮层吃掉了（宿主别再往下发 ✓）
+    func on_event(Event ev): bool {
+        if not popOpen { return false }
+        if ev.isKeyDown() and ev.scancode() == Scancode.ESCAPE {
+            close_pop()
+            return true
+        }
+        var[float, float](mx, my) = ev.mousePos()
+        if ev.isMouseWheel() { mx = ev.wheelMouseX(); my = ev.wheelMouseY() }   // 滚轮要看它自己的坐标 ✓（同 Table 的写法 ✓）
+        // ⚠ 判"点在浮层里吗"**必须用控件自己的矩形**（`lb.x/y/w/h` 是公开字段 ✓），
+        //   不要用 `box.x/y` 自己推算：框架喂给控件的坐标与这里拿到的可能差一个标题栏偏移 ✗
+        //   —— 早先就是这么错的：明明点在列表里，却被判成"点外面"⇒ 直接把浮层收了 ✗（看着"点了没反应"）
+        bool inside = in_rect(lb.x, lb.y, lb.w, lb.h, mx, my)
+        // ★ 2026-10-07：浮层登记了"弹层捕获区"之后，框架**不再把事件派进浮层** ✗
+        //   （ListBox 自己的 process 开头也有那句 `if inPopupCapture { return }` ✓）
+        //   ⇒ 这里**直投**给它：滚轮翻页、悬停高亮都得靠它自己维护 ✓（库内 Menu / ComboBox 同款范式 ✓）
+        if inside { lb.process(ev) }
+        if not ev.isMouseButtonDown() { return false }
+        if inside {
+            // ★ 自己按纵坐标算行号点歌（**镜像 `ListBox.index_at` 的算法** ✓ —— 它是 pri ✗ 用不了）：
+            //   `idx = (my - y + scroll) / itemH`（第 0 项就从 `y` 起，没有内边距 ✓ 见 sdl_listbox ✓）
+            //   为什么要自己算：单选模式下点**已选中行**控件不回调 ✗（见上面 lb 那段注释 ✓）
+            int r = _int((my - lb.y + lb.get_scroll()) / LIST_ROW)
+            if r >= 0 {
+                if p is Player => w {
+                    if r < w.count() {
+                        w.play_index(r)
+                        lastIdx = -1        // 让 tick 下一拍必然刷一次状态栏 ⇒ 点了立刻有反馈 ✓
+                    }
+                }
+            }
+            SDL3.markFrameRedraw()
+            return false                    // 放行：让 ListBox 自己把高亮挪过去 ✓（已是选中行时它不动 ✓ 无妨）
+        }
+        // ⚠ "列表"按钮要放行：它自己会 toggle ⇒ 否则先被这里关掉、再被按钮打开 = 永远关不掉 ✗
+        if in_rect(btnList.get_x(), btnList.get_y(), btnList.get_w(), btnList.get_h(), mx, my) { return false }
+        close_pop()                                                // 点别处 ⇒ 收起（= 失去焦点 ✓）
+        return false                                               // 不吞这一击：宿主该干嘛干嘛（如点表格 ✓）
+    }
+
+    // ==================== 每 120ms（主界面定时器调 ✓）====================
+    func tick() {
+        // ★ 真正的挂/摘浮层在这里做（见文件头 ⚠：不能在事件回调里改容器的子控件数组 ✗）
+        apply_pop()
+
+        if p is Player => q {
+            q.tick()                       // 放完自动下一首（规则在 player.leno ✓）
+
+            songLbl.set_text(song_text(q))
+            artistLbl.set_text(artist_text(q, dlPct))
+            timeLbl.set_text(fmt_time(q.position()) + " / " + fmt_time(q.duration()))
+            // 进度条是自绘的（读的是 player 的实时比例 ✓）⇒ 播着的时候得让它重画 ✓（不播就不刷 ✗）
+            if q.playing { SDL3.markFrameRedraw() }
+            volLbl.set_text(_str(_int(q.volume * 100.0)) + "%")   // ⚠ 只显示、不碰滑块值 ✓
+            sync_icons(q)
+
+            // 换曲 ⇒ 歌单里的选中跟着走（同索引的回调会被忽略 ✓ 见 lb.on_change ✓）
+            if q.index != lastIdx {
+                lastIdx = q.index
+                if q.count() > 0 {
+                    if popOpen { lb.set_selected(q.index) }   // 把高亮挪到当前曲（纯显示 ✓）
+                    hostLbl?.set_text("正在播：" + q.current_name())
+                }
+            }
+            if q.err != "" { hostLbl?.set_text(q.err) }
+        }
+    }
+
+    // ==================== 每 33ms（主界面另挂一个定时器 ✓）：转唱片 + 推特效 ====================
+    func animate() {
+        if p is Player => q {
+            // ---- 特效时钟（纯视觉量，与播放状态无关 ✓）----
+            fxT = fxT + 0.033
+            if fxT > 3600.0 { fxT = fxT - 3600.0 }     // 防跑飞（长时间挂着也不至于精度掉光 ✓）
+            sweep = sweep + 0.010                      // ≈3.3 秒扫一趟 ✓
+            if sweep >= 1.0 { sweep = sweep - 1.0 }
+            ring = ring + 0.020                        // ≈1.65 秒一圈音波 ✓
+            if ring >= 1.0 { ring = ring - 1.0 }
+            // 悬停缓动：向目标逼近（进/出都平滑 ✓）；归零后停手 ⇒ 静止不刷帧 ✓
+            float want = 0.0
+            if seekHover { want = 1.0 }
+            hoverEase = hoverEase + (want - hoverEase) * 0.30
+            if hoverEase < 0.004 { hoverEase = 0.0 }
+            // 点击涟漪推进（跑完就熄 ✓）
+            if clickFx >= 0.0 {
+                clickT = clickT + 0.055
+                if clickT >= 1.0 {
+                    clickFx = -1.0
+                    clickT = 0.0
+                }
+            }
+            if q.playing {
+                discAngle = discAngle + 7.0            // 33ms 一步 ⇒ 约 1.6 秒一圈 ✓
+                if discAngle >= 360.0 { discAngle = discAngle - 360.0 }
+            }
+            // ⚠⚠ 只在"画面确实在变"时才 `markFrameRedraw` ✓：暂停 + 没悬停 + 没涟漪 ⇒ **不刷** ✓
+            if q.playing or hoverEase > 0.0 or clickFx >= 0.0 { SDL3.markFrameRedraw() }
+        }
+    }
+
+    // 播放/暂停图标、循环图标跟着状态换（只在**变了**的时候换 ⇒ 不每帧重载图片 ✓）
+    //   ⚠ 状态区分**不能用 `image_tint`** ✗：tint 是相乘着色 ⇒ 深色图标只会更黑 ✓（本应用的图标是深色 ✓）
+    //     ⇒ 用**底色**区分：循环"关"给一层浅灰底（= 不生效的样子 ✓），其余与页面同色 ✓
+    func sync_icons(Player q) {
+        if q.playing != lastPlaying {
+            lastPlaying = q.playing
+            btnPlay.set_image(icon_path(if q.playing then "pause" else "play"))
+        }
+        if q.loopMode == pl.LOOP_ONE {
+            btnLoop.set_image(icon_path("loop_one"))
+            btnLoop.set_bg_color(#F0F0F5FF)
+        } eif q.loopMode == pl.LOOP_ALL {
+            btnLoop.set_image(icon_path("loop_all"))
+            btnLoop.set_bg_color(#F0F0F5FF)
+        } else {
+            // "循环：关"复用列表循环图标 + **浅灰底** ⇒ 一眼看出"当前不循环" ✓（不另出一张图 ✓）
+            btnLoop.set_image(icon_path("loop_all"))
+            btnLoop.set_bg_color(#E4E6EAFF)
+        }
+    }
+
+    // 点"列表"图标：在**开/关之间切**（真正的挂摘在 tick ✓ 见文件头 ⚠）
+    func toggle_pop() {
+        wantPop = not wantPop
+        SDL3.markFrameRedraw()
+    }
+
+    func close_pop() {
+        wantPop = false
+        SDL3.markFrameRedraw()
+    }
+
+    // 把 `wantPop` 落地（由 tick 调 ✓）：挂上/摘掉浮层
+    //   ⚠ 收起时必须真的 `remove`：容器遍历子控件**不看 `visible`** ✗
+    //     留个看不见的浮层会把那一带的点击全吃掉 ✗✗
+    func apply_pop() {
+        if wantPop == popOpen { return }
+        popOpen = wantPop
+        if popOpen {
+            if p is Player => q { lb.set_items(list_items(q)) }   // 每次展开都刷新曲目 ✓
+            // 浮层：右贴 10、**底边**贴到播放条上方（`AnchorBox` 的 bottom 锚定 ✓）；摆上去就是层级 ✓
+            //   ⚠ 先挂**登记员**再挂列表：AnchorBox 按插入顺序渲染 ⇒ 登记员在下面（透明的，不遮字 ✓）
+            box.add(capSink, {right: 10, bottom: BAR_TOTAL + LIST_GAP, w: LIST_W, h: LIST_H})
+            box.add(lb, {right: 10, bottom: BAR_TOTAL + LIST_GAP, w: LIST_W, h: LIST_H})
+            // 挂上后把高亮同步到"正在播的那首"（纯显示 ✓）
+            if p is Player => q { if q.count() > 0 { lb.set_selected(q.index) } }
+        } else {
+            box.remove(lb)
+            box.remove(capSink)          // 摘掉登记员 ⇒ 下一帧渲染前框架清空捕获区 ⇒ 不再挡事件 ✓
+        }
+        SDL3.markFrameRedraw()
+    }
+
+    // ★ 试听（搜索结果右击「播放试听」用 ✓）：放一段临时文件，独占音频、放完自动收摊 ✓
+    //   为什么由"搜到的直链"先落一小段到临时文件再播：见 `dl_engine.dl_preview` 的注释 ✓
+    func preview(string path, string title) {
+        if p is Player => q { q.preview(path, title) }
+        lastIdx = -1                     // 让 tick 下一拍必然刷一次（名字/状态立刻更新 ✓）
+        SDL3.markFrameRedraw()
+    }
+
+    // 当前曲目下标（-1 = 列表空 ✓）—— 宿主显示/自检都可读 ✓
+    func cur_index(): int {
+        if p is Player => q { return q.index }
+        return -1
+    }
+
+    // 退出前收摊（宿主在 `win.run` 返回后调 ✓）：停播 + **释放音频设备** ✓
+    //   ⚠ 不释放的话，`Sound` 还占着 miniaudio 的设备/线程 ⇒ 退出时可能被挂住（"点退出卡着" ✓）
+    func shutdown() {
+        if p is Player => q { q.close() }
+    }
+
+    // 后台"整首下载"的进度（宿主每拍从通道里读到就喂进来 ✓；< 0 = 没有在下的 ✓）
+    func set_dl_progress(float pct) {
+        dlPct = pct
+        SDL3.markFrameRedraw()          // 歌手行那句进度要立刻可见 ✓（不播时也得刷 ✓）
+    }
+
+    // ★ 后台"整首下载"完成（宿主收到 `done` 后调 ✓）——
+    //   ① 悄悄重扫（它进播放列表 ✓，但**不**覆盖状态栏：那句"整首已下载"留给宿主说 ✓）
+    //   ② 若正在试听**同一首** ⇒ 切到完整文件、并**接着刚才那一秒**继续播 ✓
+    //      ⇒ 之后 `can_seek()` 为真 ⇒ 进度条可以拖了 ✓（这正是"下完才能快进"的落地 ✓）
+    //   ⚠ 切源会有极短的静音（停掉旧的、加载新文件 ✓）：换来的是"试听听着听着就转成正式播放" ✓
+    //   ⚠ 只有 basename 能对上才切（比如下载到的格式和试听临时文件不同 ⇒ 就放过，不硬切 ✗）
+    func on_downloaded(string path, string tag): bool {
+        bool adopting = false
+        float pos = 0.0
+        if p is Player => q {
+            if q.previewing and q.previewName == tag {
+                pos = q.position()
+                adopting = true
+            }
+        }
+        dlPct = -1.0
+        if p is Player => q {
+            q.scan(dir)                 // 内部会先 close ✓ 不用自己再来一遍 ✓
+            lastIdx = -1
+            if popOpen { lb.set_items(list_items(q)); lb.clear_selection() }
+            if adopting {
+                int i = q.index_of(path)
+                if i >= 0 {
+                    if q.play_index(i) {
+                        if pos > 0.5 { q.seek_seconds(pos) }
+                        hostLbl?.set_text("试听的那首已下完 ⇒ 已切到本地完整文件，可拖进度 ✓（" + tag + "）")
+                    }
+                }
+            }
+        }
+        SDL3.markFrameRedraw()
+        return adopting
+    }
+
+    // 重新扫目录（下完新歌后不用重启 ✓）
+    func rescan() {
+        if p is Player => q {
+            q.close()                    // 列表会变 ⇒ 下标可能失效，先停掉 ✓
+            q.scan(dir)
+            lastIdx = -1
+            if popOpen { lb.set_items(list_items(q)); lb.clear_selection() }
+            hostLbl?.set_text("播放列表已刷新：找到 " + _str(q.count()) + " 首")
+        }
+        SDL3.markFrameRedraw()
+    }
+
+    // ==================== 自绘：进度条（特效版 ✓ 2026-10-07）====================
+    //   层次（下→上）：
+    //     ① 轨道 + 已播段 —— 复用 `prgb.drawBar`（与控件版同源 ⇒ 观感不跑偏 ✓）
+    //     ② 轨道上缘一道浅高光 —— 给点"凹槽"的厚度感 ✓
+    //     ③ 已播段上半档亮色 —— 两块钱做出**伪渐变** ✓（不建纹理、不做 shader ✓）
+    //     ④ 扫光 —— 播放中：一道半透明白带在**已播段里**来回跑 ✓（不看时间也看得出在走 ✓）
+    //     ⑤ 头部圆点 + **呼吸**光晕 —— 暂停时光晕静止（不做动画 ⇒ 不白刷帧 ✓）
+    //     ⑥ 点击涟漪 —— 纯手感反馈 ✓（**不 seek**：定位是二期 ✓）
+    //   ⚠ 一律"手写夹取"到已播段内（`l / rr` 那几行 ✓）：`setClipRect` 要传指针、麻烦 ✗
+    //   ⚠ 条高随悬停 8 → 12（缓动 ✓）—— 想加效果又**不想动布局**时，"在画布里长粗"是零成本 ✓
+    func draw_seek(Renderer r, float ox, float oy, float cw, float ch, float ratio, bool playing) {
+        if cw <= 2.0 or ch <= 2.0 { return }
+        float bh = 8.0 + 4.0 * hoverEase               // 悬停变粗 ✓
+        float by = oy + (ch - bh) * 0.5                // 垂直居中 ✓（在行里跟文字对齐 ✓）
+        float rad = bh * 0.5
+        float rt = ratio
+        if rt < 0.0 { rt = 0.0 }
+        if rt > 1.0 { rt = 1.0 }
+        prgb.drawBar(r, ox, by, cw, bh, rt, #D5D9E0FF, #3C82DCFF)   // ① 底（含已播段 ✓）
+        r.setColor(#EBEEF3FF)                                        // ② 上缘高光
+        r.fillRoundedRect(ox + rad, by + bh * 0.20, cw - rad * 2.0, bh * 0.26, bh * 0.13)
+        float fw = cw * rt
+        if fw < bh { fw = bh }
+        if rt > 0.0 {
+            r.setColor(#5FA0ECFF)                                    // ③ 伪渐变（上半档更亮 ✓）
+            r.fillRoundedRect(ox + rad * 0.35, by + bh * 0.16, fw - rad * 0.7, bh * 0.34, bh * 0.17)
+        }
+        if playing and fw > 8.0 {                                    // ④ 扫光（播放中才有 ✓）
+            float band = fw * 0.34
+            if band < 20.0 { band = 20.0 }
+            float l = ox + fw * (sweep * 1.7 - 0.35)                 // -0.35..1.35 ⇒ 左外进、右外出 ✓
+            float rr = l + band
+            if l < ox { l = ox }                                     // ★ 夹到已播段里（别溢到未播区 ✗）
+            if rr > ox + fw { rr = ox + fw }
+            if rr - l > 1.0 {
+                r.setColor(#FFFFFF40)
+                r.fillRoundedRect(l, by, rr - l, bh, rad)
+            }
+        }
+        if rt > 0.0 {                                                // ⑤ 头（白心 + 蓝环 + 呼吸光晕 ✓）
+            float hx = ox + fw
+            float hy = by + rad
+            float pulse = 0.5 + 0.5 * maths.sin(fxT * 2.6)
+            float glow = rad * (if playing then 1.15 + 1.25 * pulse else 1.5)
+            r.setColorFloat(0.24, 0.51, 0.86, 0.32)
+            r.fillCircle(hx, hy, glow)
+            r.setColor(#FFFFFFFF)
+            r.fillCircle(hx, hy, rad * 0.88)
+            r.setColor(#3C82DCFF)
+            r.fillCircle(hx, hy, rad * 0.42)
+        }
+        if clickFx >= 0.0 {                                          // ⑥ 点击涟漪（两圈描边 ✓）
+            float rx = ox + cw * clickFx
+            float rr2 = rad * (1.6 + 9.0 * clickT)
+            r.setColorFloat(0.24, 0.51, 0.86, 0.55 * (1.0 - clickT))
+            r.drawCircle(rx, by + rad, rr2)
+            r.drawCircle(rx, by + rad, rr2 - 1.5)
+        }
+    }
+
+    // ==================== 自绘：转动的唱片 ====================
+    // 黑胶盘 + 同心纹 + 中心标签 + **随角度转的高光**（没有它就看不出在转 ✗）
+    //   ⚠ 颜色写死（唱片本来就是"物件"，不跟主题走 ✓）；几何全按 rad 比例 ⇒ 换尺寸不用改 ✓
+    func draw_disc(Renderer r, float cx, float cy, float rad) {
+        if rad < 6.0 { return }
+        bool playing = false
+        if p is Player => q { playing = q.playing }
+        r.setColor(#14161CFF)
+        r.fillCircle(cx, cy, rad)
+        r.setColor(#2A2E38FF)
+        r.drawCircle(cx, cy, rad * 0.88)
+        r.drawCircle(cx, cy, rad * 0.74)
+        r.drawCircle(cx, cy, rad * 0.60)
+        r.setColor(#3C82DCFF)                       // 中心标签（固定主题蓝 ⇒ 不引主题依赖 ✓）
+        r.fillCircle(cx, cy, rad * 0.40)
+        r.setColor(#00000066)
+        r.fillCircle(cx, cy, rad * 0.09)            // 中心孔
+        float a = discAngle * 3.14159265 / 180.0
+        float ca = maths.cos(a)
+        float sa = maths.sin(a)
+        r.setColor(#FFFFFF66)
+        r.drawLine(cx + ca * rad * 0.44, cy + sa * rad * 0.44, cx + ca * rad * 0.84, cy + sa * rad * 0.84)
+        r.fillCircle(cx + ca * rad * 0.84, cy + sa * rad * 0.84, rad * 0.11)
+        r.setColor(#FFFFFF33)
+        r.fillCircle(cx - ca * rad * 0.66, cy - sa * rad * 0.66, rad * 0.07)
+        // ★ 播放中再加两层（2026-10-07 ✓）：
+        //   ① **拖尾**：主高光后面跟两颗更淡的 ⇒ 一眼看出"转得快"（静止的盘看不出转速 ✗）
+        //   ② **音波环**：从中心孔往外扩散、越远越淡 ⇒ 像在出声 ✓
+        //      ⚠ 环只在**盘面以内**跑（0.16→0.96 ⇒ 不越出画布 ⇒ 不会被裁掉 ✗✓）
+        if playing {
+            r.setColorFloat(1.0, 1.0, 1.0, 0.16)
+            r.fillCircle(cx + maths.cos(a - 0.55) * rad * 0.84, cy + maths.sin(a - 0.55) * rad * 0.84, rad * 0.075)
+            r.setColorFloat(1.0, 1.0, 1.0, 0.08)
+            r.fillCircle(cx + maths.cos(a - 1.10) * rad * 0.84, cy + maths.sin(a - 1.10) * rad * 0.84, rad * 0.055)
+            r.setColorFloat(1.0, 1.0, 1.0, 0.38 * (1.0 - ring))
+            r.drawCircle(cx, cy, rad * (0.16 + 0.80 * ring))
+        }
+    }
+
+    // 秒 ⇒ "m:ss"（负数当 0 ✓；不依赖库函数，免得踩 _float/_int 的报错 ✗）
+    func fmt_time(float sec): string {
+        if sec < 0.0 { sec = 0.0 }
+        int total = _int(sec)
+        int m = total / 60
+        int s = total - m * 60
+        string ss = _str(s)
+        if s < 10 { ss = "0" + ss }
+        return _str(m) + ":" + ss
+    }
+}
+
+// 歌名 / 歌手两行文字（拆不出歌手就显示状态 ✓）
+//   ⚠ 这里**不拼**"第 x/y 首"：序号在歌单里看（当前曲会选中 ✓）
+//     拼进来只会把长歌手名挤成截断 ✗（酷狗这条也只显示歌手 ✓）
+//   ⚠ 界面文字里**别放** ✓ / ♪ / → 这类符号：字体没有对应字形就会显示成方框 □ ✗
+//     （这些符号只写在注释里 ✓ —— 注释不参与渲染 ✓）
+func song_text(Player q): string {
+    if q.previewing { return "试听：" + q.preview_name() }     // 试听优先显示（插播 ✓）
+    if q.count() == 0 { return "输出目录里还没有下好的歌" }
+    return pl.split_title(q.current_name())
+}
+
+//   ⚠ `dlPct`（后台整首下载进度）**必须当参数传进来**：本函数是**模块级**的（不在 struct 里 ✓）
+//     ⇒ 摸不到 `PlayerBar` 的字段（先前直接写 `dlPct` 就是"未定义变量" ✗ 编译期就报 ✓）
+func artist_text(Player q, float dlPct): string {
+    // 试听期间**同时**在后台整首下载（见宿主 startPreview ✓）⇒ 这里顺手把进度说出来 ✓
+    //   （下完会自动切到本地完整文件并接着放 ✓ 见 on_downloaded ✓）
+    if q.previewing {
+        if dlPct >= 0.0 { return "试听中 · 整首下载 " + _str(_int(dlPct)) + "%（下完可拖进度）" }
+        return "试听中（正在准备整首下载…）"
+    }
+    if q.count() == 0 { return "下几首就有得听了（目录见主界面的「输出目录」）" }
+    string a = pl.split_artist(q.current_name())
+    if a == "" { return (if q.playing then "正在播放" else "已暂停") }
+    return a
+}
+
+// 工厂：建条（自带扫目录 ✓；**不**替宿主加进布局 —— 加哪儿是宿主的事 ✓）
+//   imgDir 由宿主给（它已按 `dirs.join(dirs.res_dir(), "images")` 算好 ✓ ⇒ 打包后也一致 ✓）
+export func create_player_bar(string dir, string imgDir, Label hostLbl): PlayerBar {
+    PlayerBar b = new PlayerBar()
+    b.dir = dir
+    b.imgDir = imgDir
+    b.hostLbl = hostLbl
+    b.build()
+    return b
+}
+
+// 纯逻辑：给"输出目录里到底有几首能播"当个由头（宿主/测试可用来判断要不要提示 ✓）
+export func playable_count(PlayerBar? b): int {
+    if b is PlayerBar => q {
+        if q.p is Player => pp { return pp.count() }
+    }
+    return 0
+}

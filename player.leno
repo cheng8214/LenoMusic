@@ -1,0 +1,426 @@
+// ==================== 显示用：从文件名拆"歌名 / 歌手"（纯逻辑 ✓ 能离线单测）====================
+// 依据：下载落盘的名字是 `sanitizefilename(job[1] + " - " + job[2])`
+//       —— `job[1]` = **歌名**(F_NAME=1)、`job[2]` = **歌手**(F_ARTIST=2)（见 dl_engine:377 + 字段表 ✓）
+//   ⇒ 即 **"歌名 - 歌手"**（与下载目录里的实物一致 ✓，如 `后来 - 刘若英.flac` ✓）
+//   ⚠⚠ 2026-10-07 修：先前按"歌手 - 歌名"拆，于是播放条**大小两行正好接反** ✗
+//      （大行显示歌手、小行显示歌名 ✗ —— 随手拿一个真实文件就能看出来 ✓）
+//   ⚠ 按**最后**一处 `" - "` 切：歌名自己带 `" - "` 也不怕（`A - B - 歌手` ⇒ 歌名 `A - B` ✓）
+//   ⚠ 拆不出（用户自己丢进来的歌 / 名字里没有分隔符）⇒ 歌手 ""、整条当歌名 ✓ —— 不硬猜 ✗
+
+// 去掉扩展名（找**最后**一个点 ✓）："a.b.mp3" ⇒ "a.b"；没有点 ⇒ 原样 ✓
+export func strip_ext(string name): string {
+    if name == null { return "" }
+    int dot = -1
+    int q = name.find(".")
+    while q >= 0 {
+        dot = q
+        q = name.find(".", q + 1)
+    }
+    if dot <= 0 { return name }
+    return name.slice(0, dot)
+}
+
+// 最后一处 `" - "` 的下标（没有 ⇒ -1 ✓）
+func last_sep(string n): int {
+    int sep = -1
+    int q = n.find(" - ")
+    while q >= 0 {
+        sep = q
+        q = n.find(" - ", q + 1)
+    }
+    return sep
+}
+
+// 歌手 = **最后**一个 " - " **之后**那段（拆不出 ⇒ "" ✓）
+export func split_artist(string filename): string {
+    if filename == null { return "" }
+    string n = strip_ext(filename)
+    int q = last_sep(n)
+    if q <= 0 { return "" }
+    int rest = n.len() - q - 3
+    if rest <= 0 { return "" }
+    return n.sub_str(q + 3, rest)
+}
+
+// 歌名 = **最后**一个 " - " **之前**那段（拆不出 ⇒ 整条 ✓）
+export func split_title(string filename): string {
+    if filename == null { return "" }
+    string n = strip_ext(filename)
+    int q = last_sep(n)
+    if q <= 0 { return n }
+    return n.slice(0, q)
+}
+
+// player.leno — 音乐下载器：**播放器状态机**（纯逻辑为主 ⇒ 能离线单测 ✓）
+//
+// 分工（照本应用既有分层：dl_engine / dl_window / musicdl_gui ✓）：
+//   本文件           —— 列表 / 索引 / 播放暂停 / 循环 / 音量 / "放完自动下一首"的**规则**（可测 ✓）
+//   player_bar.leno  —— 画界面（**嵌在主界面表格下方的播放条**，不另开窗口 ✓）
+//   musicdl_gui.leno —— 接线：给它目录、把播放条加进根布局、每 120ms 调一次 tick() ✓
+//
+// ⚠ 为什么把"规则"与"发声"分开（这是本文件唯一的设计要点）：
+//   离线单测里建 Sound 可能失败（无声卡 / 文件是假的 ✓），但"放完之后下一首该是谁"这种
+//   规则**必须能测** ⇒ 拆成 `next_index_on_end()`（纯 ✓）+ `tick()`（带声音 ✓）✓
+//
+// ★ 底层用 LenoMusic（miniaudio：mp3/flac/wav/ogg 都能解 ✓）。已实测的三条（2026-10-07 ✓）：
+//   · 下载是**顺序追加写最终文件** ⇒ 部分文件**前缀自洽** ⇒ 截断 mp3 也能 load/播/给位置 ✓
+//   · `stop()` **保留播放位置** ⇒ 暂停 = stop、恢复 = play（模块里已包成 pause/resume ✓）
+//   · `getDuration()` = 文件头声明的**总时长** ✗ 与"当前可播长度"不一定一致
+//     ⇒ 对"还在下的那首"，进度条分母要按**已下比例**折算（二期"边下边播"再落地 ✓）
+import dirs
+import files
+import strings
+import "Music" as audio
+use audio.Sound
+
+export const LOOP_OFF = 0        // 放完列表就停
+export const LOOP_ALL = 1        // 放完回到第一首
+export const LOOP_ONE = 2        // 单曲循环
+
+export struct Player {
+    Array[string] list               // 播放列表（**文件全路径**，已按文件名排序 ✓）
+    int index = -1                   // 当前下标（-1 = 没选）
+    bool playing = false             // 用户意图：在播（暂停 ⇒ false ✓）
+    float volume = 0.8
+    bool muted = false
+    int loopMode = 1                 // LOOP_ALL（列表循环；字段默认值只能是字面量 ✗ ⇒ 不写常量名 ✓）
+                                     //   0=LOOP_OFF / 1=LOOP_ALL / 2=LOOP_ONE（见上面三个 export const ✓）
+    Sound? sound = null
+    string err = ""                  // 最近一次失败原因（无声卡 / 文件坏 ⇒ 界面要能说清 ✓）
+    int endedCount = 0               // 自检计数：一共自动推进过几次 ✓
+
+    // ---- 试听（"点一下立刻听"，与播放列表**并存的一套最小状态** ✓）----
+    //   媒体文件由调用方先准备好（哪怕只有**前一段** ✓ —— 实测"顺序写 ⇒ 截断文件前缀自洽、能播" ✓）
+    //   试听会**独占音频**：开始试听即停掉列表里那首 ✓；放完自动收摊、不推进列表 ✓
+    bool previewing = false
+    string previewName = ""          // 界面显示用（"试听：xxx" ✓）
+    string previewPath = ""          // 临时文件路径（收摊时可删 ✓）
+
+    // ==================== 列表（纯逻辑 ✓ 离线可测）====================
+
+    // 扫一个目录里的音频文件（按文件名升序 ✓）；返回扫到几个
+    //   ⚠ `dirs.listdir` 给的是**名字**（不含路径 ✗）⇒ 自己 join ✓
+    func scan(string dir): int {
+        close()
+        list = []
+        index = -1
+        if not dirs.exists(dir) { return 0 }
+        // ⚠ `dirs.listdir` 返回的**不是数组**（对它调 `.len()` 会报「类型 object 上不存在方法 'len'」✗）
+        //   但**可以直接 for 迭代**拿到名字 ✓ ⇒ 这里只用迭代，不碰 `.len()` ✓
+        var names = dirs.listdir(dir)
+        Array[string] hits = []
+        for names to n {
+            string nm = _str(n)
+            if is_audio(nm) { hits.add(dirs.join(dir, nm)) }
+        }
+        list = sort_by_name(hits)
+        if list.len() > 0 { index = 0 }
+        return list.len()
+    }
+
+    // 是不是音频：按扩展名（**大小写都认** ✓）
+    //   ⚠ 写成显式大小写表：这里不去依赖 `strings.lower` 的可用性（少一个踩坑点 ✓）
+    func is_audio(string name): bool {
+        string e = dirs.extname(name)
+        for ext_cases() to x {
+            if e == x { return true }
+        }
+        return false
+    }
+
+    func ext_cases(): Array[string] {
+        return [".mp3", ".MP3", ".flac", ".FLAC", ".wav", ".WAV", ".ogg", ".OGG", ".m4a", ".M4A"]
+    }
+
+    // 按**文件名**（不含目录 ✓）排序 —— 插入排序：列表通常几十条，够用且无依赖 ✓
+    //   ⚠ 比较必须**大小写不敏感**：直接 `a < b` 是字节序 ⇒ "C.MP3" 会排在 "a.flac" 之前 ✗
+    //     （实测踩过 ✓）⇒ 折 ASCII 小写再比，与资源管理器一致 ✓
+    func sort_by_name(Array[string] paths): Array[string] {
+        Array[string] out = []
+        for paths to p {
+            int at = 0
+            string key = dirs.basename(_str(p))
+            while at < out.len() and name_less(dirs.basename(out[at]), key) { at = at + 1 }
+            out.insert(at, _str(p))
+        }
+        return out
+    }
+
+    // 文件名比较：ASCII 折小写后按码点比（非 ASCII 原样 ⇒ 与字节序一致 ✓）
+    func name_less(string a, string b): bool {
+        Array[int] ca = strings.to_codepoints(a)
+        Array[int] cb = strings.to_codepoints(b)
+        int n = ca.len()
+        if cb.len() < n { n = cb.len() }
+        int i = 0
+        while i < n {
+            int x = lower_cp(ca[i])
+            int y = lower_cp(cb[i])
+            if x != y { return x < y }
+            i = i + 1
+        }
+        return ca.len() < cb.len()
+    }
+
+    func lower_cp(int c): int {
+        if c >= 65 and c <= 90 { return c + 32 }      // 'A'..'Z' ⇒ 'a'..'z'
+        return c
+    }
+
+    func count(): int { return list.len() }
+
+    func current(): string {
+        if index < 0 or index >= list.len() { return "" }
+        return list[index]
+    }
+
+    func current_name(): string {
+        string c = current()
+        if c == "" { return "" }
+        return dirs.basename(c)
+    }
+
+    // 按**下标**取曲名（播放条的歌单要逐行显示 ✓；越界返回 "" ✓ 不崩）
+    func name_at(int i): string {
+        if i < 0 or i >= list.len() { return "" }
+        return dirs.basename(list[i])
+    }
+
+    // 按**文件名**找下标（找不到 -1 ✓）—— 整首下完后"切到完整文件接着播"要用 ✓
+    //   只比 basename：下载落盘路径与列表项都是绝对路径，basename 才是"同一首"的判据 ✓
+    func index_of(string path): int {
+        string b = dirs.basename(path)
+        if b == "" { return -1 }
+        int i = 0
+        while i < list.len() {
+            if dirs.basename(list[i]) == b { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    // ==================== 播放规则（纯逻辑 ✓ 离线可测）====================
+
+    // "这首放完之后，下一首该是谁"：给下标；**-1 = 该停**（列表放完了 ✓）
+    //   LOOP_ONE ⇒ 还是自己 ✓ / LOOP_ALL ⇒ 回到 0 ✓ / LOOP_OFF ⇒ 到底 -1 ✓
+    func next_index_on_end(): int {
+        if list.len() == 0 { return -1 }
+        if loopMode == LOOP_ONE { return index }
+        int nxt = index + 1
+        if nxt < list.len() { return nxt }
+        if loopMode == LOOP_ALL { return 0 }
+        return -1
+    }
+
+    // 手动"下一首 / 上一首"：同样受循环模式约束（LOOP_OFF 时到头就是 -1 ✓）
+    func next_index(): int {
+        if list.len() == 0 { return -1 }
+        int nxt = index + 1
+        if nxt >= list.len() { nxt = if loopMode == LOOP_OFF then -1 else 0 }
+        return nxt
+    }
+
+    func prev_index(): int {
+        if list.len() == 0 { return -1 }
+        int p = index - 1
+        if p < 0 { p = if loopMode == LOOP_OFF then -1 else list.len() - 1 }
+        return p
+    }
+
+    // ==================== 传输控制（要音频设备 ⇒ 离线只测"安全失败" ✓）====================
+
+    func play_index(int i): bool {
+        if i < 0 or i >= list.len() { return false }
+        // 一旦播列表里的歌 ⇒ 试听立刻作废（试听是"插播" ✓）
+        previewing = false
+        previewName = ""
+        previewPath = ""
+        close_sound()
+        index = i
+        var s = audio.createSound(list[i])
+        if not s.isInit() {
+            sound = null
+            playing = false
+            err = "打不开这首音频（文件坏了？或本机没有可用的音频设备）"
+            return false
+        }
+        s.setVolume(effective_volume())
+        s.play()
+        s.setLooping(false)          // 单曲循环由本文件的规则管 ⇒ 不用引擎的 looping ✓
+        sound = s
+        playing = true
+        err = ""
+        return true
+    }
+
+    // 播放 / 暂停 切换（暂停 = stop，位置保留 ✓；恢复 = play ✓）
+    func toggle(): bool {
+        if playing {
+            sound?.pause()
+            playing = false
+            return true
+        }
+        if sound != null {
+            sound?.resume()
+            playing = true
+            return true
+        }
+        if index < 0 and list.len() > 0 { return play_index(0) }
+        return play_index(index)
+    }
+
+    func next(): bool {
+        int i = next_index()
+        if i < 0 { return false }
+        return play_index(i)
+    }
+
+    func prev(): bool {
+        int i = prev_index()
+        if i < 0 { return false }
+        return play_index(i)
+    }
+
+    func stop(): void {
+        sound?.stop()
+        playing = false
+    }
+
+    // 直接跳到第 s 秒（比例版见 seek_ratio ✓）
+    //   ⚠ miniaudio 的 seek 之后音频是**停着**的 ⇒ 必须 resume（否则"拖完就静音" ✗ 实测 ✓）
+    func seek_seconds(float s): bool {
+        if sound == null { return false }
+        if s < 0.0 { s = 0.0 }
+        bool ok = sound.seek(s)
+        if ok {
+            sound?.resume()
+            playing = true
+        }
+        return ok
+    }
+
+    // 拖进度：按比例 0..1（要时长 ⇒ 时长未知就返回 false ✓）
+    //   ⚠ 调用前先问 `can_seek()`（试听那个截断文件不让拖 ✗ 见它的注释 ✓）
+    func seek_ratio(float r): bool {
+        float d = duration()
+        if d <= 0.0 { return false }
+        if r < 0.0 { r = 0.0 }
+        if r > 1.0 { r = 1.0 }
+        return seek_seconds(d * r)
+    }
+
+    // 能不能拖进度：**只有"完整文件"可以** ✓（2026-10-07）
+    //   · 试听播的是"前一段"的**截断文件** ✗ —— `duration()` 是文件头声明的**总时长**，比实际
+    //     可播的部分长 ⇒ 拖着拖就跳到并不存在的位置（要么静音、要么直接结束 ✗ 实测 ✓）
+    //   · 列表里的歌 = 已经下完的完整文件 ✓ ⇒ 可拖
+    func can_seek(): bool {
+        if previewing { return false }
+        return sound != null and index >= 0
+    }
+
+    func set_volume(float v) {
+        if v < 0.0 { v = 0.0 }
+        if v > 1.0 { v = 1.0 }
+        volume = v
+        sound?.setVolume(effective_volume())
+    }
+
+    func set_muted(bool m) {
+        muted = m
+        sound?.setVolume(effective_volume())
+    }
+
+    func effective_volume(): float { return if muted then 0.0 else volume }
+
+    func duration(): float {
+        if sound == null { return 0.0 }
+        return sound.getDuration()
+    }
+
+    func position(): float {
+        if sound == null { return 0.0 }
+        return sound.getPosition()
+    }
+
+    // 播放进度 0..1（时长未知 ⇒ 0 ✓）
+    //   ★ 二期"边下边播"要改的就是这里：分母对"还在下的那首"按**已下比例**折算 ✓
+    func ratio(): float {
+        float d = duration()
+        if d <= 0.0 { return 0.0 }
+        float r = position() / d
+        if r < 0.0 { r = 0.0 }
+        if r > 1.0 { r = 1.0 }
+        return r
+    }
+
+    // ==================== 试听（点一下立刻听 ✓）====================
+
+    // 试听某个文件（路径由调用方准备好 ✓，可以只是"前一段" ✓）
+    //   返回 false 时 `err` 会写清原因（本机没声卡 / 文件是空的 ✓）
+    func preview(string path, string title): bool {
+        close_sound()                     // 试听独占音频：先把列表那首停掉 ✓
+        previewing = true
+        previewName = title
+        previewPath = path
+        var s = audio.createSound(path)
+        if not s.isInit() {
+            sound = null
+            playing = false
+            previewing = false
+            err = "试听打不开这首音频（本机没有可用的音频设备？或试听文件是空的）"
+            return false
+        }
+        s.setVolume(effective_volume())
+        s.play()
+        s.setLooping(false)
+        sound = s
+        playing = true
+        err = ""
+        return true
+    }
+
+    func stop_preview() {
+        if not previewing { return }
+        stop()
+        close_sound()
+        previewing = false
+        previewName = ""
+        previewPath = ""
+    }
+
+    func preview_name(): string { return previewName }
+
+    // ==================== 推进（主循环 120ms 调一次 ✓）====================
+
+    // 放完了 ⇒ 按循环模式往下走；该停就停 ✓
+    func tick() {
+        if not playing or sound == null { return }
+        if not sound.isAtEnd() { return }
+        if previewing {
+            // 试听放完（或把"前一段"听完了 ✓）⇒ 收摊，**不**推进播放列表 ✓
+            playing = false
+            previewing = false
+            previewName = ""
+            previewPath = ""
+            close_sound()
+            return
+        }
+        int i = next_index_on_end()
+        endedCount = endedCount + 1
+        if i < 0 {
+            playing = false
+            return
+        }
+        play_index(i)
+    }
+
+    func close_sound() {
+        if sound != null { sound?.uninit() }
+        sound = null
+    }
+
+    func close() {
+        stop()
+        close_sound()
+    }
+}
