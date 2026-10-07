@@ -1,0 +1,208 @@
+// kuwo_des.leno — 酷我官方接口要用的 DES 变体（encryptquery）
+//
+// 逐行移植 musicdl/modules/utils/kuwoutils.py 的 KuwoMusicClientUtils：
+//   encryptquery(query) = base64( crypt(utf8(query), SECRET_KEY_SONG, mode=0) )
+//
+// 这不是标准 DES —— 是酷我用的"小端位序"变体，两点与标准 DES 不同：
+//   ① 密钥按小端解释（int.from_bytes(key, 'little')），位序整体镜像；
+//   ② E 与 PC2 两张表的 -1 位**恰好都在每个字节的高 2 位**（下标 6,7 / 14,15 / …）
+//      ⇒ 中间值 R 的每个字节都 ≤ 0x3F，于是 sbox 可以直接用"字节值"当下标
+//      （MATRIXNSBOX[b][ (R >> (b*8)) & 0xFF ]，行数只有 64 却不会越界）。
+//      这一点是移植时最容易误判成 bug 的地方 —— 我核对过全部 8 个字节位置都成立。
+//
+// 校验：金标向量来自 Python 侧 kuwoutils.py 的实际输出，见文件末尾注释。
+import strings
+import "Crypto" as crypto
+
+const MASK32 = 0xFFFFFFFF
+const MASK64 = 0xFFFFFFFFFFFFFFFF
+const SECRET_KEY_SONG = "ylzsxkwm"
+
+// 每轮的循环左移位数（对应 Python 的 ARRAYLS）
+var ROTLS = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
+// ROTMASK[1] / ROTMASK[2]（下标 0 不用，对应 Python 的 ARRAYLSMASK）
+var ROTMASK = [0, 0x100001, 0x300003]
+
+// ARRAYE：32 位半块扩展到 48 位
+var E = [
+    31, 0, 1, 2, 3, 4, -1, -1, 3, 4, 5, 6, 7, 8, -1, -1,
+    7, 8, 9, 10, 11, 12, -1, -1, 11, 12, 13, 14, 15, 16, -1, -1,
+    15, 16, 17, 18, 19, 20, -1, -1, 19, 20, 21, 22, 23, 24, -1, -1,
+    23, 24, 25, 26, 27, 28, -1, -1, 27, 28, 29, 30, 31, 30, -1, -1
+]
+
+// ARRAYIP1：末置换
+var IP1 = [
+    39, 7, 47, 15, 55, 23, 63, 31, 38, 6, 46, 14, 54, 22, 62, 30,
+    37, 5, 45, 13, 53, 21, 61, 29, 36, 4, 44, 12, 52, 20, 60, 28,
+    35, 3, 43, 11, 51, 19, 59, 27, 34, 2, 42, 10, 50, 18, 58, 26,
+    33, 1, 41, 9, 49, 17, 57, 25, 32, 0, 40, 8, 48, 16, 56, 24
+]
+
+// ARRAYIP2：初始置换
+var IP2 = [
+    57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3,
+    61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7,
+    56, 48, 40, 32, 24, 16, 8, 0, 58, 50, 42, 34, 26, 18, 10, 2,
+    60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6
+]
+
+// ARRAYP：P 盒（32 位）
+var PBOX = [
+    15, 6, 19, 20, 28, 11, 27, 16, 0, 14, 22, 25, 4, 17, 30, 9,
+    1, 7, 23, 13, 31, 26, 2, 8, 18, 12, 29, 5, 21, 10, 3, 24
+]
+
+// ARRAYPC1：密钥置换 1（64 → 56）
+var PC1 = [
+    56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1,
+    58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38,
+    30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36,
+    28, 20, 12, 4, 27, 19, 11, 3
+]
+
+// ARRAYPC2：密钥置换 2（56 → 48）
+var PC2 = [
+    13, 16, 10, 23, 0, 4, -1, -1, 2, 27, 14, 5, 20, 9, -1, -1,
+    22, 18, 11, 3, 25, 7, -1, -1, 15, 6, 26, 19, 12, 1, -1, -1,
+    40, 51, 30, 36, 46, 54, -1, -1, 29, 39, 50, 44, 32, 47, -1, -1,
+    43, 48, 38, 55, 33, 52, -1, -1, 45, 41, 49, 35, 28, 31, -1, -1
+]
+
+// MATRIXNSBOX
+var SBOX = [
+    [14,4,3,15,2,13,5,3,13,14,6,9,11,2,0,5,4,1,10,12,15,6,9,10,1,8,12,7,8,11,7,0,0,15,10,5,14,4,9,10,7,8,12,3,13,1,3,6,15,12,6,11,2,9,5,0,4,2,11,14,1,7,8,13],
+    [15,0,9,5,6,10,12,9,8,7,2,12,3,13,5,2,1,14,7,8,11,4,0,3,14,11,13,6,4,1,10,15,3,13,12,11,15,3,6,0,4,10,1,7,8,4,11,14,13,8,0,6,2,15,9,5,7,1,10,12,14,2,5,9],
+    [10,13,1,11,6,8,11,5,9,4,12,2,15,3,2,14,0,6,13,1,3,15,4,10,14,9,7,12,5,0,8,7,13,1,2,4,3,6,12,11,0,13,5,14,6,8,15,2,7,10,8,15,4,9,11,5,9,0,14,3,10,7,1,12],
+    [7,10,1,15,0,12,11,5,14,9,8,3,9,7,4,8,13,6,2,1,6,11,12,2,3,0,5,14,10,13,15,4,13,3,4,9,6,10,1,12,11,0,2,5,0,13,14,2,8,15,7,4,15,1,10,7,5,6,12,11,3,8,9,14],
+    [2,4,8,15,7,10,13,6,4,1,3,12,11,7,14,0,12,2,5,9,10,13,0,3,1,11,15,5,6,8,9,14,14,11,5,6,4,1,3,10,2,12,15,0,13,2,8,5,11,8,0,15,7,14,9,4,12,7,10,9,1,13,6,3],
+    [12,9,0,7,9,2,14,1,10,15,3,4,6,12,5,11,1,14,13,0,2,8,7,13,15,5,4,10,8,3,11,6,10,4,6,11,7,9,0,6,4,2,13,1,9,15,3,8,15,3,1,14,12,5,11,0,2,12,14,7,5,10,8,13],
+    [4,1,3,10,15,12,5,0,2,11,9,6,8,7,6,9,11,4,12,15,0,3,10,5,14,13,7,8,13,14,1,2,13,6,14,9,4,1,2,14,11,13,5,0,1,10,8,3,0,11,3,5,9,4,15,2,7,8,12,15,10,7,6,12],
+    [13,7,10,0,6,9,5,15,8,4,3,10,11,14,12,5,2,11,9,6,15,12,0,3,4,1,14,13,1,2,7,8,1,2,12,15,10,4,0,3,13,14,6,9,7,8,9,6,15,1,5,12,3,10,14,5,8,7,11,0,4,13,2,11]
+]
+
+// ==================== 位变换（对应 bittransform）====================
+// 表里第 p 位取自 value 的第 table[p] 位；table[p] < 0 表示该位丢弃
+func shuffle(Array[int] table, int bits, int value): int {
+    int out = 0
+    int p = 0
+    while p < bits {
+        int src = table[p]
+        if src >= 0 {
+            if ((value >> src) & 1) != 0 { out = out | (1 << p) }
+        }
+        p = p + 1
+    }
+    return out & MASK64
+}
+
+// ==================== 子密钥（对应 subkeys）====================
+func makesubkeys(int keyint, int mode): Array[int] {
+    Array[int] keys = []
+    int cv = shuffle(PC1, 56, keyint)
+    int i = 0
+    while i < 16 {
+        int amt = ROTLS[i]
+        int mask = ROTMASK[amt]
+        // 等价于 Python 的 u64((cv & mask) << (28-amt)) | ((cv & u64(~mask)) >> amt)
+        // 用 (MASK64 - mask) 代替 ~mask，避开负数的位运算语义差异
+        cv = (((cv & mask) << (28 - amt)) | ((cv & (MASK64 - mask)) >> amt)) & MASK64
+        keys.add(shuffle(PC2, 64, cv))
+        i = i + 1
+    }
+    if mode == 1 {
+        Array[int] reversed = []
+        int k = 15
+        while k >= 0 { reversed.add(keys[k]); k = k - 1 }
+        return reversed
+    }
+    return keys
+}
+
+// ==================== 单块（对应 des64）====================
+func des64(Array[int] keys, int block): int {
+    int permuted = shuffle(IP2, 64, block)
+    Array[int] halves = [permuted & MASK32, (permuted >> 32) & MASK32]
+    int i = 0
+    while i < 16 {
+        int mixed = shuffle(E, 64, halves[1]) ^ keys[i]
+        // 8 个字节各查一次 sbox：字节值必然 ≤ 0x3F（见文件头注释 ②）
+        int bits = 0
+        int b = 7
+        while b >= 0 {
+            int idx = (mixed >> (b * 8)) & 0xFF
+            bits = (bits << 4) | (SBOX[b][idx] & 15)
+            b = b - 1
+        }
+        halves = [halves[1], (halves[0] ^ shuffle(PBOX, 32, bits)) & MASK32]
+        i = i + 1
+    }
+    // 对应 Python 的 p_source.reverse() 后 out = (p_source[1] << 32) | p_source[0]
+    int pre = ((halves[0] & MASK32) << 32) | (halves[1] & MASK32)
+    return shuffle(IP1, 64, pre) & MASK64
+}
+
+// ==================== 主体（对应 crypt）====================
+// mode=0 加密（尾部必补一块），mode=1 解密
+export func cryptbytes(Array[int] msg, int mode): Array[int] {
+    Array[int] keys = makesubkeys(keyfromstring(SECRET_KEY_SONG), mode)
+    Array[int] out = []
+    int total = msg.len()
+    int fullblocks = total / 8
+    int m = 0
+    while m < fullblocks {
+        int block = 0
+        int i = 0
+        while i < 8 {
+            block = block | ((msg[m * 8 + i] & 0xFF) << (i * 8))
+            i = i + 1
+        }
+        appendbytes(out, des64(keys, block & MASK64))
+        m = m + 1
+    }
+    // 尾块：mode=0 时恒补一块；mode=1 时只有真的有余数才补
+    if (total % 8) != 0 or mode == 0 {
+        int tail = 0
+        int i = 0
+        while i < (total % 8) {
+            tail = tail | ((msg[fullblocks * 8 + i] & 0xFF) << (i * 8))
+            i = i + 1
+        }
+        appendbytes(out, des64(keys, tail & MASK64))
+    }
+    return out
+}
+
+// 8 字节小端展开
+func appendbytes(Array[int] out, int value) {
+    int k = 0
+    while k < 8 {
+        out.add((value >> (k * 8)) & 0xFF)
+        k = k + 1
+    }
+}
+
+// 8 字节小端合成（对应 int.from_bytes(key, 'little')）
+func keyfromstring(string key): int {
+    Array[int] bs = crypto.str_to_bytes(key)
+    int value = 0
+    int i = 0
+    while i < 8 and i < bs.len() {
+        value = value | ((bs[i] & 0xFF) << (i * 8))
+        i = i + 1
+    }
+    return value & MASK64
+}
+
+// ==================== 对外：encryptquery ====================
+// 与 Python 的 KuwoMusicClientUtils.encryptquery 等价
+export func encryptquery(string query): string {
+    return crypto.bytes_to_b64(cryptbytes(crypto.str_to_bytes(query), 0))
+}
+
+// 金标向量（Python 侧 kuwoutils.py 实际输出，移植后应逐字节一致）：
+//   "A"           -> 95107a178705ab6e                      -> lRB6F4cFq24=
+//   "ABCDEFG"     -> 73bdbc82ee419139                      -> c728gu5BkTk=
+//   "ABCDEFGH"    -> a0f03aec7f26f6f46a63488853e41dd1      -> oPA67H8m9vRqY0iIU+Qd0Q==
+//   "ABCDEFGHI"   -> a0f03aec7f26f6f481bb1496b8e14135      -> oPA67H8m9vSBuxSWuOFBNQ==
+//   "0123456789abcdef" -> 747dbedb1b9dd64a483c7a4d984c81fb6a63488853e41dd1 -> dH2+2xud1kpIPHpNmEyB+2pjSIhT5B3R

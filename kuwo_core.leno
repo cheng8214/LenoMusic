@@ -1,0 +1,355 @@
+﻿// kuwo_core.leno — 酷我音乐核心（搜索 / 取直链 / 下载）
+//
+// 对标 Python 版 musicdl 的 musicdl/modules/sources/kuwo.py：
+//   ① 搜索：走**官方**接口 http://www.kuwo.cn/search/searchMusicBykeyWord
+//      （参数集与 musicdl 的 _constructsearchurls 对齐：vipver/client/ft/cluster/strategy/
+//        encoding/rformat/mobi/issubtitle/show_copyright_off/pn/rn/all）
+//   ② 取直链：按 musicdl 的 l2 优先级（nxinxz → haitangw 兜底），都返回 JSON 的 data.url
+//   ③ 下载：libcurl（LenoWeb 的 downloadResume，自带续传与低速超时）
+//
+// 约定：本文件**不 print、不含 main()、不解析命令行参数** ⇒ 可被 CLI 与 GUI 共用
+import jsons
+import strings
+import files
+import dirs
+import "web_net" as net
+import "kuwo_des.leno" as kuwo_des
+
+use net.(Response, HttpClient)
+
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+const SEARCH_BASE = "http://www.kuwo.cn/search/searchMusicBykeyWord"
+const FILE_SAFE_CHARS = "\\/:*?\"<>|"
+
+// ==================== SongInfo ====================
+// 对标 musicdl 的 SongInfo（只保留 CLI 用得到的字段）
+export struct SongInfo {
+    string id = ""          // MUSICRID 去掉 "MUSIC_" 前缀
+    string name = ""        // SONGNAME
+    string artist = ""      // ARTIST
+    string album = ""       // ALBUM
+    int duration = 0        // DURATION（秒）
+    string ext = ""         // 最高音质档的格式（来自 MINFO），如 flac / mp3
+    string sizeText = ""    // 最高音质档的体积（来自 MINFO），如 "52.83 MB"
+    int sizeBytes = 0       // 同上，换算成字节（用于和实际下载字节数对照）
+    string url = ""         // 取到的直链（惰性填充）
+
+    // 形如 "晴天 - 周杰伦 [4:29] flac 52.83 MB"
+    func display(): string {
+        string head = name + " - " + artist
+        if album != "" { head = head + " 《" + album + "》" }
+        return head + "  [" + formatduration(duration) + "]  " + ext + " " + sizeText
+    }
+
+    // 落盘文件名：歌名 - 歌手.ext（非法字符换成下号）
+    func filename(): string {
+        return sanitizefilename(name + " - " + artist) + "." + extension()
+    }
+
+    func extension(): string {
+        if ext == "" { return "flac" }
+        return ext
+    }
+
+    func valid(): bool { return id != "" }
+}
+
+// ==================== 小工具 ====================
+export func useragent(): string { return UA }
+
+export func formatduration(int secs): string {
+    if secs <= 0 { return "-:-" }
+    return _str(secs / 60) + ":" + twodigits(secs % 60)
+}
+
+func twodigits(int value): string {
+    if value < 10 { return "0" + _str(value) }
+    return _str(value)
+}
+
+export func sanitizefilename(string raw): string {
+    string out = raw
+    int i = 0
+    while i < FILE_SAFE_CHARS.len() {
+        out = out.replace(FILE_SAFE_CHARS.slice(i, i + 1), "_")
+        i = i + 1
+    }
+    return out.trim()
+}
+
+// 从一段 "level:h,bitrate:128,format:mp3,size:7.73Mb" 里取 key 的值（止于 ',' 或 ';'）
+func fieldof(string text, string key): string {
+    string needle = key + ":"
+    int pos = strings.find(text, needle)
+    if pos < 0 { return "" }
+    int start = pos + needle.len()
+    int endpos = text.len()
+    int comma = strings.find(text, ",", start)
+    int semicolon = strings.find(text, ";", start)
+    if comma >= 0 and comma < endpos { endpos = comma }
+    if semicolon >= 0 and semicolon < endpos { endpos = semicolon }
+    return text.slice(start, endpos).trim()
+}
+
+// ==================== 尺寸解析（必须容忍脏值！） ====================
+// 酷我 MINFO 的 size 实测有四种形态：
+//   "43.64Mb" / "999.06Kb" / "137.6Kb"（**千字节**，别一律当兆算）/ "zpMb"（臻品档的假尺寸，压根不是数字）
+// ⚠ 老写法 `to_lower().replace("mb","")` + `_float()` 遇到后两种会**抛异常**，
+//   而异常是在搜索时抛的 ⇒ 整个搜索界面表现为"什么都搜不到"（"青衣"就是被 size:999.06Kb 打崩的 ✓）
+func byteat(string s, int i): int {
+    var b = s.byte(i)
+    if b is int { return b }
+    return -1
+}
+
+// 纯数字（最多一个小数点）？—— **先判再转**，绝不把 _float 用在垃圾串上
+func isnumber(string s): bool {
+    if s == "" { return false }
+    int dots = 0
+    int i = 0
+    while i < s.byte_len() {
+        int b = byteat(s, i)
+        if b == 46 {
+            dots = dots + 1
+            if dots > 1 { return false }
+        } else if b < 48 or b > 57 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// "43.64Mb" / "999.06Kb" / "1.5Gb" → 字节数；认不出（含 "zpMb"）⇒ -1
+export func parsecellsize(string raw): int {
+    string s = raw.trim().to_lower()
+    if s == "" { return -1 }
+    float factor = 0.0
+    if s.ends_with("kb") {
+        factor = 1024.0
+        s = s.slice(0, s.len() - 2)
+    } else if s.ends_with("mb") {
+        factor = 1048576.0
+        s = s.slice(0, s.len() - 2)
+    } else if s.ends_with("gb") {
+        factor = 1073741824.0
+        s = s.slice(0, s.len() - 2)
+    } else if s.ends_with("b") {
+        factor = 1.0
+        s = s.slice(0, s.len() - 1)
+    } else {
+        return -1
+    }
+    s = s.trim()
+    if not isnumber(s) { return -1 }
+    return _int(_float(s) * factor)
+}
+
+// 取 MINFO 里**体积最大**那一档的 key 值
+// 为什么不能"取最后一段"：酷我 MINFO / N_MINFO 的档位顺序不固定（实测同一首歌两种顺序都出现过）
+// ⇒ 只有按 size 数值比大小才是稳的；认不出尺寸的档位（-1）不参与比较 ✓
+func bestfield(string minfo, string key): string {
+    Array[string] levels = minfo.split(";")
+    int best = -1
+    string bestvalue = ""
+    for levels to level {
+        int size = parsecellsize(fieldof(level, "size"))
+        if size > best {
+            best = size
+            bestvalue = fieldof(level, key)
+        }
+    }
+    return bestvalue
+}
+
+// 最大那一档的体积（字节）；全都认不出 ⇒ 0
+func bestsizebytes(string minfo): int {
+    Array[string] levels = minfo.split(";")
+    int best = -1
+    for levels to level {
+        int size = parsecellsize(fieldof(level, "size"))
+        if size > best { best = size }
+    }
+    if best < 0 { return 0 }
+    return best
+}
+
+// "7.73Mb" → "7.73 MB"；"999.06Kb" → "999.06 KB"（**原样保留单位**，别一律贴 MB）
+func normalizeSize(string raw): string {
+    string s = raw.trim()
+    if s == "" { return "" }
+    string low = s.to_lower()
+    if low.ends_with("kb") or low.ends_with("mb") or low.ends_with("gb") {
+        return s.slice(0, s.len() - 2) + " " + s.slice(s.len() - 2, s.len()).to_upper()
+    }
+    return s
+}
+
+// "7.73Mb" → 8105164（十进制单位 → 二进制字节，与显示一致）；认不出 ⇒ 0
+export func parsesizebytes(string raw): int {
+    int n = parsecellsize(raw)
+    if n < 0 { return 0 }
+    return n
+}
+
+// 从直链后缀取真实扩展名（比 MINFO 里宣传的档位更可信）
+export func extfromurl(string link): string {
+    string low = link.to_lower()
+    int query = strings.find(low, "?")
+    if query >= 0 { low = low.slice(0, query) }
+    if low.ends_with(".flac") { return "flac" }
+    if low.ends_with(".mp3") { return "mp3" }
+    if low.ends_with(".m4a") { return "m4a" }
+    if low.ends_with(".ogg") { return "ogg" }
+    if low.ends_with(".wav") { return "wav" }
+    if low.ends_with(".ape") { return "ape" }
+    return ""
+}
+
+// ==================== ① 搜索 ====================
+export func searchurl(string keyword, int limit): string {
+    var params = {
+        "vipver": "1", "client": "kt", "ft": "music", "cluster": "0", "strategy": "2012",
+        "encoding": "utf8", "rformat": "json", "mobi": "1", "issubtitle": "1",
+        "show_copyright_off": "1", "pn": "0", "rn": _str(limit), "all": keyword
+    }
+    return SEARCH_BASE + net.buildQuery(params)
+}
+
+// 单条 JSON → SongInfo。字段异常就让它抛，由 parsesongs 的 try 兜住并**只跳过这一条**
+func parsesong(Dict[string, any] d): SongInfo {
+    // 只用 MINFO：N_MINFO 里混着 mflac/mgg/zp/mp4 这些**我们下载不了的档**，
+    // 按体积比大小会把它们选成"最高档"，反而让列表显示与实际下载不符 ✗
+    string minfo = jsons.get_str(d, "MINFO", "")
+    return new SongInfo(
+        id = jsons.get_str(d, "MUSICRID", "").replace("MUSIC_", ""),
+        name = jsons.get_str(d, "SONGNAME", ""),
+        artist = jsons.get_str(d, "ARTIST", ""),
+        album = jsons.get_str(d, "ALBUM", ""),
+        duration = jsons.get_int(d, "DURATION", 0),
+        ext = bestfield(minfo, "format").to_lower(),
+        sizeText = normalizeSize(bestfield(minfo, "size")),
+        sizeBytes = bestsizebytes(minfo)
+    )
+}
+
+export func parsesongs(string body): Array[SongInfo] {
+    Array[SongInfo] out = []
+    var root = jsons.decode(body) as Dict[string, any]
+    if root == null { return out }
+    var items = root["abslist"]
+    if not (items is Array) { return out }
+    for items to item {
+        var d = item as Dict[string, any]
+        if d == null { continue }
+        // ★ 单条脏数据只丢这一条：不能让一条畸形的 MINFO 把整次搜索变成"什么都搜不到"（青衣的坑 ✓）
+        try {
+            SongInfo song = parsesong(d)
+            if song.valid() { out.add(song) }
+        } catch e {
+            continue
+        }
+    }
+    return out
+}
+
+// 搜索并返回 SongInfo 列表（网络/解析失败都返回空列表，不抛异常）
+export func search(HttpClient client, string keyword, int limit): Array[SongInfo] {
+    Response resp = client.get(searchurl(keyword, limit))
+    if not resp.ok() { return [] }
+    return parsesongs(resp.body)
+}
+
+// ==================== ② 取直链 ====================
+// ① 官方 mobi.s：查询串要 DES 加密（见 kuwo_des.leno），不依赖任何第三方 API
+//    响应是纯文本，形如：
+//      format=flac\n bitrate=2000\n url=http://kw-er.kuwo.cn/.../xxx.flac?bitrate$2000&format$flac&...
+//    参数之间用 '$' 分隔 ⇒ 取到第一个 '$' 为止（与 musicdl 的 re.search(r'http[^\s$"]+') 等价）
+func extracturlfrommobi(string body): string {
+    Array[string] lines = body.lines()
+    for lines to rawline {
+        string line = rawline.trim()
+        if not line.starts_with("url=") { continue }
+        string link = line.slice(4, line.len()).trim()
+        int cut = link.len()
+        int dollar = strings.find(link, "$")
+        if dollar >= 0 and dollar < cut { cut = dollar }
+        int space = strings.find(link, " ")
+        if space >= 0 and space < cut { cut = space }
+        string candidate = link.slice(0, cut).trim()
+        if candidate.starts_with("http") { return candidate }
+    }
+    return ""
+}
+
+// ⚠ mobi.s 按 User-Agent 做风控：桌面 Chrome UA（"Mozilla/…AppleWebKit…Chrome/148…"）会拿到
+//   **HTTP 200 + 空 body**，而 okhttp / 短 UA / 无 UA 都能拿到正文。
+//   实测 Python(requests) 用同一个 Chrome UA 也是空 body ⇒ 与 Leno 无关，是服务端策略。
+//   musicdl 用 "okhttp/3.10.0" 正是这个原因 ⇒ 这里单独起一个 client 用 okhttp UA，
+//   免得把调用方（搜索用的 Chrome UA）改掉。
+const OFFICIAL_UA = "okhttp/3.10.0"
+
+export func officialurl(string songid, string fmt): string {
+    string query = "user=0&corp=kuwo&source=kwplayer_ar_5.1.0.0_B_jiakong_vh.apk&p2p=1&type=convert_url2&sig=0&format=" + fmt + "&rid=" + songid
+    HttpClient client = net.createClient()
+    client.setUserAgent(OFFICIAL_UA)
+    client.setTimeout(20000)
+    Response resp = client.get("http://mobi.kuwo.cn/mobi.s?f=kuwo&q=" + kuwo_des.encryptquery(query))
+    string link = ""
+    if resp.ok() { link = extracturlfrommobi(resp.body) }
+    client.close()
+    return link
+}
+
+// ② 第三方兜底（musicdl 的 l2 优先级）：nxinxz → haitangw
+func thirdpartyurl(HttpClient client, string songid): string {
+    Array[string] apis = [
+        "http://music.nxinxz.com/kw.php?id=" + songid + "&level=lossless&type=json",
+        "https://musicapi.haitangw.net/music/kw.php?id=" + songid + "&level=lossless&type=json"
+    ]
+    for apis to api {
+        Response resp = client.get(api)
+        if not resp.ok() { continue }
+        var payload = jsons.decode(resp.body) as Dict[string, any]
+        if payload == null { continue }
+        string link = jsons.get_str(jsons.get_obj(payload, "data"), "url", "")
+        if link.starts_with("http") { return link }
+    }
+    return ""
+}
+
+// 取直链：官方优先（flac → mp3），再走第三方兜底。失败返回空串
+export func getdirecturl(HttpClient client, string songid): string {
+    string link = officialurl(songid, "flac")
+    if link != "" { return link }
+    link = officialurl(songid, "mp3")
+    if link != "" { return link }
+    return thirdpartyurl(client, songid)
+}
+
+// 取直链并回填到 SongInfo（同时用直链后缀校正 ext）；失败返回空串
+export func resolveurl(HttpClient client, SongInfo song): string {
+    if song.url != "" { return song.url }
+    string link = getdirecturl(client, song.id)
+    if link == "" { return "" }
+    song.url = link
+    string realext = extfromurl(link)
+    if realext != "" { song.ext = realext }
+    return link
+}
+
+// ==================== ③ 下载 ====================
+// 返回落盘字节数（<=0 表示失败）
+export func downloadsong(HttpClient client, SongInfo song, string outdir): int {
+    if not song.valid() { return -1 }
+    string link = resolveurl(client, song)
+    if link == "" { return -1 }
+    dirs.mkdir_p(outdir)
+    string out = outdir + _sep() + song.filename()
+    return client.downloadResume(link, out)
+}
+
+// 与 SongInfo.filename() 拼出完整落盘路径（便于调用方打印）
+export func savepath(SongInfo song, string outdir): string {
+    return outdir + _sep() + song.filename()
+}

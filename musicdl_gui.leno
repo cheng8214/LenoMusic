@@ -1,0 +1,944 @@
+﻿// musicdl_gui.leno — 音乐下载器（GUI 版）
+//
+// 与 CLI 版（musicdl.leno）共用同一套"引擎"：网络/取直链/落盘在 dl_engine.leno
+//   · dl_engine 复用 kuwo_core.leno（CLI 同款）+ kuwo_des.leno（官方接口 DES 加密）
+//   · 本文件只管界面与交互；跨线程的数据一律是**纯字符串数组**（见 dl_engine 头部约定）
+//
+// 界面结构
+//   Window
+//   ├── TitleBar（自绘标题栏）
+//   └── VBox root
+//       ├── HBox 搜索行：关键词 Edit（回车即搜） + 搜索按钮 + 每源条数 SpinBox
+//       ├── HBox 音源行：音源复选框（可勾选，来自 dl_engine.sources()） + 输出目录 + 选择目录
+//       ├── HBox 操作行：下载勾选 / 下载选中行 / 全选 / 全不选 + 已选统计
+//       ├── Table 结果表（第 0 列复选框；右击弹上下文菜单）
+//       ├── ProgressBar（搜索/下载的"忙"指示）
+//       └── HBox 状态栏：状态文字 + 操作提示
+//
+//   下载对话框（模态）：任务表 + 总进度 + 当前任务 + 开始/暂停/取消/打开目录/关闭
+//
+// 线程模型（照 cleaner_master / cache_cleaner 的套路）
+//   搜索：threads.start(search_worker, ...) + channel 回传命中数 + 120ms 定时器排空
+//   下载：threads.start(dl_worker, ...) + channel 回传逐片进度 + 命令通道做暂停/取消
+//   worker 必须是**本文件的具名全局函数**（理由见下方包装函数的注释），UI 线程只做
+//   "排空 channel + 刷控件" ✓
+//
+// 运行：cd D:\CLeno\Leno 后
+//   build\leno.exe leno_gui\应用\音乐下载器\musicdl_gui.leno
+import "SDL3" as SDL3
+import "sdl_filedialog" as fdlg
+import dirs
+import strings
+import threads
+import "./dl_engine.leno" as eng
+
+use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, CheckBox, Table, ProgressBar, HBox, VBox, Edit, SpinBox, Scancode)
+
+// ==================== 表格列 ← 歌曲行字段（见 dl_engine 的 SONG_ROW 注释） ====================
+// 行：0 id / 1 歌名 / 2 歌手 / 3 专辑 / 4 时长 / 5 格式 / 6 大小 / 7 字节
+const int F_ID = 0
+const int F_NAME = 1
+const int F_ARTIST = 2
+const int F_ALBUM = 3
+const int F_DURATION = 4
+const int F_EXT = 5
+const int F_SIZETEXT = 6
+const int F_BYTES = 7
+
+// ==================== 线程入口包装（必须写在**本文件**里！） ====================
+// ⚠ 实测踩坑：`threads.start(eng.search_entry, ...)` 会**当场**抛错
+//   "线程入口必须是当前文件的函数 ✗ 收到的是模块 'dl_engine' 里的 'search_entry'
+//    （子线程不会加载别的模块的全局变量 ⇒ 模块函数在子线程里跑不起来）"
+//   ⇒ 子线程入口必须是**本文件的具名全局函数**，在里面再调引擎层的模块函数
+//   （cleaner_master 的 scan_entry/delete_entry 就是这个套路 ✓）
+// 另外：入口**不能是闭包**（闭包会被 GC ✗）
+func search_worker(Array[string] srcids, string keyword, int limit, any ch): Array[Array[string]] {
+    return eng.search_entry(srcids, keyword, limit, ch)
+}
+
+func dl_worker(Array[Array[string]] jobs, string outdir, any ch, any cmd, Array[string] flags): Array[string] {
+    return eng.dl_entry(jobs, outdir, ch, cmd, flags)
+}
+
+// flags 里有没有某项（与 dl_engine 的同名私有函数各管各的，不跨模块）
+func hasflag(Array[string] flags, string name): bool {
+    for flags to f {
+        if f == name { return true }
+    }
+    return false
+}
+
+// 打开目录（资源管理器/文件管理器定位）。失败无处可报 ⇒ 返回 bool 让调用方提示
+func openfolder(string path): bool {
+    if path == "" { return false }
+    string cmd = ""
+    if _os() == "windows" {
+        cmd = "cmd /c start \"\" \"" + path + "\""
+    } else if _os() == "macos" {
+        cmd = "open \"" + path + "\""
+    } else {
+        cmd = "xdg-open \"" + path + "\""
+    }
+    bool ok = true
+    try {
+        _exec(cmd)
+    } catch e {
+        ok = false
+    }
+    return ok
+}
+
+// ==================== 主结构 ====================
+struct MusicDlApp {
+    // ===== 主窗口控件 =====
+    Window win
+    TitleBar titleBar
+    Edit keywordEdit
+    SpinBox limitSpin
+    Button searchBtn
+    Button dlCheckedBtn
+    Button dlSelBtn
+    Button selAllBtn
+    Button selNoneBtn
+    Button dirBtn
+    CheckBox lyricBox
+    Label stateLbl
+    Label countLbl
+    Label dirLbl
+    ProgressBar busyBar
+    Table table
+    HBox srcRow
+
+    // ===== 音源（与 dl_engine.sources() 的行平行） =====
+    Array[CheckBox] srcBoxes
+    Array[string] srcIds
+    Array[bool] srcAvail
+
+    // ===== 数据 =====
+    Array[Array[string]] songs       // 搜索结果（歌曲行）
+    string outdir = ""
+
+    // ===== 搜索线程状态 =====
+    Thread? searchThread = null
+    Channel? searchCh = null
+    bool searching = false
+    string searchErr = ""            // 搜索失败原因（worker 报错时记下，别让"没搜到结果"盖掉真因 ✓）
+    int busyPhase = 0                // 进度条脉冲相位（"忙"指示）
+
+    // ===== 下载对话框状态（控件引用在弹窗里赋值，关闭时置 null） =====
+    bool dlOpen = false
+    bool dlClosing = false
+    bool dlStarted = false
+    bool dlPaused = false
+    bool dlFinished = false
+    bool dlCancelling = false
+    int dlDone = 0
+    int dlFail = 0
+    Array[Array[string]] dlJobs
+    Array[string] dlStatus           // 每任务状态文字
+    Array[int] dlGot                 // 每任务已下字节
+    Array[int] dlExp                 // 每任务期望字节
+    Thread? dlThread = null
+    Channel? dlCh = null
+    Channel? dlCmd = null
+    Table? dlTable = null
+    ProgressBar? dlBar = null
+    Label? dlInfo = null
+    Label? dlStat = null
+    Array[string] dlFlags             // 本轮任务标志（"lyric" / "lyriconly"）
+    int dlLrc = 0                     // 本轮已拿到的歌词数
+
+    // ==================== 数据辅助 ====================
+
+    // 歌曲行 → 表格行（表格列顺序见 setupUI 里的 headers）
+    func tablerow(Array[string] s): Array[string] {
+        return ["", s[F_NAME], s[F_ARTIST], s[F_ALBUM], eng.fmtduration(_int(s[F_DURATION])), s[F_EXT], s[F_SIZETEXT]]
+    }
+
+    func fillTable() {
+        Array[Array[string]] rows = []
+        for songs to s {
+            rows.add(tablerow(s))
+        }
+        table.set_rows(rows)
+        table.check_all()            // 默认全勾：搜到就能一键下
+    }
+
+    // 勾选行 → 歌曲行
+    func pickchecked(): Array[Array[string]] {
+        Array[Array[string]] out = []
+        Array[int] checked = table.get_checked_rows()
+        for checked to i {
+            if i >= 0 and i < songs.len() { out.add(songs[i]) }
+        }
+        return out
+    }
+
+    // 勾选的音源 id（跳过不可用/未勾选）
+    func picksources(): Array[string] {
+        Array[string] out = []
+        int i = 0
+        while i < srcBoxes.len() {
+            if srcAvail[i] and srcBoxes[i].is_checked() { out.add(srcIds[i]) }
+            i = i + 1
+        }
+        return out
+    }
+
+    func updateCount() {
+        Array[int] checked = table.get_checked_rows()
+        int bytes = 0
+        for checked to i {
+            if i >= 0 and i < songs.len() { bytes = bytes + _int(songs[i][F_BYTES]) }
+        }
+        countLbl.set_text("已选 " + _str(checked.len()) + " / " + _str(songs.len()) + " 首 · 合计约 " + strings.fmt_size(bytes))
+        dlCheckedBtn.set_enabled(checked.len() > 0)
+    }
+
+    // ==================== 搜索 ====================
+
+    func onSearch() {
+        if searching { return }
+        string keyword = keywordEdit.get_text().trim()
+        if keyword == "" {
+            stateLbl.set_text("请输入关键词，例如：周杰伦 晴天")
+            SDL3.markFrameRedraw()
+            return
+        }
+        Array[string] srcs = picksources()
+        if srcs.len() == 0 {
+            stateLbl.set_text("至少勾选一个音源")
+            SDL3.markFrameRedraw()
+            return
+        }
+        int limit = _int(limitSpin.get_text())
+        if limit < 1 { limit = 20 }
+
+        searching = true
+        searchErr = ""
+        songs = []
+        table.set_rows([])
+        table.clear_selection()
+        searchBtn.set_enabled(false)
+        dlCheckedBtn.set_enabled(false)
+        dlSelBtn.set_enabled(false)
+        countLbl.set_text("已选 0 / 0 首")
+        stateLbl.set_text("正在搜索「" + keyword + "」（音源：" + strings.join(srcs, "、") + "）…")
+        busyPhase = 5
+        busyBar.set_value(5.0)
+        searchCh = threads.channel(4096)
+        searchThread = threads.start(search_worker, srcs, keyword, limit, searchCh)
+        SDL3.markFrameRedraw()
+    }
+
+    // 搜索收尾：join 取回结果行（worker 已结束 ⇒ join 立即返回）
+    func finishSearch() {
+        Array[Array[string]] rows = []
+        if searchThread is Thread {
+            var r = searchThread.join() as Array[Array[string]]
+            if r != null { rows = r }
+        }
+        searchThread = null
+        if searchCh is Channel { searchCh.close() }
+        searchCh = null
+        searching = false
+        songs = rows
+        fillTable()
+        updateCount()
+        searchBtn.set_enabled(true)
+        busyBar.set_value(100.0)
+        if rows.len() == 0 {
+            // ★ 有错就报错：worker 抛异常时如果只说"没搜到结果"，用户根本无从下手
+            //   （"青衣"那次就是这么被误判成"搜不到"的 ✓）
+            if searchErr != "" {
+                stateLbl.set_text("搜索失败：" + searchErr)
+            } else {
+                stateLbl.set_text("没搜到结果（接口可能被限流，或关键词无匹配）")
+            }
+        } else {
+            stateLbl.set_text("搜索完成：命中 " + _str(rows.len()) + " 首（默认已全部勾选）")
+        }
+        SDL3.markFrameRedraw()
+    }
+
+    // ==================== 主循环定时器（120ms 一拍） ====================
+    // 搜索进度、下载进度、忙指示都在这里推进 —— 唯一一处"UI 线程排空 channel"的地方
+    func onTick() {
+        try {
+            pollSearch()
+            pollDownload()
+            pulseBusy()
+        } catch e {
+            stateLbl.set_text("刷新出错：" + eng.errmsg(e))
+            SDL3.markFrameRedraw()
+        }
+    }
+
+    func pulseBusy() {
+        if searching {
+            busyPhase = busyPhase + 9
+            if busyPhase > 92 { busyPhase = 5 }
+            busyBar.set_value(_float(busyPhase))
+        }
+    }
+
+    func pollSearch() {
+        int found = 0
+        if searchCh is Channel {
+            var msg = searchCh.try_receive()
+            int n = 0
+            while msg != null and n < 4000 {
+                if msg is Array => mv {
+                    string kind = _str(mv[0])
+                    if kind == "search" {
+                        found = found + _int(mv[2])
+                        stateLbl.set_text("音源 " + _str(mv[1]) + " 返回 " + _str(mv[2]) + " 条…")
+                    } else if kind == "serror" {
+                        searchErr = _str(mv[4])
+                        stateLbl.set_text("搜索出错：" + searchErr)
+                    }
+                }
+                msg = searchCh.try_receive()
+                n = n + 1
+            }
+        }
+        if not searching { return }
+        // 线程还活着 ⇒ 继续等（worker 结束 + 通道排空后再收尾，避免丢最后几条消息）
+        bool running = false
+        if searchThread is Thread {
+            if searchThread.state() == "running" { running = true }
+        }
+        if running { return }
+        if searchCh is Channel {
+            if searchCh.len() > 0 { return }
+        }
+        finishSearch()
+    }
+
+    // ==================== 下载：启动 / 进度 / 对话框 ====================
+
+    func startDownload(Array[Array[string]] jobs, Array[string] flags) {
+        if jobs.len() == 0 {
+            stateLbl.set_text("先勾选（或右键选中）要下载的歌曲")
+            SDL3.markFrameRedraw()
+            return
+        }
+        // 目录必须先建：write 到不存在的目录会抛异常（见 docs/移植音乐下载器实录与待办.md B2）
+        if not dirs.exists(outdir) {
+            try {
+                dirs.mkdir_p(outdir)
+            } catch e {
+                stateLbl.set_text("无法创建输出目录：" + outdir)
+                SDL3.markFrameRedraw()
+                return
+            }
+        }
+        showDownloadDialog(jobs, flags)
+    }
+
+    // 本轮要不要带歌词：看工具栏那个勾选框（默认勾上）
+    func downloadflags(): Array[string] {
+        Array[string] flags = []
+        if lyricBox.is_checked() { flags.add("lyric") }
+        return flags
+    }
+
+    func onDownloadChecked() {
+        startDownload(pickchecked(), downloadflags())
+    }
+
+    func onDownloadSelected() {
+        Array[Array[string]] jobs = []
+        Array[int] selRows = table.get_selected_rows()
+        for selRows to i {
+            if i >= 0 and i < songs.len() { jobs.add(songs[i]) }
+        }
+        startDownload(jobs, downloadflags())
+    }
+
+    // 只下歌词（右键菜单 / 已有音频时用）
+    func onDownloadLyricOnly(Array[Array[string]] jobs) {
+        if jobs.len() == 0 {
+            stateLbl.set_text("先勾选（或右键选中）要下歌词的歌曲")
+            SDL3.markFrameRedraw()
+            return
+        }
+        if not dirs.exists(outdir) {
+            try {
+                dirs.mkdir_p(outdir)
+            } catch e {
+                stateLbl.set_text("无法创建输出目录：" + outdir)
+                SDL3.markFrameRedraw()
+                return
+            }
+        }
+        showDownloadDialog(jobs, ["lyriconly"])
+    }
+
+    func onLyricSelected() {
+        Array[Array[string]] jobs = []
+        Array[int] selRows = table.get_selected_rows()
+        for selRows to i {
+            if i >= 0 and i < songs.len() { jobs.add(songs[i]) }
+        }
+        onDownloadLyricOnly(jobs)
+    }
+
+    // —— 下载对话框（模态）——
+    func showDownloadDialog(Array[Array[string]] jobs, Array[string] flags) {
+        bool lyriconly = hasflag(flags, "lyriconly")
+        string title = if lyriconly then "下载歌词" else "下载"
+        int dw = 820
+        int dh = 440
+        int tbH = SDL3.DIALOG_TB_H
+        var dlg = SDL3.createDialogWindow({title: title, w: dw, h: tbH + dh})
+        TitleBar tb = SDL3.dialogTitleBar(dlg, title)
+        var droot = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, padX: 16, padY: 14, spacing: 8})
+        dlg.setRootAt(droot, 0, tb.get_h())
+
+        // 重置本轮状态
+        dlOpen = true
+        dlClosing = false
+        dlStarted = false
+        dlPaused = false
+        dlFinished = false
+        dlCancelling = false
+        dlDone = 0
+        dlFail = 0
+        dlLrc = 0
+        dlJobs = jobs
+        dlFlags = flags
+        dlStatus = []
+        dlGot = []
+        dlExp = []
+        int totalExp = 0
+        Array[Array[string]] rows = []
+        for jobs to j {
+            int exp = _int(j[F_BYTES])
+            if exp <= 0 { exp = 1 }
+            dlGot.add(0)
+            dlExp.add(exp)
+            dlStatus.add("等待中")
+            totalExp = totalExp + exp
+            // "只下歌词"模式：格式/大小那两列没有意义 ⇒ 显示 "-"（歌词约几十 KB，不值得标）
+            rows.add([eng.songlabel(j), if lyriconly then "-" else j[F_EXT], if lyriconly then "-" else j[F_SIZETEXT], "0%", "等待中"])
+        }
+
+        Table dt = SDL3.createTable({
+            headers: ["歌曲", "格式", "大小", "进度", "状态"],
+            col_widths: [330.0, 60.0, 90.0, 64.0, 220.0],
+            aligns: [0, 1, 2, 1, 0],
+            header_aligns: [0, 1, 2, 1, 0],
+            zebra: true, row_h: 26, header_h: 28, font_size: 13,
+            sortable: false, col_reorder: false, resizable: false,
+            empty_text: "没有任务"
+        })
+        dt.set_rows(rows)
+        dlTable = dt
+        droot.add(dt, {grow: 1, shrink: 1, align: 3})
+
+        ProgressBar bar = SDL3.createProgressBar({h: 16, show_text: true, font_size: 12})
+        bar.set_value(0.0)
+        dlBar = bar
+        droot.add(bar, {grow: 0, shrink: 0, align: 3})
+
+        string infotext = "共 " + _str(jobs.len()) + " 首"
+        if lyriconly {
+            infotext = infotext + "，点「开始下载歌词」开始（只抓 .lrc，不碰音频）"
+        } else {
+            infotext = infotext + "，点「开始下载」开始（合计约 " + strings.fmt_size(totalExp) + "）"
+            if hasflag(flags, "lyric") { infotext = infotext + "，并顺带下载歌词" }
+        }
+        Label info = SDL3.dialogLabel(infotext, 12)
+        dlInfo = info
+        droot.add(info, {grow: 0, shrink: 0, align: 0})
+        Label stat = SDL3.dialogLabel("下载中会实时显示每一首的进度；暂停/取消随时可用", 12)
+        dlStat = stat
+        droot.add(stat, {grow: 0, shrink: 0, align: 0})
+
+        Button startBtn = SDL3.createButton({w: 130, h: 32, text: (if lyriconly then "开始下载歌词" else "开始下载"), type: "primary", font_size: 13})
+        Button pauseBtn = SDL3.createButton({w: 90, h: 32, text: "暂停", type: "dark", font_size: 13})
+        Button cancelBtn = SDL3.createButton({w: 90, h: 32, text: "取消", type: "dark", font_size: 13})
+        Button openBtn = SDL3.createButton({w: 110, h: 32, text: "打开目录", type: "dark", font_size: 13})
+        Button closeBtn = SDL3.createButton({w: 90, h: 32, text: "关闭", type: "dark", font_size: 13})
+        pauseBtn.set_enabled(false)
+        cancelBtn.set_enabled(false)
+        droot.add(SDL3.dialogButtonRow([startBtn, pauseBtn, cancelBtn, openBtn, closeBtn], 10), {grow: 0, shrink: 0, align: 3})
+
+        startBtn.on_click(func() {
+            if dlStarted { return }
+            startBtn.set_enabled(false)
+            pauseBtn.set_enabled(true)
+            cancelBtn.set_enabled(true)
+            dlStart()
+        })
+        pauseBtn.on_click(func() {
+            if not dlStarted or dlFinished { return }
+            if dlPaused {
+                // 继续：worker 挂在命令通道的 receive 上，发一条 resume 就继续
+                dlPaused = false
+                pauseBtn.set_text("暂停")
+                if dlCmd is Channel { dlCmd.try_send("resume") }
+                if dlStat is Label { dlStat.set_text("已继续") }
+            } else {
+                dlPaused = true
+                pauseBtn.set_text("继续")
+                if dlCmd is Channel { dlCmd.try_send("pause") }
+                if dlStat is Label { dlStat.set_text("已暂停（当前分片下完后停在原处，可继续）") }
+            }
+            SDL3.markFrameRedraw()
+        })
+        cancelBtn.on_click(func() {
+            if not dlStarted or dlFinished { return }
+            dlCancelling = true
+            if dlCmd is Channel { dlCmd.try_send("cancel") }
+            if dlStat is Label { dlStat.set_text("正在取消…") }
+            SDL3.markFrameRedraw()
+        })
+        openBtn.on_click(func() {
+            if not openfolder(outdir) {
+                if dlStat is Label { dlStat.set_text("打开目录失败：" + outdir) }
+            }
+        })
+        closeBtn.on_click(func() { dlClose() })
+        // 标题栏 ✕ 必须自己接（TitleBar 只置 closeRequested ✓）
+        tb.on_close(func() { dlClose() })
+
+        // ⚠ runModal = pushModal + win.run()，主循环已跑时 run() 立即返回 ⇒ 这里**不阻塞**，
+        //   收尾动作必须写在按钮/事件回调里（cleaner_master 踩过："点确认什么也不发生" ✗）
+        SDL3.runModal(dlg,
+            func(Event ev): bool {
+                if ev.isQuit() { return false }
+                if ev.isWindowClose() { dlClose(); return false }
+                if ev.isKeyDown() and ev.scancode() == Scancode.ESCAPE { dlClose(); return false }
+                if dlClosing { return false }
+                return true
+            },
+            func(Renderer r) { SDL3.dialogFramePaint(r, dw, tbH + dh) }
+        )
+        SDL3.markFrameRedraw()
+    }
+
+    // 真正启动下载 worker（按钮回调与自测入口共用；重复调用无副作用）
+    func dlStart() {
+        if dlStarted { return }
+        dlStarted = true
+        dlFinished = false
+        dlCancelling = false
+        dlDone = 0
+        dlFail = 0
+        dlPaused = false
+        if dlStat is Label { dlStat.set_text("开始下载…") }
+        dlCh = threads.channel(65536)
+        dlCmd = threads.channel(64)
+        dlThread = threads.start(dl_worker, dlJobs, outdir, dlCh, dlCmd, dlFlags)
+        SDL3.markFrameRedraw()
+    }
+
+    // 关闭对话框：还在下就补发取消（worker 会自己退出），然后让事件处理器返回 false
+    func dlClose() {
+        if dlStarted and not dlFinished {
+            if dlCmd is Channel { dlCmd.try_send("cancel") }
+        }
+        dlOpen = false
+        dlClosing = true
+        dlTable = null
+        dlBar = null
+        dlInfo = null
+        dlStat = null
+        SDL3.markFrameRedraw()
+    }
+
+    // 排空下载通道 + 刷新对话框控件（弹窗没开就直接返回）
+    func pollDownload() {
+        if not dlOpen { return }
+        if dlCh is Channel {
+            var m = dlCh.try_receive()
+            int n = 0
+            while m != null and n < 4000 {
+                if m is Array => mv { applydlmsg(mv) }
+                m = dlCh.try_receive()
+                n = n + 1
+            }
+        }
+        refreshDl()
+        // 收尾：worker 结束且通道排空 ⇒ join 取权威结果
+        if dlStarted and not dlFinished {
+            bool running = false
+            if dlThread is Thread {
+                if dlThread.state() == "running" { running = true }
+            }
+            if running { return }
+            if dlCh is Channel {
+                if dlCh.len() > 0 { return }
+            }
+            dlFinished = true
+            string sum = ""
+            if dlThread is Thread {
+                try {
+                    var r = dlThread.join() as Array[string]
+                    if r != null and r.len() >= 3 {
+                        sum = "成功 " + r[0] + " 首，失败 " + r[1] + " 首，歌词 " + r[2] + " 首"
+                    }
+                } catch e {
+                    sum = "线程异常：" + eng.errmsg(e)
+                }
+            }
+            dlThread = null
+            if dlCh is Channel { dlCh.close() }
+            dlCh = null
+            if dlBar is ProgressBar { dlBar.set_value(100.0) }
+            if dlStat is Label {
+                if dlCancelling {
+                    dlStat.set_text("已取消：" + sum + "（已下完的文件保留在 " + outdir + "）")
+                } else {
+                    dlStat.set_text("下载结束：" + sum + "（文件在 " + outdir + "）")
+                }
+            }
+            if dlInfo is Label { dlInfo.set_text("全部任务已处理完，可「打开目录」查看") }
+            stateLbl.set_text("下载结束：" + sum)
+            SDL3.markFrameRedraw()
+        }
+    }
+
+    // 一条进度消息 → 状态数组
+    func applydlmsg(Array mv) {
+        string kind = _str(mv[0])
+        int idx = _int(mv[1])
+        if kind == "resolve" {
+            setstatus(idx, "取直链…")
+        } else if kind == "start" {
+            setstatus(idx, "下载中…")
+            int exp = _int(mv[3])
+            if exp > 0 and idx >= 0 and idx < dlExp.len() { dlExp[idx] = exp }
+            if dlInfo is Label {
+                if idx >= 0 and idx < dlJobs.len() {
+                    dlInfo.set_text("正在下载：" + eng.songlabel(dlJobs[idx]))
+                }
+            }
+        } else if kind == "progress" {
+            if idx >= 0 and idx < dlGot.len() {
+                dlGot[idx] = _int(mv[2])
+                int tot = _int(mv[3])
+                if tot > 0 { dlExp[idx] = tot }
+            }
+        } else if kind == "lyric" {
+            // 歌词落盘：字节数单独记，状态行补一句（音频状态在前，歌词在后 ✓）
+            int lb = _int(mv[2])
+            dlLrc = dlLrc + 1
+            string cur = ""
+            if idx >= 0 and idx < dlStatus.len() { cur = dlStatus[idx] }
+            if cur == "等待中" or cur == "下载中…" {
+                setstatus(idx, "歌词 " + strings.fmt_size(lb))
+            } else {
+                setstatus(idx, cur + " +歌词")
+            }
+        } else if kind == "done" {
+            int got = _int(mv[2])
+            if idx >= 0 and idx < dlGot.len() { dlGot[idx] = got }
+            setstatus(idx, "完成 " + strings.fmt_size(got))
+            dlDone = dlDone + 1
+        } else if kind == "fail" {
+            setstatus(idx, "失败：" + _str(mv[4]))
+            dlFail = dlFail + 1
+        } else if kind == "cancelled" {
+            setstatus(idx, "已取消")
+            if dlInfo is Label { dlInfo.set_text("已取消剩余任务（已下完的文件保留）") }
+        } else if kind == "fatal" {
+            if dlStat is Label { dlStat.set_text("下载器出错：" + _str(mv[4])) }
+        }
+    }
+
+    func setstatus(int idx, string text) {
+        if idx >= 0 and idx < dlStatus.len() { dlStatus[idx] = text }
+    }
+
+    // 刷新任务表 + 总进度条（每 120ms 一次）
+    // 两种口径：正常下载按**字节**加权；"只下歌词"没有分片进度 ⇒ 按**任务条数**推进
+    func refreshDl() {
+        bool lyriconly = hasflag(dlFlags, "lyriconly")
+        int got = 0
+        int exp = 0
+        int done = 0
+        int i = 0
+        while i < dlJobs.len() {
+            int g = 0
+            int e = 1
+            if i < dlGot.len() { g = dlGot[i] }
+            if i < dlExp.len() and dlExp[i] > 0 { e = dlExp[i] }
+            got = got + g
+            exp = exp + e
+            bool finished = false
+            if i < dlStatus.len() and (strings.has(dlStatus[i], "完成") or strings.has(dlStatus[i], "歌词") or strings.has(dlStatus[i], "失败") or strings.has(dlStatus[i], "取消")) {
+                finished = true
+            }
+            if finished { done = done + 1 }
+            if dlTable is Table {
+                int pct = 0
+                if lyriconly {
+                    if finished { pct = 100 }
+                } else {
+                    pct = g * 100 / e
+                    if pct > 100 { pct = 100 }
+                }
+                dlTable.set_cell(i, 3, _str(pct) + "%")
+                if i < dlStatus.len() { dlTable.set_cell(i, 4, dlStatus[i]) }
+            }
+            i = i + 1
+        }
+        if dlBar is ProgressBar {
+            float v = 0.0
+            if lyriconly {
+                if dlJobs.len() > 0 { v = 100.0 * _float(done) / _float(dlJobs.len()) }
+            } else if exp > 0 {
+                v = 100.0 * _float(got) / _float(exp)
+            }
+            if v > 100.0 { v = 100.0 }
+            dlBar.set_value(v)
+        }
+    }
+
+    // ==================== 右键菜单 ====================
+
+    func buildMenu(int row) {
+        table.clearContextItems()
+        Array[int] checked = table.get_checked_rows()
+        if row >= 0 {
+            table.addContextItem({label: "下载这一首", id: "dlrow"})
+            table.addContextItem({label: "只下这一首的歌词", id: "lyricrow"})
+            table.addContextItem({label: "复制「歌名 - 歌手」", id: "copy"})
+        }
+        if checked.len() > 0 {
+            table.addContextItem({label: "下载勾选的 " + _str(checked.len()) + " 首", id: "dlchecked"})
+            table.addContextItem({label: "只下勾选的 " + _str(checked.len()) + " 首歌词", id: "lyricchecked"})
+        }
+        table.addContextSeparator()
+        table.addContextItem({label: "全选", id: "all"})
+        table.addContextItem({label: "全不选", id: "none"})
+        table.addContextSeparator()
+        table.addContextItem({label: "打开下载目录", id: "open"})
+    }
+
+    func onMenu(int row, string id) {
+        if id == "dlrow" {
+            if row >= 0 and row < songs.len() { startDownload([songs[row]], downloadflags()) }
+            return
+        }
+        if id == "dlchecked" {
+            onDownloadChecked()
+            return
+        }
+        if id == "lyricrow" {
+            if row >= 0 and row < songs.len() { onDownloadLyricOnly([songs[row]]) }
+            return
+        }
+        if id == "lyricchecked" {
+            onDownloadLyricOnly(pickchecked())
+            return
+        }
+        if id == "copy" {
+            if row >= 0 and row < songs.len() {
+                SDL3.setClipboardText(eng.songlabel(songs[row]))
+                stateLbl.set_text("已复制：" + eng.songlabel(songs[row]))
+            }
+            return
+        }
+        if id == "all" {
+            table.check_all()
+            updateCount()
+            SDL3.markFrameRedraw()
+            return
+        }
+        if id == "none" {
+            table.uncheck_all()
+            updateCount()
+            SDL3.markFrameRedraw()
+            return
+        }
+        if id == "open" {
+            if not openfolder(outdir) { stateLbl.set_text("打开目录失败：" + outdir) }
+            SDL3.markFrameRedraw()
+            return
+        }
+    }
+
+    // ==================== 输出目录 ====================
+
+    func onPickDir() {
+        fdlg.showOpenFolderDialog(win, func(Array[string] paths, int filter) {
+            if paths != null and paths.len() > 0 {
+                outdir = paths[0]
+                dirLbl.set_text(outdir)
+                stateLbl.set_text("输出目录已改为：" + outdir)
+                SDL3.markFrameRedraw()
+            }
+        }, {default_location: outdir})
+    }
+
+    // ==================== UI 构建 ====================
+
+    func buildSources() {
+        Array[Array[string]] srcs = eng.sources()
+        for srcs to s {
+            string id = s[0]
+            string name = s[1]
+            bool avail = s[2] == "1"
+            string note = s[3]
+            CheckBox box = SDL3.createCheckBox({text: name, checked: avail, enabled: avail, font_size: 13, tip: note})
+            // 勾选变化只做提示：真正的音源列表在点搜索时现取（避免缓存状态不一致 ✓）
+            box.on_change(func(bool v) {
+                stateLbl.set_text("音源已更新（当前可用音源只有酷我，其余待移植）")
+                SDL3.markFrameRedraw()
+            })
+            srcRow.add(box, {grow: 0, shrink: 0, align: 1})
+            srcBoxes.add(box)
+            srcIds.add(id)
+            srcAvail.add(avail)
+        }
+    }
+
+    func setupUI() {
+        titleBar = SDL3.createTitleBar({title: "Leno 音乐下载器", height: 32, font_size: 14})
+        win.add(titleBar)
+        float titleH = titleBar.get_h()
+
+        var root = SDL3.createVBox({padX: 12, padY: 10, spacing: 8})
+
+        // ---- 搜索行 ----
+        var row1 = SDL3.createHBox({h: 34, padX: 0, padY: 0, spacing: 8})
+        keywordEdit = SDL3.createEdit({
+            text: "", w: 380, h: 32, font_size: 14,
+            placeholder: "输入歌名 / 歌手，回车或点「搜索」（如：周杰伦 晴天）"
+        })
+        keywordEdit.on_enter(func() { onSearch() })
+        row1.add(keywordEdit, {grow: 1, shrink: 1, align: 3})
+        searchBtn = SDL3.createButton({w: 90, h: 32, text: "搜索", type: "primary", font_size: 14})
+        searchBtn.set_tip("按勾选的音源搜索（当前只有酷我可用）")
+        searchBtn.on_click(func() { onSearch() })
+        row1.add(searchBtn, {grow: 0, shrink: 0, basis: 90, align: 3})
+        row1.add(SDL3.createLabel({text: "每源条数", font_size: 13}), {grow: 0, shrink: 0, align: 1})
+        limitSpin = SDL3.createSpinBox({w: 86, h: 32, min: 5, max: 50, step: 5, value: 20, int_mode: true, font_size: 13})
+        limitSpin.set_tip("每个音源最多取多少条（酷我接口的 rn 参数）")
+        row1.add(limitSpin, {grow: 0, shrink: 0, basis: 86, align: 3})
+        root.add(row1, {grow: 0, shrink: 0, align: 3})
+
+        // ---- 音源 + 输出目录行 ----
+        srcRow = SDL3.createHBox({h: 30, padX: 0, padY: 0, spacing: 10})
+        srcRow.add(SDL3.createLabel({text: "音源：", font_size: 13}), {grow: 0, shrink: 0, align: 1})
+        buildSources()
+        srcRow.add(SDL3.createLabel({text: "输出目录：", font_size: 13}), {grow: 0, shrink: 0, align: 1})
+        dirLbl = SDL3.createLabel({text: outdir, font_size: 12, truncate: 1, max_w: 320.0})
+        dirLbl.set_tip(outdir)
+        srcRow.add(dirLbl, {grow: 1, shrink: 1, align: 1})
+        dirBtn = SDL3.createButton({w: 88, h: 28, text: "选择目录", font_size: 13})
+        dirBtn.on_click(func() { onPickDir() })
+        srcRow.add(dirBtn, {grow: 0, shrink: 0, basis: 88, align: 3})
+        root.add(srcRow, {grow: 0, shrink: 0, align: 3})
+
+        // ---- 操作行 ----
+        var row3 = SDL3.createHBox({h: 32, padX: 0, padY: 0, spacing: 8})
+        dlCheckedBtn = SDL3.createButton({w: 140, h: 30, text: "下载勾选", type: "success", font_size: 13})
+        dlCheckedBtn.set_tip("下载列表里勾选的歌曲（默认全勾）")
+        dlCheckedBtn.on_click(func() { onDownloadChecked() })
+        dlCheckedBtn.set_enabled(false)
+        row3.add(dlCheckedBtn, {grow: 0, shrink: 0, basis: 140, align: 3})
+        dlSelBtn = SDL3.createButton({w: 120, h: 30, text: "下载选中行", font_size: 13})
+        dlSelBtn.set_tip("下载表格里当前选中的行（Ctrl/Shift 可多选）")
+        dlSelBtn.on_click(func() { onDownloadSelected() })
+        dlSelBtn.set_enabled(false)
+        row3.add(dlSelBtn, {grow: 0, shrink: 0, basis: 120, align: 3})
+        selAllBtn = SDL3.createButton({w: 70, h: 30, text: "全选", font_size: 13})
+        selAllBtn.on_click(func() { table.check_all(); updateCount(); SDL3.markFrameRedraw() })
+        row3.add(selAllBtn, {grow: 0, shrink: 0, basis: 70, align: 3})
+        selNoneBtn = SDL3.createButton({w: 70, h: 30, text: "全不选", font_size: 13})
+        selNoneBtn.on_click(func() { table.uncheck_all(); updateCount(); SDL3.markFrameRedraw() })
+        row3.add(selNoneBtn, {grow: 0, shrink: 0, basis: 70, align: 3})
+        // 歌词开关：默认开。只影响"下载"类动作（"只下歌词"是右键菜单里的独立入口）
+        lyricBox = SDL3.createCheckBox({text: "同时下载歌词", checked: true, font_size: 13})
+        lyricBox.set_tip("下载音频时顺带存一份同名 .lrc（酷我官方歌词，含译文行）")
+        lyricBox.on_change(func(bool v) {
+            stateLbl.set_text(if v then "下载时将同时保存 .lrc 歌词" else "下载时不再保存歌词（右键菜单仍可单独下歌词）")
+            SDL3.markFrameRedraw()
+        })
+        row3.add(lyricBox, {grow: 0, shrink: 0, align: 1})
+        countLbl = SDL3.createLabel({text: "已选 0 / 0 首", font_size: 13})
+        row3.add(countLbl, {grow: 1, shrink: 1, align: 2})
+        root.add(row3, {grow: 0, shrink: 0, align: 3})
+
+        // ---- 结果表格 ----
+        // 第 0 列是复选框列（表头可全选/全不选）；其余 6 列与 dl_engine 的歌曲行字段对应
+        table = SDL3.createTable({
+            headers: ["", "歌名", "歌手", "专辑", "时长", "格式", "大小"],
+            col_widths: [40.0, 300.0, 150.0, 200.0, 70.0, 66.0, 110.0],
+            aligns: [1, 0, 0, 0, 1, 1, 2],
+            header_aligns: [1, 0, 0, 0, 1, 1, 2],
+            check_col: 0,
+            sortable: true, zebra: true, row_h: 26, header_h: 30, font_size: 14,
+            multi: true,
+            empty_text: "还没有结果 —— 输入关键词后回车搜索"
+        })
+        table.on_check(func(int col, Array[int] checked) { updateCount() })
+        table.on_select(func(int row) { dlSelBtn.set_enabled(row >= 0) })
+        table.on_dbl_click(func(int row, int col) {
+            if row >= 0 and row < songs.len() { startDownload([songs[row]], downloadflags()) }
+        })
+        table.on_context_will_open(func(int row) { buildMenu(row) })
+        table.on_context_select(func(int row, string id) { onMenu(row, id) })
+        root.add(table, {grow: 1, shrink: 1, align: 3})
+
+        // ---- 忙指示 + 状态栏 ----
+        busyBar = SDL3.createProgressBar({h: 6, show_text: false})
+        busyBar.set_value(0.0)
+        root.add(busyBar, {grow: 0, shrink: 0, align: 3})
+        var statusRow = SDL3.createHBox({h: 24, padX: 0, padY: 0, spacing: 12})
+        stateLbl = SDL3.createLabel({text: "就绪", font_size: 13})
+        statusRow.add(stateLbl, {grow: 1, shrink: 1, align: 1})
+        statusRow.add(SDL3.createLabel({text: "双击某行 = 下载这一首；右键列表 = 批量/复制/打开目录", font_size: 12}), {grow: 0, shrink: 0, align: 2})
+        root.add(statusRow, {grow: 0, shrink: 0, align: 3})
+
+        win.setRootAt(root, 0, titleH)
+    }
+
+    // ==================== 事件与主入口 ====================
+
+    func handleEvent(Event ev): bool {
+        if ev.isQuit() or ev.isWindowClose() { return false }
+        if titleBar.is_close_requested() {
+            titleBar.clear_close_request()
+            return false
+        }
+        if ev.isKeyDown() and ev.scancode() == Scancode.ESCAPE { return false }
+        return true
+    }
+
+    func run() {
+        SDL3.ttfInit()
+        SDL3.setTheme(SDL3.lightTheme())
+        win = SDL3.createWindow({title: "Leno 音乐下载器", w: 1060, h: 680, flags: 0x20})
+        if not win.ok {
+            SDL3.ttfQuit()
+            return
+        }
+        win.setMinSize(780, 460)
+
+        // 默认输出目录 = 脚本目录/downloads（与 CLI 版一致，两边的下载文件放一处）
+        outdir = dirs.script_dir() + _sep() + "downloads"
+
+        setupUI()
+        // 全局 120ms 一拍：搜索进度、下载进度、"忙"指示（定时器是模块级全局的 ⇒ 模态对话框
+        // 打开期间照样触发，所以下载进度条能在模态窗里动起来 ✓）
+        win.addTimer(120, func() { onTick() })
+
+        win.run(
+            func(Event ev): bool { return handleEvent(ev) },
+            func(Renderer r) { }
+        )
+        SDL3.ttfQuit()
+    }
+}
+
+// ==================== 程序入口 ====================
+main() {
+    MusicDlApp app = new MusicDlApp()
+    app.run()
+}

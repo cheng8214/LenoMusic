@@ -1,0 +1,393 @@
+// dl_engine.leno — 音乐下载器的引擎层（无 UI / 无 print / 无 main）
+//
+// 分层理由（与 CLI 版 musicdl.leno 的关系：核心逻辑完全共用，只是入口不同）：
+//   ① **跨线程只能传纯字符串数组**（struct 实例不能跨线程 ✗，见 cleaner_master 的注释）
+//      ⇒ 本模块对外一律用 `Array[string]` 行；SongInfo 只出现在 encode() 内部，不出模块；
+//   ② worker 必须是**具名全局函数**（闭包会被 GC ✗）⇒ search_entry / dl_entry 都是全局函数，
+//      参数只有字符串数组与 channel；进度一律经 channel 回传，UI 线程用定时器排空。
+//
+// 歌曲行（SONG_ROW）字段顺序 —— GUI 的表格列、下载任务都按它取值，改这里必须同步改 GUI：
+//   0 id / 1 歌名 / 2 歌手 / 3 专辑 / 4 时长(秒) / 5 格式 / 6 列表标注大小 / 7 标注字节数
+//
+// 进度消息（channel 里的 Array[string]，固定 5 段；kind 在第 0 段）：
+//   ["search", 音源id, 命中数, "",   ""]
+//   ["serror", "",      "",     "",   原因]
+//   ["resolve",任务序,  "0",    "0",  ""]        取直链中
+//   ["start",  任务序,  "0",    期望字节, 落盘路径]
+//   ["progress",任务序, 已下字节, 远端总字节, 落盘路径]
+//   ["done",   任务序,  最终字节, 期望字节, 落盘路径]
+//   ["fail",   任务序,  "0",    "0",  原因]
+//   ["cancelled",任务序,"0",    "0",  ""]
+//   ["fatal",  "0",     "0",    "0",  原因]
+//   ["lyric",  任务序,  歌词字节, "0",  歌词路径]   ← 歌词已落盘（音频是否成功都会尝试）
+//
+// 任务标志（flags，纯字符串数组 ⇒ 可跨线程）：
+//   "lyric"     = 下音频的同时把同名 .lrc 也下下来
+//   "lyriconly" = **只下歌词**（跳过音频），供"我已经有音频了"的用法
+import strings
+import dirs
+import files
+import "web_net" as net
+import "./kuwo_core.leno" as kuwo
+import "./kuwo_lyric.leno" as lyric
+
+use net.(Response, HttpClient)
+use kuwo.SongInfo
+
+// 分片大小：1 MB。太小 ⇒ 请求过多；太大 ⇒ 进度条一跳一大格
+const int CHUNK = 1048576
+// 单个分片请求的最大重试次数（网络抖动/服务端偶发 5xx）
+const int MAXRETRY = 3
+
+// ==================== 音源注册表 ====================
+// 行格式：[id, 显示名, "1"/"0" 是否可用, 说明]
+// 移植 musicdl-master 的其它源时：这里加一行 + search_entry 里加一个分支即可（GUI 不用动 ✓）
+export func sources(): Array[Array[string]] {
+    Array[Array[string]] out = []
+    out.add(["kuwo", "酷我", "1", "官方 mobi.s 取链（DES 加密）+ 第三方兜底"])
+    out.add(["netease", "网易云", "0", "待移植（weapi 加密，见 musicdl-master）"])
+    out.add(["qq", "QQ音乐", "0", "待移植"])
+    out.add(["migu", "咪咕", "0", "待移植"])
+    return out
+}
+
+// ==================== 工具（同时给 GUI 用）====================
+
+// 秒 → "4:29"（GUI 与 CLI 口径一致）
+export func fmtduration(int secs): string {
+    return kuwo.formatduration(secs)
+}
+
+// 歌曲行 → 一行摘要（下载对话框里显示用）
+export func songlabel(Array[string] row): string {
+    if row.len() < 3 { return "" }
+    return row[1] + " - " + row[2]
+}
+
+// 歌曲行 → 期望字节数（列表标注；可能为 0/偏低，仅用于进度分母的初值）
+export func songbytes(Array[string] row): int {
+    if row.len() < 8 { return 0 }
+    return _int(row[7])
+}
+
+// SongInfo → 歌曲行（本模块内部使用：struct 不出模块 ✓）
+func encode(SongInfo s): Array[string] {
+    Array[string] row = []
+    row.add(s.id)
+    row.add(s.name)
+    row.add(s.artist)
+    row.add(s.album)
+    row.add(_str(s.duration))
+    row.add(s.ext)
+    row.add(s.sizeText)
+    row.add(_str(s.sizeBytes))
+    return row
+}
+
+// 非阻塞投递（通道满/未建 ⇒ 直接丢，进度丢一帧无所谓 ✓）
+func sendmsg(any ch, Array[string] msg) {
+    if ch is Channel {
+        var c = ch
+        c.try_send(msg)
+    }
+}
+
+// 本地文件字节数（不存在/打不开 ⇒ 0）—— 与 web_net 的 _fileSize 同口径
+func fsize(string path): int {
+    if not files.exists(path) { return 0 }
+    var f = null
+    try {
+        f = files.open(path, "rb")
+    } catch e {
+        return 0
+    }
+    if f == null { return 0 }
+    int n = f.len()
+    f.close()
+    return n
+}
+
+// "bytes 0-1048575/26012257" 里的总长；拿不到返回 -1
+func totalfromrange(string cr): int {
+    if cr == "" { return -1 }
+    int slash = strings.find(cr, "/")
+    if slash < 0 { return -1 }
+    string tail = cr.slice(slash + 1, cr.len()).trim()
+    if tail == "" or tail == "*" { return -1 }
+    // 全是数字才收，否则-1（响应头里什么脏值都可能有）
+    for tail.byte_len() to i {
+        var b = tail.byte(i)
+        if b is int {
+            if b < 48 or b > 57 { return -1 }
+        }
+    }
+    return _int(tail)
+}
+
+// ==================== 控制命令（暂停/取消）====================
+// 命令通道里只有 "pause" / "resume" / "cancel" 三种字符串。
+// 收到 "pause" 就**阻塞等待**下一条命令（所以 UI 线程必须保证：关窗时一定要补发 cancel，
+// 否则 worker 会一直挂在 receive 上；反正它只是睡在通道上，不占 CPU，也不会碰任何控件 ✓）
+func waitcmd(any cmd): string {
+    // ⚠ 必须"直接"在收窄后的变量上调用：`var c = cmd` 拿到的仍是 any ⇒ 编译器报
+    //   "不能在 any 类型上调用方法"（实测 ✓）
+    if cmd is Channel {
+        var m = cmd.try_receive()
+        if m == null { return "" }
+        string s = _str(m)
+        if s != "pause" { return s }
+        while true {
+            var m2 = cmd.receive()
+            if m2 == null { return "cancel" }        // 通道已关 ⇒ 当作取消
+            string s2 = _str(m2)
+            if s2 == "resume" { return "" }
+            if s2 == "cancel" { return "cancel" }
+        }
+    }
+    return ""
+}
+
+// ==================== ① 搜索 ====================
+// 按勾选的音源逐个搜（当前只有酷我可用），命中行合并返回。
+// 参数只有字符串数组 ⇒ 可安全跨线程 ✓
+export func search_entry(Array[string] srcids, string keyword, int limit, any ch): Array[Array[string]] {
+    Array[Array[string]] rows = []
+    HttpClient client = net.createClient()
+    if not client.isOk() {
+        sendmsg(ch, ["serror", "", "", "", "网络客户端初始化失败"])
+        return rows
+    }
+    client.setUserAgent(kuwo.useragent())
+    client.setTimeout(20000)
+    client.setSSLVerify(false, false)
+    for srcids to src {
+        if src == "kuwo" {
+            // 网络/解析失败 ⇒ kuwo.search 自己返回空列表（不抛异常）；这里再兜一层 try
+            Array[SongInfo] songs = []
+            try {
+                songs = kuwo.search(client, keyword, limit)
+            } catch e {
+                // ⚠ 这里原先是 `_str(e)` ⇒ 界面只会显示 `<object>`，等于把真因扔了（见 B4）
+                sendmsg(ch, ["serror", src, "", "", errmsg(e)])
+            }
+            for songs to s {
+                rows.add(encode(s))
+            }
+            sendmsg(ch, ["search", src, _str(songs.len()), "", ""])
+        }
+    }
+    client.close()
+    return rows
+}
+
+// ==================== ② 分片下载 ====================
+// 为什么不用 web_net 的 downloadResume：它内部 NOPROGRESS=1 ⇒ **拿不到任何字节进度**，
+//   进度条只能"跳 0 → 100"。这里改成自己发 `Range: bytes=a-b`，每片 1MB 一报告，
+//   顺带白拿了断点续传（起始偏移 = 本地已有字节数）✓
+//
+// 返回落盘字节数；>0 = 成功，-2 = 被取消，其余(-1) = 失败。
+// 进度经 ch 上报，控制命令经 cmd 收。
+func dl_one(HttpClient client, string link, string outpath, any ch, int jobIdx, any cmd): int {
+    int got = fsize(outpath)          // 本地已有的部分 ⇒ 从这里续传
+    int total = -1                    // 远端真实总长（来自 Content-Range），未知 = -1
+    int retries = 0
+    while true {
+        if waitcmd(cmd) == "cancel" { return -2 }
+        int end = got + CHUNK - 1
+        client.replaceHeaders(["Range: bytes=" + _str(got) + "-" + _str(end)])
+        Response r = client.get(link)
+        if r.statusCode == 200 {
+            // 服务端忽略 Range ⇒ 整体覆盖写（一次性，粒度就到不了更细了 —— 但结果正确 ✓）
+            files.write(outpath, r.rawBody())
+            int n = fsize(outpath)
+            sendmsg(ch, ["progress", _str(jobIdx), _str(n), _str(n), outpath])
+            return n
+        }
+        if r.statusCode == 416 {
+            // Range 不可满足 ⇒ 本地文件已不低于远端长度 ⇒ 视为已完成（也覆盖"上次下完了"）
+            if got > 0 { return got }
+            retries = retries + 1
+            if retries > 1 { return -1 }
+            continue
+        }
+        if r.statusCode != 206 {
+            // 网络抖动 / 5xx / 被限流：重试几次再放弃
+            retries = retries + 1
+            if retries > MAXRETRY { return -1 }
+            continue
+        }
+        string raw = r.rawBody()
+        int blen = raw.byte_len()
+        if blen == 0 {
+            // 再要也没有了 ⇒ 到底（总长未知时这是唯一的结束判据）
+            if got > 0 { return got }
+            return -1
+        }
+        if got == 0 {
+            files.write(outpath, raw)
+        } else {
+            var f = files.open(outpath, "ab")
+            f.write(raw)
+            f.close()
+        }
+        got = fsize(outpath)
+        int t = totalfromrange(r.getHeader("content-range"))
+        if t > 0 { total = t }
+        sendmsg(ch, ["progress", _str(jobIdx), _str(got), _str(total), outpath])
+        retries = 0
+        if total > 0 {
+            if got >= total { return got }
+            if blen < CHUNK {
+                // 已知总长却没下满，还提前截断 ⇒ 是断流，重试
+                retries = retries + 1
+                if retries > MAXRETRY { return -1 }
+                continue
+            }
+        } else {
+            // 总长未知：短包即结束
+            if blen < CHUNK { return got }
+        }
+    }
+}
+
+// ==================== ③ 下载 worker ====================
+// jobs = 歌曲行数组；返回 [成功数, 失败数, 歌词数]（字符串，跨线程回传免收窄 ✓）
+// flags 见文件头"任务标志"
+export func dl_entry(Array[Array[string]] jobs, string outdir, any ch, any cmd, Array[string] flags): Array[string] {
+    int ok = 0
+    int fail = 0
+    int lrcok = 0
+    bool wantlyric = hasflag(flags, "lyric") or hasflag(flags, "lyriconly")
+    bool lyriconly = hasflag(flags, "lyriconly")
+    // 目录必须先建：write 到不存在的目录会抛异常（docs/移植音乐下载器实录与待办.md B2 同款坑）
+    if not dirs.exists(outdir) {
+        try {
+            dirs.mkdir_p(outdir)
+        } catch e {
+            sendmsg(ch, ["fatal", "0", "0", "0", "无法创建目录：" + outdir])
+            return ["0", _str(jobs.len()), "0"]
+        }
+    }
+    HttpClient client = net.createClient()
+    if not client.isOk() {
+        sendmsg(ch, ["fatal", "0", "0", "0", "网络客户端初始化失败"])
+        return ["0", _str(jobs.len()), "0"]
+    }
+    client.setUserAgent(kuwo.useragent())
+    client.setTimeout(30000)
+    client.setSSLVerify(false, false)
+    int i = 0
+    while i < jobs.len() {
+        if waitcmd(cmd) == "cancel" {
+            sendmsg(ch, ["cancelled", _str(i), "0", "0", ""])
+            break
+        }
+        Array[string] job = jobs[i]
+        // 音频与歌词共用同一个基名：<歌名> - <歌手>（歌词固定 .lrc，与音频扩展名无关 ✓）
+        string base = kuwo.sanitizefilename(job[1] + " - " + job[2])
+        string lrcout = outdir + _sep() + base + ".lrc"
+
+        if lyriconly {
+            // 只下歌词：跳过取直链与音频，直接抓 .lrc
+            sendmsg(ch, ["start", _str(i), "0", "0", lrcout])
+            int lb = savelyricsafe(job[0], lrcout)
+            if lb > 0 {
+                ok = ok + 1
+                lrcok = lrcok + 1
+                // 先 done 再 lyric：UI 侧 lyric 会把状态补成"完成 xxx +歌词"（顺序反了就被覆盖 ✓）
+                sendmsg(ch, ["done", _str(i), _str(lb), "0", lrcout])
+                sendmsg(ch, ["lyric", _str(i), _str(lb), "0", lrcout])
+            } else {
+                fail = fail + 1
+                sendmsg(ch, ["fail", _str(i), "0", "0", "这首没有歌词"])
+            }
+            i = i + 1
+            continue
+        }
+
+        sendmsg(ch, ["resolve", _str(i), "0", "0", ""])
+        string link = ""
+        try {
+            link = kuwo.getdirecturl(client, job[0])
+        } catch e {
+            link = ""
+        }
+        if link == "" {
+            fail = fail + 1
+            sendmsg(ch, ["fail", _str(i), "0", "0", "取直链失败"])
+        } else {
+            // 落盘名用**直链后缀**校正过的扩展名（比列表里宣传的档位可信，见 kuwo_core 注释）
+            string realext = kuwo.extfromurl(link)
+            if realext == "" { realext = job[5] }
+            if realext == "" { realext = "flac" }
+            string outpath = outdir + _sep() + base + "." + realext
+            sendmsg(ch, ["start", _str(i), "0", job[7], outpath])
+            int got = -1
+            try {
+                got = dl_one(client, link, outpath, ch, i, cmd)
+            } catch e {
+                got = -1
+            }
+            if got > 0 {
+                ok = ok + 1
+                sendmsg(ch, ["done", _str(i), _str(got), job[7], outpath])
+            } else if got == -2 {
+                // 被取消：不算失败（半截文件留着，下次重下会自动从断点续传 ✓）
+                sendmsg(ch, ["cancelled", _str(i), "0", "0", ""])
+                break
+            } else {
+                fail = fail + 1
+                sendmsg(ch, ["fail", _str(i), "0", "0", "下载失败（网络中断或直链失效）"])
+            }
+        }
+        // 歌词与音频成败**无关**：直链失效时歌词往往还拿得到，用户反而更需要它 ✓
+        if wantlyric {
+            int lb = savelyricsafe(job[0], lrcout)
+            if lb > 0 {
+                lrcok = lrcok + 1
+                sendmsg(ch, ["lyric", _str(i), _str(lb), "0", lrcout])
+            }
+        }
+        i = i + 1
+    }
+    client.close()
+    return [_str(ok), _str(fail), _str(lrcok)]
+}
+
+// 歌词抓取包一层 try：worker 线程**绝不能进 error 态**（否则 join 抛异常、UI 侧收尾逻辑全乱）
+func savelyricsafe(string songid, string lrcout): int {
+    int n = 0
+    try {
+        n = lyric.savelyric(songid, lrcout)
+    } catch e {
+        n = 0
+    }
+    return n
+}
+
+// flags 里有没有某项（纯字符串数组 ⇒ 跨线程安全 ✓）
+func hasflag(Array[string] flags, string name): bool {
+    for flags to f {
+        if f == name { return true }
+    }
+    return false
+}
+
+// 异常 → **一行**可读文案（UI 状态栏 / 日志 / channel 回传都用它）
+//
+// ⚠ 千万别用 `_str(e)`：那个写法给的是 `<object>`，异常信息**全部丢失**（实测，见 docs 的 B4）。
+//   异常对象实测带 `msg` / `line` / `file` / `stack` 四个字段，可读的写法有三种：
+//     ① `print(e)`            —— 打印成 {msg: …, line: …, file: …, stack: […]} 形态
+//     ② 插值 `$"{e}"`         —— 就是 msg 全文（**多行**：首行是原因，后面是 [位置] 与 [调用栈]）
+//     ③ 直接取字段 `e.line` / `e.file`
+//   这里取②的**首行**：塞进状态栏一行最合适；要看位置/栈，用 `print(e)` 或取 `e.msg`。
+export func errmsg(any e): string {
+    string t = $"{e}"
+    if t == "" { return "未知错误" }
+    Array[string] lines = t.split("\n")
+    if lines.len() > 0 {
+        string head = lines[0].trim()
+        if head != "" { return head }
+    }
+    return t.trim()
+}

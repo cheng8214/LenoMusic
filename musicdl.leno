@@ -1,0 +1,232 @@
+// musicdl.leno — 音乐下载器 CLI（对标 Python 版 musicdl 的 scripts/download_music.py）
+//
+// 用法：
+//   build\leno.exe musicdl.leno 周杰伦 晴天           # 搜索并下载第 1 首（默认连歌词一起下）
+//   build\leno.exe musicdl.leno -n 3 周杰伦 晴天      # 下载前 3 首
+//   build\leno.exe musicdl.leno -s 周杰伦 晴天        # 只搜索、列出全部，不下载
+//   build\leno.exe musicdl.leno --lyric-only 周杰伦 晴天   # 只下歌词（音频不动）
+//   build\leno.exe musicdl.leno --no-lyric 周杰伦 晴天     # 只下音频，不要歌词
+//   build\leno.exe musicdl.leno -o D:\Music 晴天      # 指定输出目录
+//   build\leno.exe musicdl.leno --help
+//
+// 当前只打通酷我（kuwo_core.leno + kuwo_lyric.leno）；网易等源按同样结构再加一个 core 文件即可
+import strings
+import dirs
+import "web_net" as net
+import "kuwo_core.leno" as kuwo
+import "kuwo_lyric.leno" as lyric
+
+use net.(HttpClient)
+use kuwo.(SongInfo)
+
+const VERSION = "0.1.0"
+const DEFAULT_LIMIT = 10
+
+// ==================== 帮助 ====================
+func printhelp() {
+    print("musicdl (Leno) v" + VERSION + " — 音乐下载器，当前支持：酷我（音频 + 歌词）")
+    print("")
+    print("用法: leno.exe musicdl.leno [选项] <关键词...>")
+    print("")
+    print("选项:")
+    print("  -n <数量>       下载前 N 首（默认 1）")
+    print("  -l <数量>       每个关键词搜索多少条（默认 10）")
+    print("  -o <目录>       输出目录（默认 <脚本目录>/downloads）")
+    print("  -s, --search    只搜索并列出，不下载")
+    print("  -y, --lyric     下载音频时同时保存同名 .lrc（默认开）")
+    print("      --no-lyric  只下音频，不存歌词")
+    print("      --lyric-only 只下歌词，不碰音频")
+    print("  -h, --help      显示本帮助")
+    print("")
+    print("示例:")
+    print("  leno.exe musicdl.leno 周杰伦 晴天")
+    print("  leno.exe musicdl.leno -n 3 -o D:\\Music 许嵩 有何不可")
+    print("  leno.exe musicdl.leno --lyric-only -n 5 周杰伦")
+}
+
+// ==================== 命令行参数 ====================
+func takevalue(Array args, int idx, string flag, string fallback): string {
+    // 取 -x 后面的值：缺值就沿用 fallback
+    if idx + 1 >= args.len() { return fallback }
+    string value = _str(args[idx + 1])
+    if value.starts_with("-") { return fallback }
+    return value
+}
+
+// ==================== 列表输出 ====================
+func printlist(Array[SongInfo] songs) {
+    int i = 0
+    while i < songs.len() {
+        SongInfo song = songs[i]
+        print("  " + (i + 1) + ". " + song.display())
+        i = i + 1
+    }
+}
+
+// 取歌词并落盘（返回字节数；0 = 这首没有歌词）。try 兜住网络异常
+func fetchlyric(string songid, string lrcout): int {
+    int n = 0
+    try {
+        n = lyric.savelyric(songid, lrcout)
+    } catch e {
+        n = 0
+    }
+    return n
+}
+
+// ==================== 下载前 N 首 ====================
+// wantlyric = 顺带存 .lrc；lyriconly = 只存 .lrc（跳过音频）
+func downloadtop(HttpClient client, Array[SongInfo] songs, int top, string outdir, bool wantlyric, bool lyriconly): int {
+    int ok = 0
+    int i = 0
+    while i < songs.len() and i < top {
+        SongInfo song = songs[i]
+        // 歌词与音频同名不同扩展名（lyric.lrcpath 只换最后一个扩展名）
+        string lrcout = lyric.lrcpath(kuwo.savepath(song, outdir))
+        if lyriconly {
+            int lb = fetchlyric(song.id, lrcout)
+            if lb > 0 {
+                ok = ok + 1
+                print("  [" + (i + 1) + "] " + song.name + " - " + song.artist + "  ->  歌词 " + lb + " 字节")
+                print("        " + lrcout)
+            } else {
+                print("  [" + (i + 1) + "] " + song.name + " -> 这首没有歌词")
+            }
+            i = i + 1
+            continue
+        }
+        string link = kuwo.resolveurl(client, song)
+        if link == "" {
+            print("  [" + (i + 1) + "] " + song.name + " -> 取直链失败，跳过")
+        } else {
+            string out = kuwo.savepath(song, outdir)
+            int got = client.downloadResume(link, out)
+            if got > 0 {
+                ok = ok + 1
+                print("  [" + (i + 1) + "] " + song.name + " - " + song.artist + "  ->  " + got + " 字节")
+                print("        " + out)
+                if song.sizeBytes > 0 and got * 10 < song.sizeBytes * 9 {
+                    print("        ! 实际体积低于列表标注（列表 " + song.sizeText + "）⇒ 直链只给了低档，非无损")
+                }
+            } else {
+                print("  [" + (i + 1) + "] " + song.name + " -> 下载失败（" + got + "）")
+            }
+        }
+        // 歌词与音频成败无关：直链失效时歌词往往还拿得到
+        if wantlyric {
+            int lb = fetchlyric(song.id, lrcout)
+            if lb > 0 {
+                print("        歌词 " + lb + " 字节 -> " + lrcout)
+            } else {
+                print("        ! 这首没有歌词")
+            }
+        }
+        i = i + 1
+    }
+    return ok
+}
+
+// ==================== main ====================
+main() {
+    net.globalInit()
+
+    Array args = _args()
+    int top = 1
+    int limit = DEFAULT_LIMIT
+    string outdir = ""
+    bool searchonly = false
+    bool wantlyric = true          // 默认连歌词一起下（与 musicdl 的行为一致）
+    bool lyriconly = false
+    Array[string] words = []
+
+    int i = 0
+    while i < args.len() {
+        string arg = _str(args[i])
+        if arg == "-h" or arg == "--help" {
+            printhelp()
+            return
+        } else if arg == "-s" or arg == "--search" {
+            searchonly = true
+        } else if arg == "-y" or arg == "--lyric" {
+            wantlyric = true
+        } else if arg == "--no-lyric" {
+            wantlyric = false
+        } else if arg == "--lyric-only" {
+            lyriconly = true
+            wantlyric = true
+        } else if arg == "-n" {
+            top = _int(takevalue(args, i, "-n", _str(top)))
+            i = i + 1
+        } else if arg == "-l" {
+            limit = _int(takevalue(args, i, "-l", _str(limit)))
+            i = i + 1
+        } else if arg == "-o" {
+            outdir = takevalue(args, i, "-o", outdir)
+            i = i + 1
+        } else {
+            words.add(arg)
+        }
+        i = i + 1
+    }
+
+    if words.len() == 0 {
+        printhelp()
+        return
+    }
+    string keyword = strings.join(words, " ")
+    if outdir == "" { outdir = dirs.script_dir() + _sep() + "downloads" }
+    if top < 1 { top = 1 }
+    // 必须先建目录：downloadResume 在目录不存在时是**抛异常**而不是返回 -1
+    dirs.mkdir_p(outdir)
+
+    print("musicdl (Leno) v" + VERSION + "  源=酷我")
+    print("关键词 : " + keyword)
+    print("搜索条数: " + limit)
+    print("输出目录: " + outdir)
+    if lyriconly {
+        print("歌词   : 只下歌词（不下载音频）")
+    } else if wantlyric {
+        print("歌词   : 同时保存同名 .lrc")
+    }
+    print("")
+
+    HttpClient client = net.createClient()
+    client.setUserAgent(kuwo.useragent())
+    client.setTimeout(20000)
+    client.setSSLVerify(false, false)
+
+    print("正在搜索...")
+    Array[SongInfo] songs = kuwo.search(client, keyword, limit)
+    if songs.len() == 0 {
+        print("没搜到结果（接口可能被限流或关键词无匹配）")
+        client.close()
+        return
+    }
+    print("命中 " + songs.len() + " 首:")
+    printlist(songs)
+    print("")
+
+    if searchonly {
+        print("-s 只搜索模式，未下载")
+        client.close()
+        return
+    }
+
+    int want = top
+    if want > songs.len() { want = songs.len() }
+    if lyriconly {
+        print("开始抓取前 " + want + " 首的歌词:")
+    } else {
+        print("开始下载前 " + want + " 首:")
+    }
+    int ok = downloadtop(client, songs, want, outdir, wantlyric, lyriconly)
+    client.close()
+
+    print("")
+    if lyriconly {
+        print("完成: 拿到歌词 " + ok + " / " + want + " 首")
+    } else {
+        print("完成: 成功 " + ok + " / " + want + " 首")
+    }
+    print("输出目录: " + outdir)
+}

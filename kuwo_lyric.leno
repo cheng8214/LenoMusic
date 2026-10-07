@@ -1,0 +1,136 @@
+// kuwo_lyric.leno — 酷我歌词（官方 newlyric.lrc 接口）
+//
+// 对标 musicdl 的 musicdl/modules/utils/kuwoutils.py：
+//   buildlyricsparams() → GET http://newlyric.kuwo.cn/newlyric.lrc?<base64> → decodelyrics()
+//
+// 请求参数（明文，UTF-8）：
+//   user=12345,web,web,web&requester=localhost&req=1&rid=MUSIC_<rid>
+// 加密：base64( 逐字节异或(明文, "yeelion") )
+//
+// 响应形态：
+//   "tp=content\r\npath=...\r\nscore=...\r\n\r\n" + zlib( gb18030 的 LRC 文本 )
+//   ⇒ ① 头体分隔是 **CRLFCRLF**（兼容 LFLF）
+//     ② 压缩体是 zlib（前两字节 78 9C），LenoWeb 只有 gunzip（认 gzip 头）与
+//        inflateRaw（认裸 deflate）⇒ **剥掉 2 字节 zlib 头再 inflateRaw**
+//     ③ 正文是 **gb18030**（不是 UTF-8！）⇒ 用 LenoWeb 的 web_charset 转码
+//
+// ★ 与上游唯一不同的选择：**不加 `&lrcx=1`**。加了它服务端回的是"逐字时间轴"
+//   打包体（还要 base64+异或第二层，并有 `<0,0>` 译文行的合并逻辑 ⇒ 上游得靠
+//   convertrawlrc 那串正则收拾）；不加则服务端直接给**标准 LRC**（带 [ti:]/[ar:] 头，
+//   译文行也已经是独立的 [时间]行）⇒ 少一层解密、少一整条正则转换链 ✓（两种都实测过）
+//
+// ★ 两个实测坑（2026-10-07）：
+//   ① **必须带 Referer**（http://www.kuwo.cn/）：不带时服务端回 15 字节的
+//      `TP=DENY REQUEST`（HTTP 仍是 200）——与 A1 的 UA 风控是两回事，这个只看 Referer。
+//   ② 参数里的 base64 可能出现 '+' ⇒ 进 query 前转义成 %2B（服务端按标准 URL 解码）
+//
+// 约定：不 print、无 main ⇒ CLI 与 GUI 共用
+import strings
+import files
+import "web_net" as net
+import "web_gzip" as gzip
+import "web_charset" as charsets
+import "Crypto" as crypto
+
+use net.(Response, HttpClient)
+use gzip.GzipResult
+
+const LYRIC_KEY = "yeelion"
+const LYRIC_URL = "http://newlyric.kuwo.cn/newlyric.lrc?"
+const LYRIC_REFERER = "http://www.kuwo.cn/"
+const LYRIC_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+
+// ==================== ① 参数加密 ====================
+export func lyricparams(string songid): string {
+    string plain = "user=12345,web,web,web&requester=localhost&req=1&rid=MUSIC_" + songid
+    Array[int] key = crypto.str_to_bytes(LYRIC_KEY)
+    Array[int] data = crypto.str_to_bytes(plain)
+    Array[int] mixed = []
+    int i = 0
+    while i < data.len() {
+        mixed.add(data[i] ^ key[i % key.len()])
+        i = i + 1
+    }
+    return crypto.bytes_to_b64(mixed).replace("+", "%2B")
+}
+
+// ==================== ② 响应解码 ====================
+// 失败一律返回 ""（调用方据此提示"这首没歌词"）
+export func decodelyricbody(string raw): string {
+    int n = raw.byte_len()
+    if n < 16 { return "" }
+    // 典型失败体：15 字节的 "TP=DENY REQUEST"
+    if raw.byte_slice(0, 10) != "tp=content" { return "" }
+    int idx = strings.byte_find(raw, "\r\n\r\n")
+    int skip = 4
+    if idx < 0 {
+        idx = strings.byte_find(raw, "\n\n")
+        skip = 2
+    }
+    if idx < 0 { return "" }
+    int start = idx + skip
+    if start + 2 >= n { return "" }
+    string zbody = raw.byte_slice(start, n)
+    // zlib 头两字节：CMF(0x78) FLG(0x9C/0x01/0xDA...) ⇒ 剥掉再按裸 deflate 解
+    int cmf = _byteAt(zbody, 0)
+    if (cmf & 0x0F) != 8 { return "" }
+    GzipResult r = gzip.inflateRaw(zbody.byte_slice(2, zbody.byte_len()))
+    if not r.ok { return "" }
+    return charsets.decode(r.data, "gb18030")
+}
+
+func _byteAt(string s, int i): int {
+    var b = s.byte(i)
+    if b is int { return b }
+    return -1
+}
+
+// ==================== ③ 取歌词 ====================
+// 自己起一个 client：只有歌词接口需要 Referer，不去污染调用方的 client
+export func fetchlyric(string songid): string {
+    if songid == "" { return "" }
+    HttpClient client = net.createClient()
+    if not client.isOk() { return "" }
+    client.setUserAgent(LYRIC_UA)
+    client.setTimeout(15000)
+    client.setSSLVerify(false, false)
+    client.addHeaders(["Referer: " + LYRIC_REFERER])
+    Response resp = client.get(LYRIC_URL + lyricparams(songid))
+    string text = ""
+    if resp.ok() {
+        // ⚠ 必须用 rawBody：body 已被 charset 探测转过码，而这里要的是**原始字节**（zlib 压缩体）
+        text = decodelyricbody(resp.rawBody())
+    }
+    client.close()
+    return text
+}
+
+// 音频路径 → 同名 .lrc 路径（把最后一个扩展名换成 .lrc；没有扩展名就直接加后缀）
+export func lrcpath(string audiopath): string {
+    int dot = -1
+    int i = audiopath.len() - 1
+    while i >= 0 {
+        string ch = audiopath.slice(i, i + 1)
+        if ch == "." { dot = i; break }
+        if ch == "\\" or ch == "/" { break }
+        i = i - 1
+    }
+    if dot < 0 { return audiopath + ".lrc" }
+    return audiopath.slice(0, dot) + ".lrc"
+}
+
+// 取歌词并写到 targetpath（返回写入字节数；0 = 这首歌没有歌词/取失败/写不进去）
+// 落盘**不做任何清洗**：服务端给什么写什么。实测（2026-10-07，多首）：
+//   · 行尾是 **LF**（不是 CRLF），播放器照认 ⇒ 别"顺手"改成 CRLF；
+//   · 个别歌的正文带 UTF-8 BOM（如 Love Story）⇒ 必须**原样**保留：
+//     Windows 侧播放器/记事本靠 BOM 判 UTF-8，去掉反而容易变乱码
+export func savelyric(string songid, string targetpath): int {
+    string text = fetchlyric(songid)
+    if text == "" { return 0 }
+    try {
+        files.write(targetpath, text)
+    } catch e {
+        return 0
+    }
+    return text.byte_len()
+}
