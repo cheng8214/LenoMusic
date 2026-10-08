@@ -102,9 +102,11 @@ export func load(): DlSettings {
             s.limit = clamp_limit(jsons.get_int(m, "limit", s.limit))
         }
         // 音源勾选：**键在文件里** ⇒ 就是用户存过（哪怕存的是空数组 = 全不勾 ✓，得照做 ✓）
-        //   ⚠⚠ 解码出来的数组是**弱类型**的 ✗：`arr is Array[string]` **过不了**（实测就挂在这 ✓）
-        //     仓库既有写法是 `if arr is Array` + 逐元素 `_str(...)`
-        //     （见 bilibili_download.leno 读 `data.durl` ✓）—— 照它来 ✓
+        //   ⚠ 2026-10-08 更正：先前这里写着"解码出来的数组是弱类型、`is Array[string]` 过不了 ✗"
+        //     —— **那是误判** ✗ 探针实测它对 JSON 解出来的数组**是成立的** ✓
+        //     （真凶是另一处：那版 save() 里有 `if s.sourcesSet` 守卫，而测试没给标志赋值 ✓）
+        //   这里仍用 `is Array` + 逐元素 `_str(...)`（仓库既有写法，见 bilibili_download 读 `data.durl` ✓），
+        //   理由换成一个**真实**的：能容忍**手改过**的配置文件（元素写成数字也能收成字符串 ✓）
         if m.has("sources") {
             var arr = jsons.get_obj(m, "sources")
             if arr is Array => raw {
@@ -132,11 +134,12 @@ export func save(DlSettings s): bool {
     } catch e {
         return false
     }
-    // ⚠⚠ 数组必须**直接写在字面量字段上** ✓（仓库既有做法：`{version: 1, rules: items}`
-    //   cleaner_whitelist / `{bookmarks: bookmarks}` file_manager ✓）
-    //   —— 试过 `Dict[string, any] d = {}` 再 `d["sources"] = <数组>` ✗：**实测数组被丢掉**
-    //      （落盘只剩标量，`sources` 键根本不在 ✓ 2026-10-08 用例抓到的 ✓）
-    //   ⚠ 另注：`sourcesSet` 也一起落盘 ⇒ 读写对称，"存过没"不会因为文件里多/少一个键而变味 ✓
+    // 数组直接写在字面量字段上（仓库既有做法：cleaner_whitelist `{version: 1, rules: items}` ✓
+    //   file_manager `{bookmarks: bookmarks}` ✓）
+    //   ⚠ 2026-10-08 更正：先前这里写着"塞进 `Dict[string, any]` 会被丢掉 ✗" —— **那是误判** ✗
+    //     探针实测 `Dict[string, any] d = {}` + `d["sources"] = <数组>` **内存与落盘都正常** ✓
+    //     （当时"丢"的真因是本文件写过的 `if s.sourcesSet` 守卫为假，测试又没给标志赋值 ✓）
+    //   ⚠ `sourcesSet` 一起落盘 ⇒ 读写对称："存过没"不会因为文件里多/少一个键而变味 ✓
     try {
         jsons.write_file(store_path(), {version: 1, workers: w, lyric: s.lyric, limit: l,
                                         sources: s.sources, sourcesSet: s.sourcesSet})
