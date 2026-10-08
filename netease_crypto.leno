@@ -1,0 +1,134 @@
+// netease_crypto.leno — 网易云 weapi 的参数加密（AES-128-CBC 两轮 + RSA 加密密钥）
+//
+// 算法（两轮 AES + 一轮 RSA）：
+//   明文 JSON
+//     → ① base64( AES128CBC(json, KEY_ONE) )
+//     → ② base64( AES128CBC(①的结果字符串, KEY_TWO) )   = params
+//   密钥：
+//     → RSA(KEY_TWO) = 1024 位模幂（指数 65537）→ 256 个十六进制字符 = encSecKey
+//   AES 固定 IV "0102030405060708"；PKCS7 填充由 Crypto 内部完成（别再自己填 ✗）
+//
+// 两个要点：
+//   ① KEY_TWO 官方客户端是**每个请求随机**的 16 字符；这里固定成常量也成立 ——
+//      服务端只要求 encSecKey 能解出你实际用的那个密钥 ✓（省掉随机数来源，行为可复现 ✓）
+//   ② RSA 用 Leno 的**任意精度 int** 直接做模幂（int48 内联，超出自动升级为堆分配 BigInt；
+//      见 docs/Leno入门教程.md「int 是任意精度」）⇒ 不需要任何大数库 ✓
+//      实测一次 1024 位模幂 ≈ 11 ms ⇒ 每次请求现算即可，不缓存也不慢 ✓
+//
+// 金标向量（.NET AES + PowerShell BigInteger 算出；改算法后必须逐字节一致）：
+//   json  = {"a":1}
+//   ①     = U7nqija8yGUt9t6SPGXNjQ==
+//   params     = YAwRl+G2bY1p+OPVaNP5X8s9Uhpi3XTuYj7MQLpJqic=
+//   encSecKey  = 140045a002b91307e676d6ffa2aeb6db1ebf4fb93efbb4b5bcb4130cbbf58f0492d8beae356e0797f638618aff2b6874c4cc55ccc3c150c63d7acb1f3219533599ff220fe2c0c8d2e0fc04e3d8b0a1734028169acee3d66f14eb41453b746236c6ed368f7de91ab749474d540f5744497849353f7dc2c05d4461fdb9b5de86d2
+//   （以上由 test/test_netease_crypto.leno 逐字节校验 ✓）
+import strings
+import Crypto as crypto
+
+const IV = "0102030405060708"
+const KEY_ONE = "0CoJUm6Qyw8W8jud"
+const KEY_TWO = "xYz9Kq2LmN8pR4sT"
+const PUB_EXP = 65537
+
+// 网易客户端内置的 1024 位 RSA 模数（公开值，不是密钥；官方客户端里就是明文常量）
+const MODULUS_HEX = "e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7"
+
+// ==================== 大整数工具 ====================
+
+// 模幂：base^exp mod n（平方-乘法；任意精度 ⇒ 1024 位照样算 ✓）
+func powmod(int base, int exp, int n): int {
+    int result = 1
+    base = base % n
+    while exp > 0 {
+        if exp % 2 == 1 { result = (result * base) % n }
+        exp = exp >> 1
+        base = (base * base) % n
+    }
+    return result
+}
+
+// 十六进制串 → 大整数（借 Crypto.hex_to_bytes ⇒ 别手写字符解析）
+func hex2int(string hex): int {
+    Array[int] bytes = crypto.hex_to_bytes(hex)
+    int acc = 0
+    for bytes to b { acc = acc * 256 + b }
+    return acc
+}
+
+// 大整数 → 十六进制串（不含前导 0；位数不够由 padleft 补）
+func int2hex(int value): string {
+    Array[int] raw = []
+    int x = value
+    while x > 0 {
+        raw.add(x % 256)
+        x = x / 256
+    }
+    Array[int] rev = []
+    int i = raw.len() - 1
+    while i >= 0 {
+        rev.add(raw[i])
+        i = i - 1
+    }
+    return crypto.bytes_to_hex(rev)
+}
+
+func padleft(string s, int width): string {
+    string out = s
+    while out.len() < width { out = "0" + out }
+    return out
+}
+
+export func reverse(string s): string {
+    string out = ""
+    int i = s.len() - 1
+    while i >= 0 {
+        out = out + s[i]
+        i = i - 1
+    }
+    return out
+}
+
+// ==================== 加密 ====================
+
+// 一轮 AES-128-CBC + base64（Crypto 内部已 PKCS7 填充 ✓）
+export func aesonce(string text, string key): string {
+    Array[int] ct = crypto.aes128_cbc_encrypt_str(strings.to_bytes(key), strings.to_bytes(IV), text)
+    return strings.to_base64(strings.from_bytes(ct))
+}
+
+// 明文 JSON → params（两轮 AES）
+export func weapiparams(string json): string {
+    return aesonce(aesonce(json, KEY_ONE), KEY_TWO)
+}
+
+// 密钥 → encSecKey：先整体反转字符串，再当大整数做 RSA（对齐官方语义 ✓）
+//   注意顺序：是「字符串反转 → 取字节 → 当大整数」，不是「取字节 → 反转字节」（两者结果相同，
+//   但写法按前者更贴近官方：hexlify(string[::-1]) ⇒ 我这边用 bytes_to_hex(to_bytes(reverse(s))) ✓）
+export func rsaencrypt(string key): string {
+    int m = hex2int(crypto.bytes_to_hex(strings.to_bytes(reverse(key))))
+    int c = powmod(m, PUB_EXP, hex2int(MODULUS_HEX))
+    return padleft(int2hex(c), 256)
+}
+
+// form 体里 base64 必须转义：'+' → %2B、'/' → %2F、'=' → %3D
+//   （不转义时服务端会把 '+' 当空格读 ⇒ 解密失败；这是最容易踩的一个静默坑 ✗）
+func urlsafeb64(string s): string {
+    string out = ""
+    int i = 0
+    while i < s.len() {
+        string c = s[i]
+        if c == "+" { out = out + "%2B" }
+        else if c == "/" { out = out + "%2F" }
+        else if c == "=" { out = out + "%3D" }
+        else { out = out + c }
+        i = i + 1
+    }
+    return out
+}
+
+// 明文 JSON → POST form 体（"params=...&encSecKey=..."）
+export func weapibody(string json): string {
+    return "params=" + urlsafeb64(weapiparams(json)) + "&encSecKey=" + rsaencrypt(KEY_TWO)
+}
+
+// 自测用的密钥（默认那支；测试要覆盖自定义密钥时可直接传形参）
+export func secretkey(): string { return KEY_TWO }

@@ -1,0 +1,202 @@
+// netease_core.leno — 网易云音乐核心（搜索 / 取直链）
+//
+// 与酷我（kuwo_core.leno）的**接口差异**：本模块不暴露 struct，直接吐"歌曲行"——
+//   行格式与 kuwo 完全一致，只**多一个音源标记**（第 9 项）：
+//     [id, name, artist, album, duration(秒), ext, sizeText, sizeBytes, "netease"]
+//   引擎（dl_engine）靠第 9 项把"取直链 / 抓歌词"分发到对应音源 ✓
+//
+// 请求全部走 **weapi**（加密见 netease_crypto.leno）：
+//   搜索    POST /weapi/search/get?csrf_token=
+//   取直链  POST /weapi/song/enhance/player/url/v1?csrf_token=
+//   歌词    POST /weapi/song/lyric?csrf_token= （见 netease_lyric.leno）
+//
+// ★ 实测结论（2026-10-08，逐条真跑过，别当猜测）：
+//   ① **端点选择**：新版 `/weapi/cloudsearch/get/web` 对本客户端一律回 `{"code":50000005}`
+//      （加 Cookie、加 X-Real-IP、csrf 前后一致、去掉 Content-Type 全试过，无效 ✗）；
+//      老路径 `/weapi/search/get` **正常返回 code=200** ✓ ⇒ 用它。
+//      ⚠ 这条同时反证加密没问题：服务端能解出 params 才会给真数据 ✓
+//   ② **必须带 Referer: https://music.163.com/**；base64 里的 '+' 必须转义成 %2B
+//      （漏转义 ⇒ 响应体 0 字节。不报错，最容易被误判成"接口挂了" ✗ 见 netease_crypto）
+//   ③ **未登录拿不到 flac**：请求 lossless 会被服务端**降级**成 320k mp3（br 仍 320000）✓
+//      ⇒ 统一按 exhigh（320k mp3）请求
+//   ④ **付费/原唱曲拿不到直链**（实测 id=186016 原唱「晴天」⇒ code=404、url=null），
+//      翻唱通常可下 ⇒ 所以搜索后紧跟**一次批量**取直链，把体积/格式/可下性一次补齐，
+//      用户在列表里就看得见"下不了"，而不是点了下载才失败 ✓✓
+//   ⑤ 批量返回**顺序与请求不一致** ⇒ 必须按 id 归位，不能按下标对齐 ✗
+import jsons
+import strings
+import "web_net" as net
+import "./netease_crypto.leno" as wc
+
+use net.(HttpClient)
+use net.(Response)
+
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+const BASE = "https://music.163.com"
+const SEARCH_PATH = "/weapi/search/get?csrf_token="
+const URL_PATH = "/weapi/song/enhance/player/url/v1?csrf_token="
+const LEVEL = "exhigh"          // standard=128k / exhigh=320k（lossless 未登录会被降级，见头部 ③）
+
+export func useragent(): string { return UA }
+
+// 网易要的请求头（Referer 必需；Content-Type 用表单类型 —— curl 的 POSTFIELDS 默认就是它 ✓）
+export func prepare(HttpClient client) {
+    client.addHeaders(["Referer: " + BASE + "/", "Content-Type: application/x-www-form-urlencoded"])
+}
+
+// ==================== 小工具 ====================
+
+// JSON 字符串值转义（关键词里带引号/反斜杠时不至于把 payload 拼坏）
+func jsonescape(string s): string {
+    string out = ""
+    int i = 0
+    while i < s.len() {
+        string c = s[i]
+        if c == "\"" { out = out + "\\\"" }
+        else if c == "\\" { out = out + "\\\\" }
+        else { out = out + c }
+        i = i + 1
+    }
+    return out
+}
+
+func pad2(int v): string {
+    if v < 10 { return "0" + _str(v) }
+    return _str(v)
+}
+
+// 字节数 → "10.32 MB"（与 kuwo_core 的显示口径一致）
+export func fmtsize(int bytes): string {
+    if bytes <= 0 { return "" }
+    if bytes >= 1073741824 { return fixed2(bytes, 1073741824, " GB") }
+    if bytes >= 1048576 { return fixed2(bytes, 1048576, " MB") }
+    return _str(bytes / 1024) + " KB"
+}
+
+// 保留两位小数（整数运算，不引浮点）
+func fixed2(int bytes, int unit, string suffix): string {
+    int hundredths = (bytes * 100 / unit)          // 截断到 0.01
+    return _str(hundredths / 100) + "." + pad2(hundredths % 100) + suffix
+}
+
+// ==================== ① 搜索 ====================
+
+// 搜索 → 歌曲行（已批量补齐体积/格式；不可下的 ext 留空、sizeBytes=0）
+export func searchrows(HttpClient client, string keyword, int limit): Array[Array[string]] {
+    Array[Array[string]] rows = []
+    string payload = "{\"s\":\"" + jsonescape(keyword) + "\",\"type\":\"1\",\"limit\":\"" + _str(limit) + "\",\"offset\":\"0\"}"
+    Response resp = client.post(BASE + SEARCH_PATH, wc.weapibody(payload))
+    if not resp.ok() { return rows }
+    var root = jsons.decode(resp.body) as Dict[string, any]
+    if root == null { return rows }
+    if jsons.get_int(root, "code", -1) != 200 { return rows }
+    var res = root["result"] as Dict[string, any]
+    if res == null { return rows }
+    var songs = res["songs"]
+    if not (songs is Array) { return rows }
+
+    // ---- 第一遍：抽字段成行（体积先留空）+ 收集 id ----
+    Array[string] ids = []
+    for songs to it {
+        var d = it as Dict[string, any]
+        if d == null { continue }
+        string sid = _str(jsons.get_int(d, "id", 0))
+        if sid == "0" or sid == "" { continue }
+        // 歌手：artists[]（老 schema）或 ar[]（新 schema）都认
+        string artist = ""
+        var ars = d["artists"]
+        if not (ars is Array) { ars = d["ar"] }
+        if ars is Array {
+            for ars to a {
+                var ad = a as Dict[string, any]
+                if ad == null { continue }
+                if artist != "" { artist = artist + "/" }
+                artist = artist + jsons.get_str(ad, "name", "")
+            }
+        }
+        // 专辑：album{} 或 al{}
+        string album = ""
+        var al = d["album"]
+        if not (al is Dict[string, any]) { al = d["al"] }
+        if al is Dict[string, any] { album = jsons.get_str(al, "name", "") }
+        // 时长：老 duration / 新 dt，都是毫秒
+        int ms = jsons.get_int(d, "duration", 0)
+        if ms == 0 { ms = jsons.get_int(d, "dt", 0) }
+
+        Array[string] row = []
+        row.add(sid)
+        row.add(jsons.get_str(d, "name", ""))
+        row.add(artist)
+        row.add(album)
+        row.add(_str(ms / 1000))
+        row.add("")             // ext：批量取直链后按真实格式回填
+        row.add("")             // sizeText
+        row.add("0")            // sizeBytes
+        row.add("netease")      // 音源标记 ✓
+        rows.add(row)
+        ids.add(sid)
+    }
+    if rows.len() == 0 { return rows }
+
+    // ---- 一次批量取直链 ⇒ 体积 / 可下性 全回来（见头部 ④⑤）----
+    Dict[string, int] sizes = batchsizes(client, ids)
+    int k = 0
+    while k < rows.len() {
+        Array[string] row = rows[k]
+        int sz = getsize(sizes, row[0])
+        if sz > 0 {
+            row[5] = "mp3"                  // 未登录时服务端只给 mp3（见头部 ③）
+            row[6] = fmtsize(sz)
+            row[7] = _str(sz)
+        }
+        k = k + 1
+    }
+    return rows
+}
+
+// id → 可下体积（拿不到直链的 id 不进表 ⇒ 列表里显示空白 = 这首下不了）
+func batchsizes(HttpClient client, Array[string] ids): Dict[string, int] {
+    Dict[string, int] out = {}
+    string payload = "{\"ids\":\"[" + strings.join(ids, ",") + "]\",\"level\":\"" + LEVEL + "\",\"encodeType\":\"mp3\"}"
+    Response resp = client.post(BASE + URL_PATH, wc.weapibody(payload))
+    if not resp.ok() { return out }
+    var root = jsons.decode(resp.body) as Dict[string, any]
+    if root == null { return out }
+    var data = root["data"]
+    if not (data is Array) { return out }
+    for data to it {
+        var d = it as Dict[string, any]
+        if d == null { continue }
+        string sid = _str(jsons.get_int(d, "id", 0))
+        int sz = jsons.get_int(d, "size", 0)
+        if sid != "0" and sz > 0 { out[sid] = sz }
+    }
+    return out
+}
+
+func getsize(Dict[string, int] table, string key): int {
+    var v = table[key]
+    if v == null { return 0 }
+    return _int(v)
+}
+
+// ==================== ② 取直链（下载时用）====================
+
+// 空串 = 拿不到（付费/原唱/失效）；调用方据此报"取直链失败"
+export func getdirecturl(HttpClient client, string songid): string {
+    string payload = "{\"ids\":\"[" + songid + "]\",\"level\":\"" + LEVEL + "\",\"encodeType\":\"mp3\"}"
+    Response resp = client.post(BASE + URL_PATH, wc.weapibody(payload))
+    if not resp.ok() { return "" }
+    var root = jsons.decode(resp.body) as Dict[string, any]
+    if root == null { return "" }
+    var data = root["data"]
+    if not (data is Array) { return "" }
+    for data to it {
+        var d = it as Dict[string, any]
+        if d == null { continue }
+        // 只认 id 匹配的那条（顺序不保证，见头部 ⑤）
+        if _str(jsons.get_int(d, "id", 0)) != songid { continue }
+        return jsons.get_str(d, "url", "")
+    }
+    return ""
+}

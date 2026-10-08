@@ -35,7 +35,8 @@
 
 ## 二、功能
 
-- **搜索**：关键词 + 每源条数；音源复选框按注册表**动态生成**（当前「酷我」可用，其余源为占位）
+- **搜索**：关键词 + 每源条数；**多音源**（酷我 / 网易云）一起搜、结果表按音源混排；
+  音源复选框按注册表**动态生成**（加新源只需在注册表加一行 ✓）
 - **结果表**：勾选列（表头可全选）/ 排序 / 多选 / 双击下载这一首 / 右键菜单
   （下载勾选项、复制「歌名-歌手」、在资源管理器里定位、删除本地文件、打开下载目录）
 - **下载**：`Range` 分片（1 MB/片）+ **断点续传**（重下同一首走 `416` 快路径，秒回）
@@ -44,6 +45,19 @@
   邻近句按距离淡出、随播放平滑上滚、边缘渐隐、滚轮手翻、点句跳转、
   **逐字时间轴**（有逐字就用，没有退回标准 LRC）、译文行）
 - **设置**：标题栏齿轮进入（下载目录 / 格式过滤 / 并行数等）
+
+### 音源差异（务必知道）
+
+| | 酷我 | 网易云 |
+| --- | --- | --- |
+| 协议 | 官方 mobi 接口 + **DES 变体**加密 | **weapi**：AES-128-CBC 两轮 + 1024 位 RSA（`netease_crypto.leno`，有金标回归 ✓）|
+| 歌词 | `newlyric.lrc`（zlib + gb18030；译文行混在原文里）| `weapi/song/lyric`（译文**单独一份** ⇒ 按时间戳并回原文 ✓）|
+| 最高音质 | 接口给到什么就是什么（含 flac）| **未登录只有 320k mp3**（请求 lossless 会被服务端降级 ✓）|
+| 拿不到直链时 | 有第三方兜底接口 | **付费/原唱曲直接没有直链**（实测原唱「晴天」`code=404`）|
+
+> 网易的"下不了"会**在搜索阶段就标出来**：搜索后紧跟**一次批量**取直链，把体积 / 格式 /
+> 可下性一次补齐 ⇒ 列表里**格式空白、大小 0** 的那些，点下载也拿不到直链（翻唱通常可下，
+> 原唱与付费曲不行）。这是网易未登录态的硬限制，不是 bug ✓
 
 ## 三、文件职责
 
@@ -56,9 +70,12 @@
 | `player_bar.leno` | 播放条 UI（嵌在主界面表格下方、状态栏上方） |
 | `dl_settings.leno` | 设置**纯逻辑**（读写配置 + 取值钳位；不 import SDL3 ⇒ 可单测 ✓） |
 | `dl_settings_win.leno` | 设置弹窗（SDL3） |
-| `kuwo_core.leno` | 酷我核心：搜索 / 取直链 / 下载 |
+| `kuwo_core.leno` | 酷我核心：搜索 / 取直链 |
 | `kuwo_des.leno` | 酷我官方接口要用的 DES 变体（`encryptquery`） |
-| `kuwo_lyric.leno` | 歌词：`newlyric.lrc` 接口 + zlib 解压 + gb18030 解码 + 落盘 |
+| `kuwo_lyric.leno` | 酷我歌词：`newlyric.lrc` 接口 + zlib 解压 + gb18030 解码 + 落盘 |
+| `netease_core.leno` | 网易核心：`weapi/search/get` 搜索 + 批量取直链（顺带补齐体积与"能不能下"）|
+| `netease_crypto.leno` | 网易 weapi 参数加密：AES-128-CBC 两轮 + 1024 位 RSA（用任意精度 `int` 直接做模幂）|
+| `netease_lyric.leno` | 网易歌词：`weapi/song/lyric` + 译文按时间戳并回原文 + 落盘补 BOM |
 | `musicdl.leno` | CLI 入口（与 GUI 共用同一套引擎） |
 | `resource.toml` | 单文件打包配置（`onefile` / `images/**` 资源 / `app.ico` 图标） |
 | `test/` | 可直接运行的回归脚本（见第五节） |
@@ -90,7 +107,7 @@ leno.exe musicdl.leno --help
 
 ## 五、跑测试
 
-5 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
+6 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
 
 ```bat
 <发行包>\leno.exe test\test_player_state.leno      :: 播放器规则：认哪些扩展名 / 下一首是谁 / 循环三态 / 失败要安全
@@ -98,6 +115,7 @@ leno.exe musicdl.leno --help
 <发行包>\leno.exe test\test_settings.leno          :: 设置的真文件读写与钳位
 <发行包>\leno.exe test\test_dl_window_open.leno    :: 下载窗口「不重复打开」的规则
 <发行包>\leno.exe test\test_titlebar_actions.leno  :: 标题栏动作按钮：解析 + 内置图标名判定
+<发行包>\leno.exe test\test_netease_crypto.leno  :: 网易 weapi 加密金标回归（AES 两轮 + RSA，8 项断言 ✓）
 ```
 
 ## 六、打包成单文件 exe

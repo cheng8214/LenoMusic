@@ -1,0 +1,65 @@
+// test_netease_crypto.leno — 网易 weapi 加密的**金标回归**（纯逻辑、离线、不需要网络 ✓）
+//
+// 为什么必须有：这套加密是两轮 AES + 一轮 RSA，**错一步就静默走不通**（服务端只会回
+//   一个空结果或 "cheating"），没有金标就只能靠"搜不到"来倒推，成本极高。
+//   金标由 .NET AES-128-CBC + PowerShell BigInteger 独立算出（与 Leno 实现无关 ✓）。
+// 跑：build\leno.exe leno_gui\应用\音乐下载器\test\test_netease_crypto.leno
+import "../netease_crypto.leno" as wc
+
+// 金标（输入 json = {"a":1}）
+const PLAIN = "{\"a\":1}"
+const GOLD_AES1 = "U7nqija8yGUt9t6SPGXNjQ=="
+const GOLD_PARAMS = "YAwRl+G2bY1p+OPVaNP5X8s9Uhpi3XTuYj7MQLpJqic="
+const GOLD_ESCAPED = "params=YAwRl%2BG2bY1p%2BOPVaNP5X8s9Uhpi3XTuYj7MQLpJqic%3D&encSecKey="
+const GOLD_ENCSEC = "140045a002b91307e676d6ffa2aeb6db1ebf4fb93efbb4b5bcb4130cbbf58f0492d8beae356e0797f638618aff2b6874c4cc55ccc3c150c63d7acb1f3219533599ff220fe2c0c8d2e0fc04e3d8b0a1734028169acee3d66f14eb41453b746236c6ed368f7de91ab749474d540f5744497849353f7dc2c05d4461fdb9b5de86d2"
+
+int passed = 0
+int failed = 0
+
+func check(string name, bool ok) {
+    if ok {
+        passed = passed + 1
+        print("  PASS ✓ " + name)
+    } else {
+        failed = failed + 1
+        print("  FAIL ✗ " + name)
+    }
+}
+
+func checkeq(string name, string got, string want) {
+    bool ok = got == want
+    check(name, ok)
+    if not ok {
+        print("       got  = " + got)
+        print("       want = " + want)
+    }
+}
+
+main() {
+    print("=== weapi 加密金标回归 ===")
+
+    // ① 单轮 AES（IV 与 PKCS7 都对才过）
+    checkeq("单轮 AES-128-CBC + base64", wc.aesonce(PLAIN, "0CoJUm6Qyw8W8jud"), GOLD_AES1)
+
+    // ② 两轮 AES = params
+    checkeq("两轮 AES = params", wc.weapiparams(PLAIN), GOLD_PARAMS)
+
+    // ③ RSA：1024 位模幂 + 左补零到 256 字符
+    string es = wc.rsaencrypt(wc.secretkey())
+    checkeq("encSecKey（RSA）", es, GOLD_ENCSEC)
+    check("encSecKey 长度 = 256", es.len() == 256)
+
+    // ④ 字符串反转（RSA 输入要先整体反转）
+    checkeq("reverse", wc.reverse("abc"), "cba")
+    checkeq("reverse 空串", wc.reverse(""), "")
+
+    // ⑤ form 体的 base64 转义（'+' '=' 不转义 ⇒ 服务端当空格读 ⇒ 静默解密失败 ✗）
+    checkeq("weapibody 转义", wc.weapibody(PLAIN), GOLD_ESCAPED + GOLD_ENCSEC)
+
+    // ⑥ 换一个 json 也得是稳定输出（两次调用一致 ⇒ 无隐藏随机源）
+    check("两轮结果可复现", wc.weapiparams("{\"s\":\"晴天\"}") == wc.weapiparams("{\"s\":\"晴天\"}"))
+
+    print("")
+    print("通过 " + _str(passed) + " 项，失败 " + _str(failed) + " 项")
+    print(if failed == 0 then "=== 全部通过 ===" else "=== 有失败 ✗ ===")
+}

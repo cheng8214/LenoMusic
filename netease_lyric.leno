@@ -1,0 +1,141 @@
+// netease_lyric.leno — 网易云歌词（weapi/song/lyric）
+//
+// 接口：POST https://music.163.com/weapi/song/lyric?csrf_token=
+//       {"id":"<songid>","lv":"-1","kv":"-1","tv":"-1","csrf_token":""}
+//   返回：lrc.lyric = 原文（标准 LRC）、tlyric.lyric = 译文（可能为空）
+//
+// ★ 与酷我的差异（实测 2026-10-08）：
+//   ① 网易把**译文单独一份**给（tlyric），酷我是把译文行混在原文里 ⇒ 这里要自己并：
+//      按时间戳把译文行插到原文行**后面**（落盘形态与酷我一致：同一时间戳两行 ✓
+//      —— 播放器的歌词浮层就是这么认的，不用改播放器 ✓）
+//   ② 返回文本**不带 BOM**（酷我是带 BOM 的），落盘统一补 BOM + CRLF：
+//      Windows 播放器靠 BOM 判 UTF-8 ✓（与 kuwo_lyric 的落盘约定对齐 ✓）
+//   ③ 拿不到歌词（纯音乐/无版权）时 lrc.lyric 为空 ⇒ 返回 ""（调用方按"没有歌词"处理 ✓）
+import jsons
+import strings
+import files
+import "web_net" as net
+import "./netease_crypto.leno" as wc
+
+use net.(HttpClient)
+use net.(Response)
+
+const BASE = "https://music.163.com"
+const LYRIC_PATH = "/weapi/song/lyric?csrf_token="
+const BOM = "\uFEFF"
+
+// ==================== 时间戳工具 ====================
+
+// 取行首的时间戳标签 "[00:12.345]"；没有则返回 ""
+func tagof(string line): string {
+    string s = line
+    int i = 0
+    while i < s.len() and (s[i] == " " or s[i] == "\t") { i = i + 1 }
+    if i >= s.len() { return "" }
+    if s[i] != "[" { return "" }
+    int j = i
+    while j < s.len() and s[j] != "]" { j = j + 1 }
+    if j >= s.len() { return "" }
+    string tag = s[i:(j + 1)]
+    // 只认时间戳（排除 [ti:]/[ar:]/[al:]/[by:]/[offset:] 这些元信息标签）
+    if tag.has(":") and tag.len() >= 6 {
+        int k = 1
+        while k < tag.len() - 1 {
+            string c = tag[k]
+            if c != ":" and c != "." and (c < "0" or c > "9") { return "" }
+            k = k + 1
+        }
+        return tag
+    }
+    return ""
+}
+
+// 去掉行首时间戳后的文本
+func aftertag(string line, string tag): string {
+    int i = 0
+    while i + tag.len() <= line.len() {
+        if line[i:(i + tag.len())] == tag { return line[(i + tag.len()):] }
+        i = i + 1
+    }
+    return ""
+}
+
+// ==================== 合并译文 ====================
+
+// 把 tlyric 的译文行按时间戳并进原文（同一时间戳 ⇒ 译文紧跟在原文行后面）
+export func mergetranslation(string lrc, string tlyric): string {
+    if tlyric == "" { return lrc }
+    Dict[string, string] trans = {}
+    Array[string] tlines = tlyric.lines()
+    for tlines to t {
+        string tag = tagof(t)
+        if tag == "" { continue }
+        string text = aftertag(t, tag)
+        if text == "" { continue }
+        trans[tag] = text
+    }
+    if trans.len() == 0 { return lrc }
+
+    string out = ""
+    Array[string] lines = lrc.lines()
+    for lines to ln {
+        string s = ln
+        out = out + s + "\r\n"
+        string tag = tagof(s)
+        if tag == "" { continue }
+        var tv = trans[tag]
+        if tv != null {
+            out = out + tag + _str(tv) + "\r\n"
+        }
+    }
+    return out
+}
+
+// ==================== 取歌词 ====================
+
+// 取歌词文本（已并译文、已补 BOM；失败/无歌词 ⇒ ""）
+export func fetchlyric(string songid): string {
+    HttpClient client = net.createClient()
+    if not client.isOk() { return "" }
+    client.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
+    client.addHeaders(["Referer: " + BASE + "/", "Content-Type: application/x-www-form-urlencoded"])
+    client.setTimeout(20000)
+    client.setSSLVerify(false, false)
+    string out = ""
+    try {
+        string payload = "{\"id\":\"" + songid + "\",\"lv\":\"-1\",\"kv\":\"-1\",\"tv\":\"-1\",\"csrf_token\":\"\"}"
+        Response resp = client.post(BASE + LYRIC_PATH, wc.weapibody(payload))
+        if resp.ok() {
+            var root = jsons.decode(resp.body) as Dict[string, any]
+            if root != null and jsons.get_int(root, "code", -1) == 200 {
+                string lrc = ""
+                var l = root["lrc"] as Dict[string, any]
+                if l != null { lrc = jsons.get_str(l, "lyric", "") }
+                string tly = ""
+                var t = root["tlyric"] as Dict[string, any]
+                if t != null { tly = jsons.get_str(t, "lyric", "") }
+                if lrc != "" {
+                    // 原文按 \n 切开重排（统一成 CRLF）；并译文；补 BOM
+                    lrc = lrc.replace("\r\n", "\n")
+                    out = BOM + mergetranslation(lrc, tly.replace("\r\n", "\n"))
+                }
+            }
+        }
+    } catch e {
+        out = ""
+    }
+    client.close()
+    return out
+}
+
+// 取歌词并写到 targetpath（返回写入字节数；0 = 没有歌词/取失败/写不进去）
+export func savelyric(string songid, string targetpath): int {
+    string text = fetchlyric(songid)
+    if text == "" { return 0 }
+    try {
+        files.write(targetpath, text)
+    } catch e {
+        return 0
+    }
+    return text.byte_len()
+}

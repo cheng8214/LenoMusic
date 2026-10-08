@@ -74,8 +74,8 @@ func dl_worker_shard(Array[Array[string]] jobs, string outdir, any ch, any cmd, 
 
 // 试听 worker（同一条硬约束：线程入口必须是**本文件**的具名全局函数 ✓）
 //   只做转发 ⇒ 真正的 HTTP 与"发消息"都在 dl_engine.dl_preview 里 ✓（与 search_worker 同款 ✓）
-func preview_worker(string songId, string outpath, int bytes, string tag, any ch): int {
-    return eng.dl_preview(songId, outpath, bytes, ch, tag)
+func preview_worker(string songId, string outpath, int bytes, string tag, string src, any ch): int {
+    return eng.dl_preview(songId, outpath, bytes, ch, tag, src)
 }
 
 // ==================== 无头自检钩子（环境变量；与 dashboard / cleaner_master 同一套约定 ✓）====================
@@ -601,7 +601,7 @@ struct MusicDlApp {
         string out = dirs.join(_tmpdir(), "leno_preview_" + one[eng.F_ID] + "." + ext)
         string tag = eng.songlabel(one)                    // "歌名 - 歌手" ✓（界面显示用 ✓）
         gPreviewCh = threads.channel(8)
-        gPreviewThread = threads.start(preview_worker, one[eng.F_ID], out, PREVIEW_BYTES, tag, gPreviewCh)
+        gPreviewThread = threads.start(preview_worker, one[eng.F_ID], out, PREVIEW_BYTES, tag, eng.srcid(one), gPreviewCh)
         startBgDownload(one)                               // ★ ② 同时整首下（静默 ✓）
         stateLbl.set_text("试听：正在取前一段并下载整首…（" + tag + "）")
         SDL3.markFrameRedraw()
