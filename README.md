@@ -35,7 +35,7 @@
 
 ## 二、功能
 
-- **搜索**：关键词 + 每源条数；**多音源**（酷我 / 网易云）一起搜、结果表按音源混排；
+- **搜索**：关键词 + 每源条数；**多音源**（酷我 / 网易云 / 酷狗）一起搜、结果表按音源混排；
   音源复选框按注册表**动态生成**（加新源只需在注册表加一行 ✓）
 - **结果表**：勾选列（表头可全选）/ 排序 / 多选 / 双击下载这一首 / 右键菜单
   （下载勾选项、复制「歌名-歌手」、在资源管理器里定位、删除本地文件、打开下载目录）
@@ -48,16 +48,18 @@
 
 ### 音源差异（务必知道）
 
-| | 酷我 | 网易云 |
-| --- | --- | --- |
-| 协议 | 官方 mobi 接口 + **DES 变体**加密 | **weapi**：AES-128-CBC 两轮 + 1024 位 RSA（`netease_crypto.leno`，有金标回归 ✓）|
-| 歌词 | `newlyric.lrc`（zlib + gb18030；译文行混在原文里）| `weapi/song/lyric`（译文**单独一份** ⇒ 按时间戳并回原文 ✓）|
-| 最高音质 | 接口给到什么就是什么（含 flac）| **未登录只有 320k mp3**（请求 lossless 会被服务端降级 ✓）|
-| 拿不到直链时 | 有第三方兜底接口 | **付费/原唱曲直接没有直链**（实测原唱「晴天」`code=404`）|
+| | 酷我 | 网易云 | 酷狗 |
+| --- | --- | --- | --- |
+| 协议 | 官方 mobi 接口 + **DES 变体**加密 | **weapi**：AES-128-CBC 两轮 + 1024 位 RSA（`netease_crypto.leno`）| 移动端搜索 + CDN 取链：`key = md5(hash + "kgcloudv2")`，**免签名**|
+| 歌词 | `newlyric.lrc`（zlib + gb18030；译文行混在原文里）| `weapi/song/lyric`（译文**单独一份** ⇒ 按时间戳并回原文）| `krcs` 搜 ID → `lyrics.kugou.com/download`（base64 LRC，自带 BOM）|
+| 列表体积来源 | `MINFO` 字段 | 搜索后再发**一次批量**请求补齐 | 搜索响应**直接带三档体积**（不用额外请求 ✓）|
+| 最高音质 | 接口给到什么就是什么（含 flac）| 未登录只有 320k mp3（lossless 被降级）| **免费曲直接给 flac**（实测 14.3 MB / 648 kbps ✓）|
+| 拿不到直链时 | 有第三方兜底接口 | 付费/原唱曲 `code=404` | 付费曲 CDN 回 `status=2`（列表里留空 = 下不了）|
+| 金标回归 | `kuwo_des.leno` 文件内向量 | `test/test_netease_crypto.leno` | `test/test_kugou_cdn.leno` |
 
-> 网易的"下不了"会**在搜索阶段就标出来**：搜索后紧跟**一次批量**取直链，把体积 / 格式 /
-> 可下性一次补齐 ⇒ 列表里**格式空白、大小 0** 的那些，点下载也拿不到直链（翻唱通常可下，
-> 原唱与付费曲不行）。这是网易未登录态的硬限制，不是 bug ✓
+> **列表里"格式空白 + 大小 0" = 这首下不了**（付费/原唱）——三源统一这个口径：
+> 网易在搜索后靠一次批量请求判出来，酷狗直接读搜索响应里的 `pay_type*` / `*privilege` ✓
+> 点了下载也会如实报"取直链失败"，不会假装成功 ✓
 
 ## 三、文件职责
 
@@ -76,6 +78,8 @@
 | `netease_core.leno` | 网易核心：`weapi/search/get` 搜索 + 批量取直链（顺带补齐体积与"能不能下"）|
 | `netease_crypto.leno` | 网易 weapi 参数加密：AES-128-CBC 两轮 + 1024 位 RSA（用任意精度 `int` 直接做模幂）|
 | `netease_lyric.leno` | 网易歌词：`weapi/song/lyric` + 译文按时间戳并回原文 + 落盘补 BOM |
+| `kugou_core.leno` | 酷狗核心：移动端搜索（三档体积 + 付费标记一次带回）+ CDN 取链（`kgcloudv2`，免签名）|
+| `kugou_lyric.leno` | 酷狗歌词：`krcs` 搜 ID → `lyrics.kugou.com/download`（base64 LRC）；**入口收整行**（命中需要歌名+时长 ✓）|
 | `musicdl.leno` | CLI 入口（与 GUI 共用同一套引擎） |
 | `resource.toml` | 单文件打包配置（`onefile` / `images/**` 资源 / `app.ico` 图标） |
 | `test/` | 可直接运行的回归脚本（见第五节） |
@@ -107,7 +111,7 @@ leno.exe musicdl.leno --help
 
 ## 五、跑测试
 
-6 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
+7 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
 
 ```bat
 <发行包>\leno.exe test\test_player_state.leno      :: 播放器规则：认哪些扩展名 / 下一首是谁 / 循环三态 / 失败要安全
@@ -116,6 +120,7 @@ leno.exe musicdl.leno --help
 <发行包>\leno.exe test\test_dl_window_open.leno    :: 下载窗口「不重复打开」的规则
 <发行包>\leno.exe test\test_titlebar_actions.leno  :: 标题栏动作按钮：解析 + 内置图标名判定
 <发行包>\leno.exe test\test_netease_crypto.leno  :: 网易 weapi 加密金标回归（AES 两轮 + RSA，8 项断言 ✓）
+<发行包>\leno.exe test\test_kugou_cdn.leno       :: 酷狗 CDN 取链配方回归（key 算式 + URL 形态 + 大小写敏感，6 项断言 ✓）
 ```
 
 ## 六、打包成单文件 exe

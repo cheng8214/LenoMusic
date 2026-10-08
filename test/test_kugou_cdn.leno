@@ -1,0 +1,57 @@
+// test_kugou_cdn.leno — 酷狗 CDN 取链的**配方回归**（纯逻辑、离线、不需要网络 ✓）
+//
+// 为什么值得单独有它：酷狗取链不用签名，全靠 `key = md5(hash + "kgcloudv2")` 这一条**约定**。
+//   它错了不会报错，只会回 `status=2 / Hash not found` ⇒ 排查必须靠"对比配方"。
+//   金标由 node/PowerShell 的 md5 权威实现算出；URL 形态与上游 musicdl 的 kgcloudv2 那条一致 ✓
+// 跑：build\leno.exe leno_gui\应用\音乐下载器\test\test_kugou_cdn.leno
+import strings
+import "../kugou_core.leno" as kugou
+
+int passed = 0
+int failed = 0
+
+func check(string name, bool ok) {
+    if ok {
+        passed = passed + 1
+        print("  PASS ✓ " + name)
+    } else {
+        failed = failed + 1
+        print("  FAIL ✗ " + name)
+    }
+}
+
+func checkeq(string name, string got, string want) {
+    bool ok = got == want
+    check(name, ok)
+    if not ok {
+        print("       got  = " + got)
+        print("       want = " + want)
+    }
+}
+
+main() {
+    print("=== 酷狗 CDN 取链配方回归 ===")
+
+    // ① key = md5(hash + "kgcloudv2")（金标：两个真实档位 hash）
+    checkeq("cdnkey(128 档)", kugou.cdnkey("b3a52a7a958bf0aed0ebfba2e9a818b7"),
+        "424f29553d15bf73b64402eda7c4f7e4")
+    checkeq("cdnkey(flac 档)", kugou.cdnkey("857879479e698d729640a5716dc3e56f"),
+        "ced4966efac362219f9d884dfe8303ec")
+
+    // ② **hash 大小写敏感**：大写必须算出不同的 key ——
+    //    服务端按"收到的原串"算 key，所以两边必须同形（别自作聪明 to_lower ✗）
+    check("大写 hash 得到的 key 不同（大小写敏感）",
+        kugou.cdnkey("B3A52A7A958BF0AED0EBFBA2E9A818B7") != "424f29553d15bf73b64402eda7c4f7e4")
+
+    // ③ URL 配方整串锁死（参数顺序/取值变了这里就红）
+    checkeq("cdnurl 整串",
+        kugou.cdnurl("b3a52a7a958bf0aed0ebfba2e9a818b7"),
+        "https://trackercdn.kugou.com/i/v2/?cdnBackup=1&behavior=download&pid=1&cmd=21&appid=1001" +
+        "&hash=b3a52a7a958bf0aed0ebfba2e9a818b7&key=424f29553d15bf73b64402eda7c4f7e4")
+    check("cdnurl 是 https", strings.starts_with(kugou.cdnurl("abc"), "https://"))
+    check("cdnurl 里 hash 与 key 都在", kugou.cdnurl("abc").has("hash=abc") and kugou.cdnurl("abc").has("&key="))
+
+    print("")
+    print("通过 " + _str(passed) + " 项，失败 " + _str(failed) + " 项")
+    print(if failed == 0 then "=== 全部通过 ===" else "=== 有失败 ✗ ===")
+}

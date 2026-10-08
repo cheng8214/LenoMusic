@@ -1,0 +1,103 @@
+// kugou_lyric.leno — 酷狗歌词（krcs 搜索 → lyrics 下载）
+//
+// 两步（都要 hash）：
+//   ① 找歌词 ID：GET https://krcs.kugou.com/search?ver=1&man=yes&client=mobi
+//                    &keyword=<歌名 - 歌手>&duration=<秒>&hash=<hash>
+//        ⇒ candidates[]（实测 20 个候选，第一个就是要找的那首）
+//   ② 取歌词：    GET https://lyrics.kugou.com/download?ver=1&client=pc
+//                    &id=<candidate.id>&accesskey=<candidate.accesskey>&fmt=lrc&charset=utf8
+//        ⇒ content **是 base64**，解码即 LRC（实测 1023 字节，自带 BOM + [ar:]/[ti:] 头 ✓）
+//
+// ★ 与另两个源的差异：
+//   ① 酷狗要**歌名与时长**才能命中歌词（只给 hash 也能搜，但关键词+时长命中更准 ✓）
+//      ⇒ 所以这里的入口收的是**整行**（row），不是只给一个 id —— 引擎那边按音源分发 ✓
+//   ② 下发的 LRC 自带 BOM 与 UTF-8（charset=utf8 请求）⇒ 原样落盘即可，不用再补 ✓
+import strings
+import jsons
+import files
+import "web_net" as net
+
+use net.(HttpClient)
+use net.(Response)
+
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+const KRCS_API = "https://krcs.kugou.com/search?"
+const LYRICS_API = "https://lyrics.kugou.com/download?"
+
+func mkclient(): HttpClient {
+    HttpClient c = net.createClient()
+    c.setUserAgent(UA)
+    c.setTimeout(20000)
+    c.setSSLVerify(false, false)
+    return c
+}
+
+// 取歌词文本（失败/没有歌词 ⇒ ""）
+export func fetchlyric(string hash, string name, string artist, string durationSec): string {
+    if hash == "" { return "" }
+    HttpClient c = mkclient()
+    string out = ""
+    try {
+        // ① 找候选
+        string q = net.buildQuery({
+            "ver": "1", "man": "yes", "client": "mobi",
+            "keyword": name + " - " + artist, "duration": durationSec, "hash": hash
+        })
+        Response r1 = c.get(KRCS_API + q)
+        if r1.ok() {
+            var j1 = jsons.decode(r1.body) as Dict[string, any]
+            if j1 != null {
+                var cands = j1["candidates"]
+                if cands is Array {
+                    string lid = ""
+                    string akey = ""
+                    for cands to cd {
+                        var cdd = cd as Dict[string, any]
+                        if cdd == null { continue }
+                        // 取第一个候选（实测即目标曲 ✓）
+                        lid = _str(jsons.get_int(cdd, "id", 0))
+                        akey = jsons.get_str(cdd, "accesskey", "")
+                        break
+                    }
+                    // ② 下载歌词（content 是 base64）
+                    if lid != "" and akey != "" {
+                        Response r2 = c.get(LYRICS_API + "ver=1&client=pc&id=" + lid + "&accesskey=" + akey + "&fmt=lrc&charset=utf8")
+                        if r2.ok() {
+                            var j2 = jsons.decode(r2.body) as Dict[string, any]
+                            if j2 != null and jsons.get_int(j2, "status", -1) == 200 {
+                                string b64 = jsons.get_str(j2, "content", "")
+                                if b64 != "" {
+                                    string lrc = strings.from_base64(b64)
+                                    // 空内容 / 占位词（"无歌词"）都当没有
+                                    if lrc.len() > 16 { out = lrc }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch e {
+        out = ""
+    }
+    c.close()
+    return out
+}
+
+// 整行入口（row = [hash, 歌名, 歌手, 专辑, 时长秒, ext, sizeText, sizeBytes, "kugou"]）
+// 返回写入字节数；0 = 没有歌词/取失败/写不进去
+export func savelyric_by(Array[string] row, string targetpath): int {
+    if row.len() < 5 { return 0 }
+    string hash = row[0]
+    string name = row[1]
+    string artist = row[2]
+    string dur = row[4]
+    string text = fetchlyric(hash, name, artist, dur)
+    if text == "" { return 0 }
+    try {
+        files.write(targetpath, text)
+    } catch e {
+        return 0
+    }
+    return text.byte_len()
+}

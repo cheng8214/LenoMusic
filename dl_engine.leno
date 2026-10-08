@@ -45,6 +45,8 @@ import "./kuwo_core.leno" as kuwo
 import "./kuwo_lyric.leno" as lyric
 import "./netease_core.leno" as netease
 import "./netease_lyric.leno" as netlyric
+import "./kugou_core.leno" as kugou
+import "./kugou_lyric.leno" as kugoulyric
 
 use net.(Response, HttpClient)
 use kuwo.SongInfo
@@ -87,6 +89,7 @@ export func sources(): Array[Array[string]] {
     Array[Array[string]] out = []
     out.add(["kuwo", "酷我", "1", "官方 mobi.s 取链（DES 加密）+ 第三方兜底"])
     out.add(["netease", "网易云", "1", "weapi（AES×2 + RSA）；未登录只有 320k mp3，付费曲无直链"])
+    out.add(["kugou", "酷狗", "1", "移动端搜索 + CDN 取链（免签名）；免费曲能给 flac，付费曲无直链"])
     out.add(["qq", "QQ音乐", "0", "待移植"])
     out.add(["migu", "咪咕", "0", "待移植"])
     return out
@@ -122,6 +125,7 @@ export func srcid(Array[string] row): string {
 // 按音源取直链（空串 = 拿不到）。**唯一**的取直链入口 ⇒ 下载与试听走同一条路 ✓
 export func directurl(HttpClient client, string src, string songid): string {
     if src == "netease" { return netease.getdirecturl(client, songid) }
+    if src == "kugou" { return kugou.getdirecturl(client, songid) }
     return kuwo.getdirecturl(client, songid)
 }
 
@@ -243,6 +247,19 @@ export func search_entry(Array[string] srcids, string keyword, int limit, any ch
                 rows.add(r)
             }
             sendmsg(ch, ["search", src, _str(nrows.len()), "", ""])
+        } else if src == "kugou" {
+            // 酷狗：移动端搜索（免签名）⇒ 三档体积与付费标记搜索时就带回来了，不额外发请求 ✓
+            kugou.prepare(client)
+            Array[Array[string]] krows = []
+            try {
+                krows = kugou.searchrows(client, keyword, limit)
+            } catch e {
+                sendmsg(ch, ["serror", src, "", "", errmsg(e)])
+            }
+            for krows to r {
+                rows.add(r)
+            }
+            sendmsg(ch, ["search", src, _str(krows.len()), "", ""])
         }
     }
     client.close()
@@ -271,6 +288,9 @@ export func dl_preview(string songId, string outpath, int bytes, any ch, string 
     if src == "netease" {
         client.setUserAgent(netease.useragent())
         netease.prepare(client)
+    } else if src == "kugou" {
+        client.setUserAgent(kugou.useragent())
+        kugou.prepare(client)
     } else {
         client.setUserAgent(kuwo.useragent())
     }
@@ -421,7 +441,7 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
         if lyriconly {
             // 只下歌词：跳过取直链与音频，直接抓 .lrc
             sendmsg(ch, ["start", _str(i), "0", "0", lrcout])
-            int lb = savelyricsafe(job[0], lrcout, srcid(job))
+            int lb = savelyricsafe(job, lrcout, srcid(job))
             if lb > 0 {
                 ok = ok + 1
                 lrcok = lrcok + 1
@@ -473,7 +493,7 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
         }
         // 歌词与音频成败**无关**：直链失效时歌词往往还拿得到，用户反而更需要它 ✓
         if wantlyric {
-            int lb = savelyricsafe(job[0], lrcout, srcid(job))
+            int lb = savelyricsafe(job, lrcout, srcid(job))
             if lb > 0 {
                 lrcok = lrcok + 1
                 sendmsg(ch, ["lyric", _str(i), _str(lb), "0", lrcout])
@@ -491,13 +511,16 @@ export func dl_entry(Array[Array[string]] jobs, string outdir, any ch, any cmd, 
 }
 
 // 歌词抓取包一层 try：worker 线程**绝不能进 error 态**（否则 join 抛异常、UI 侧收尾逻辑全乱）
-func savelyricsafe(string songid, string lrcout, string src): int {
+// src 分发：**酷狗要整行**（命中歌词需要歌名与时长），另两个源只要 id ✓
+func savelyricsafe(Array[string] job, string lrcout, string src): int {
     int n = 0
     try {
-        if src == "netease" {
-            n = netlyric.savelyric(songid, lrcout)
+        if src == "kugou" {
+            n = kugoulyric.savelyric_by(job, lrcout)
+        } else if src == "netease" {
+            n = netlyric.savelyric(job[0], lrcout)
         } else {
-            n = lyric.savelyric(songid, lrcout)
+            n = lyric.savelyric(job[0], lrcout)
         }
     } catch e {
         n = 0

@@ -1,0 +1,162 @@
+// kugou_core.leno — 酷狗音乐核心（搜索 / 取直链）
+//
+// 与另两个源一样的对外约定：不暴露 struct，直接吐"歌曲行"，末尾带音源标记：
+//   [id, name, artist, album, duration(秒), ext, sizeText, sizeBytes, "kugou"]
+//   ⚠ 酷狗的 `id` 就是**音频 hash**（不是数字 id）——取链与抓歌词都只认 hash ✓
+//     而且 hash **大小写敏感**：CDN 用它算 key，必须原样使用（别 to_lower ✗）
+//
+// 两个端点（都**不需要签名、不需要设备注册、不需要账号** ✓ 2026-10-08 实测）：
+//   搜索：GET https://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword=..&page=1&pagesize=N&showtype=1
+//   取链：GET https://trackercdn.kugou.com/i/v2/?cdnBackup=1&behavior=download&pid=1&cmd=21&appid=1001
+//            &hash=<hash>&key=md5(<hash> + "kgcloudv2")
+//
+// ★ 实测要点（逐条真跑过）：
+//   ① 移动端搜索**一次就把三档都给了**：`hash`+`filesize`（128）、`320hash`+`320filesize`、
+//      `sqhash`+`sqfilesize`（flac），外加 `duration`/`album_name`/`filename`/
+//      `pay_type*`/`price*`/`*privilege` ⇒ 列表体积与"能不能下"**不用额外请求**就能填满 ✓
+//      （网易那边得再发一次批量请求，酷狗这里更省 ✓）
+//   ② 免费的**翻唱曲能直接拿到 flac**（实测 14.3MB / 648kbps）✓；原唱付费曲 CDN 回 `status=2`
+//      ⇒ 与网易一样的口径：列表里 ext/size 留空 = 下不了，点了也会如实报"取直链失败" ✓
+//   ③ CDN 返回的直链字段叫 **`mp3Url`**（数组：主链 + 备用 CDN）——没有 `url` 字段 ✗
+//      ⇒ 取第一个非空（upstream 的 `['url'] or ['backup_url'] or ['mp3Url']` 就是这个意思 ✓）
+//   ④ PowerShell 侧测试时会误判：`mobilecdn.kugou.com` 的证书 .NET 不认（TLS 报错），
+//      而 libcurl（LenoWeb）关掉校验就能通 ⇒ **别拿 PS 的结果断定接口挂了** ✓
+import jsons
+import strings
+import "Crypto" as crypto
+import "web_net" as net
+
+use net.(HttpClient)
+use net.(Response)
+
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+const SEARCH_API = "https://mobilecdn.kugou.com/api/v3/search/song?"
+const CDN_API = "https://trackercdn.kugou.com/i/v2/"
+
+export func useragent(): string { return UA }
+
+// 酷狗不需要特殊请求头（不像网易要 Referer）；留着这个空函数是为了三个源在引擎里形状一致 ✓
+export func prepare(HttpClient client) {
+    client.setTimeout(20000)
+}
+
+// ==================== 小工具 ====================
+
+func pad2(int v): string {
+    if v < 10 { return "0" + _str(v) }
+    return _str(v)
+}
+
+// 字节 → "13.66 MB"（与 netease_core.fmtsize 同口径；两处各一份，改动要一起改 ⚠）
+export func fmtsize(int bytes): string {
+    if bytes <= 0 { return "" }
+    if bytes >= 1073741824 {
+        int h = bytes * 100 / 1073741824
+        return _str(h / 100) + "." + pad2(h % 100) + " GB"
+    }
+    if bytes >= 1048576 {
+        int h = bytes * 100 / 1048576
+        return _str(h / 100) + "." + pad2(h % 100) + " MB"
+    }
+    return _str(bytes / 1024) + " KB"
+}
+
+// 某档是否"可下"：有 hash、有体积、且不是付费（privilege / pay_type / price 三项都为零）
+func tierok(Dict[string, any] s, string hashkey, string sizekey, string paykey, string pricekey, string privkey): bool {
+    if jsons.get_str(s, hashkey, "") == "" { return false }
+    if jsons.get_int(s, sizekey, 0) <= 0 { return false }
+    if jsons.get_int(s, paykey, 0) != 0 { return false }
+    if jsons.get_int(s, pricekey, 0) != 0 { return false }
+    if jsons.get_int(s, privkey, 0) != 0 { return false }
+    return true
+}
+
+// ==================== ① 搜索 ====================
+
+export func searchrows(HttpClient client, string keyword, int limit): Array[Array[string]] {
+    Array[Array[string]] rows = []
+    string q = net.buildQuery({"format": "json", "keyword": keyword, "page": "1", "pagesize": _str(limit), "showtype": "1"})
+    Response resp = client.get(SEARCH_API + q)
+    if not resp.ok() { return rows }
+    var root = jsons.decode(resp.body) as Dict[string, any]
+    if root == null { return rows }
+    var data = root["data"] as Dict[string, any]
+    if data == null { return rows }
+    var info = data["info"]
+    if not (info is Array) { return rows }
+
+    for info to it {
+        var s = it as Dict[string, any]
+        if s == null { continue }
+        string h128 = jsons.get_str(s, "hash", "")
+        if h128 == "" { continue }
+
+        // 档位从高到低挑第一档"可下"的：flac(sq) → 320 → 128
+        string id = ""
+        string ext = ""
+        int sizeb = 0
+        if tierok(s, "sqhash", "sqfilesize", "pay_type_sq", "price_sq", "sqprivilege") {
+            id = jsons.get_str(s, "sqhash", "")
+            ext = "flac"
+            sizeb = jsons.get_int(s, "sqfilesize", 0)
+        } else if tierok(s, "320hash", "320filesize", "pay_type_320", "price_320", "320privilege") {
+            id = jsons.get_str(s, "320hash", "")
+            ext = "mp3"
+            sizeb = jsons.get_int(s, "320filesize", 0)
+        } else if tierok(s, "hash", "filesize", "pay_type", "price", "privilege") {
+            id = h128
+            ext = "mp3"
+            sizeb = jsons.get_int(s, "filesize", 0)
+        } else {
+            // 三档都不可下（付费曲）⇒ 列表里留空 = "下不了"；id 仍给 128 的 hash，
+            //   点了下载会拿到 CDN 的 status=2，引擎如实报"取直链失败" ✓（与网易同口径）
+            id = h128
+        }
+
+        Array[string] row = []
+        row.add(id)
+        row.add(jsons.get_str(s, "songname", ""))
+        row.add(jsons.get_str(s, "singername", ""))
+        row.add(jsons.get_str(s, "album_name", ""))
+        row.add(_str(jsons.get_int(s, "duration", 0)))
+        row.add(ext)
+        row.add(fmtsize(sizeb))
+        row.add(_str(sizeb))
+        row.add("kugou")
+        rows.add(row)
+    }
+    return rows
+}
+
+// ==================== ② 取直链 ====================
+
+// CDN 的鉴权 key：md5(hash + "kgcloudv2")（**hash 原样**，大小写敏感 ✓）
+//   单独导出是为了能被离线测试锁住配方（test/test_kugou_cdn.leno ✓）
+export func cdnkey(string hash): string {
+    return crypto.md5(hash + "kgcloudv2")
+}
+
+// CDN 请求 URL（导出同上：配方可测 ✓）
+export func cdnurl(string hash): string {
+    return CDN_API + "?cdnBackup=1&behavior=download&pid=1&cmd=21&appid=1001&hash=" + hash + "&key=" + cdnkey(hash)
+}
+
+// songid = 该档的音频 hash（原样，别改大小写 ✗）
+// 返回空串 = 拿不到（付费/无权限/失效）⇒ 引擎报"取直链失败"
+export func getdirecturl(HttpClient client, string songid): string {
+    if songid == "" { return "" }
+    Response resp = client.get(cdnurl(songid))
+    if not resp.ok() { return "" }
+    var d = jsons.decode(resp.body) as Dict[string, any]
+    if d == null { return "" }
+    // status: 1 = 可以；2 = 这首歌要付费/无权限（实测原唱付费曲）
+    if jsons.get_int(d, "status", -1) != 1 { return "" }
+    // 直链在 mp3Url（数组：主链 + 备用 CDN）⇒ 取第一个非空 ✓
+    var urls = d["mp3Url"]
+    if not (urls is Array) { return "" }
+    for urls to u {
+        string s = _str(u)
+        if s != "" { return s }
+    }
+    return ""
+}
