@@ -117,6 +117,11 @@ export struct PlayerBar {
     float lrcCurRow = 0.0        // 当前句在这串文本行里的**中心**位置（居中基准 ✓）
     int lrcCurRows = 1           // 当前句折了几行（平滑滚动与高亮条高度都按它 ✓）
     bool wantLyricFetch = false  // ★ 面板里"立即下载歌词"被点了 ⇒ 宿主（主界面）看到就去下 ✓
+
+    // ★ 歌单右击菜单里"动文件系统 / 弹窗"的那几项 ⇒ 同样交给宿主 ✓（2026-10-08 ✓）
+    //   本文件不碰网络、不弹系统框、不开资源管理器（那都是主界面的活 ✓）
+    string ctxWant = ""          // 待宿主执行的动作 id（"" = 没有 ✓）
+    string ctxWantPath = ""      // 动作针对的文件全路径（"打开下载目录"时为空 ✓）
     // ---- ⑦⑧⑫⑬（2026-10-08 第二批 ✓）----
     string lrcStage = ""         // 空档提示文案（"前奏中…"/"间奏中…" ✓；空 = 不提示 ✓）
     float lrcSlide = 1.0         // 换歌滑入 0..1（1 = 已就位 ✓ 每拍 +0.12 ✓）
@@ -359,8 +364,16 @@ export struct PlayerBar {
             lb = SDL3.createListBox({
                 w: LIST_W, h: LIST_H, item_h: LIST_ROW, font_size: 13, mode: 0,
                 items: list_items(q),
-                tip: "点一首就播它；滚轮翻页"        // ⚠ ListBox 没有 set_tip，只能在 opts 里给 ✓
+                tip: "点一首就播它；右键有菜单"      // ⚠ ListBox 没有 set_tip，只能在 opts 里给 ✓
             })
+            // ★ 2026-10-08：歌单的**右击菜单**（框架的 ListBox 现在支持了 ✓ 见 sdl_listbox ✓）
+            //   为什么要有：先前在歌单上右击一事无成 ✗，用户实测原话："右击没出现菜单，是播放音乐" ✗
+            //     ① 框架侧：ListBox 压根没有右击菜单（只有 Table/TreeView 有 ✗）⇒ 已补 ✓
+            //     ② 应用侧：歌单的"点一行就播"**没判按钮** ✗ ⇒ 右击也被当成点歌 ✗（见 on_event ✓）
+            //   本文件只做"就地能做"的（播放 / 复制）；**动文件系统与弹窗的**交给宿主 ✓
+            //     ⇒ 置 `ctxWant` + `ctxWantPath`，宿主 tick 里看到就办 ✓（同 `wantLyricFetch` 范式 ✓）
+            lb.on_context_will_open(func(int row) { build_list_menu(row) })
+            lb.on_context_select(func(int row, string id) { on_list_menu(row, id) })
             // ⚠ **故意不用 `lb.on_change` 来点歌** ✗ —— 单选模式下它"点已选中行不回调"
             //   （sdl_listbox.leno:348 `if not is_selected(idx)` ✓），而浮层展开时当前曲正是选中行
             //   ⇒ 点"正在播的那首"会静悄悄没反应 ✗（用户报的正是这个 ✓）
@@ -512,11 +525,14 @@ export struct PlayerBar {
         if not ev.isMouseButtonDown() { return false }
         if inside {
             // ★ 只有**歌单**才"点一行就播它"；歌词浮层里点一行什么也不做 ✓（那是给眼睛看的 ✓）
-            if popOpen {
-                // ★ 自己按纵坐标算行号点歌（**镜像 `ListBox.index_at` 的算法** ✓ —— 它是 pri ✗ 用不了）：
-                //   `idx = (my - y + scroll) / itemH`（第 0 项就从 `y` 起，没有内边距 ✓ 见 sdl_listbox ✓）
-                //   为什么要自己算：单选模式下点**已选中行**控件不回调 ✗（见上面 lb 那段注释 ✓）
-                int r = _int((my - lb.y + lb.get_scroll()) / LIST_ROW)
+            //   ⚠⚠ 2026-10-08 用户实测修正：**右击不算"点歌"** ✗
+            //     先前这里没判按钮 ⇒ 在歌单上右击也走这条 ⇒ 直接把歌换掉 ✗（原话："右击没出现菜单，是播放音乐" ✓）
+            //     右击的语义是"要菜单" ⇒ 交给上面那句 `lb.process(ev)`（框架自己会弹菜单 ✓）就够 ✓
+            if popOpen and ev.mouseButton() != 3 {
+                // ★ 这里用框架**公开**的 `lb.index_at`（2026-10-08 它由 pri 改公开 ✓）
+                //   —— 先前那句注释写着"它是 pri ✗ 用不了"，只好手抄一份公式 ✗；现在不必了 ✓
+                //   为什么不能靠 `lb.on_change`：单选模式下点**已选中行**控件不回调 ✗（见上面 lb 那段注释 ✓）
+                int r = lb.index_at(mx, my)
                 if r >= 0 {
                     if p is Player => w {
                         if r < w.count() {
@@ -542,6 +558,62 @@ export struct PlayerBar {
     // 歌词浮层每拍（**开着才做** ✓）：换歌 ⇒ 重装内容；唱到新的一句 ⇒ 高亮 + 滚到看得见 ✓
     //   ⚠ **只在"行号变了"时才动选中/滚动** ✗ —— 否则用户手动翻歌词会被每拍拽回去
     //     （与"tick 不碰音量滑块"是同一条纪律 ✓ 见文件头 ⚠①）
+    // ==================== 歌单的右击菜单（2026-10-08 ✓）====================
+    //   菜单项**随行变化**：空白处只有"打开下载目录" ✓（播放/定位/删除都得先在某一行上才有意义 ✓）
+    //   ⚠ 每开一次都**重建**（`clear_context_items` ✓）—— 因为选中/在播的那首随时在变 ✓
+    func build_list_menu(int row) {
+        int n = 0
+        if p is Player => qn { n = qn.count() }
+        lb.clear_context_items()
+        if row >= 0 and row < n {
+            lb.addContextItem({label: "播放这首", id: "play"})
+            lb.addContextItem({label: "复制「歌名 - 歌手」", id: "copy"})
+            lb.addContextSeparator()
+            lb.addContextItem({label: "在资源管理器里定位", id: "reveal"})
+            lb.addContextItem({label: "删除本地文件…", id: "delfile"})
+            lb.addContextSeparator()
+        }
+        lb.addContextItem({label: "打开下载目录", id: "open"})
+        // 右击的正好是**正在播**的那首 ⇒ "播放这首"没意义 ⇒ 置灰 ✓（`ListBox.setContextItemEnabled` ✓）
+        if p is Player => qc {
+            if row == qc.index { lb.setContextItemEnabled("play", false) }
+        }
+    }
+
+    // 菜单项动作分发（row = 右击命中行 ✓ 空白处是 -1 ✓）
+    func on_list_menu(int row, string id) {
+        string rowName = ""
+        string rowPath = ""
+        if p is Player => q {
+            if row >= 0 and row < q.list.len() {
+                rowName = q.name_at(row)
+                rowPath = q.list[row]              // `Player.list` 存的就是**文件全路径** ✓
+            }
+        }
+        if id == "play" {
+            if p is Player => w {
+                if row >= 0 and row < w.count() {
+                    w.play_index(row)
+                    lastIdx = -1                   // 让下一拍必然刷一次状态栏 ⇒ 点了立刻有反馈 ✓
+                }
+            }
+            SDL3.markFrameRedraw()
+            return
+        }
+        if id == "copy" {
+            if rowName != "" {
+                SDL3.setClipboardText(rowName)
+                hostLbl?.set_text("已复制：" + rowName)
+            }
+            SDL3.markFrameRedraw()
+            return
+        }
+        // 其余（定位 / 删除 / 打开目录）要动文件系统、要弹系统框 ⇒ 交给宿主 ✓（同 wantLyricFetch 范式 ✓）
+        ctxWantPath = rowPath
+        ctxWant = id
+        SDL3.markFrameRedraw()
+    }
+
     func tick_lrc(Player q) {
         // ① 换歌 ⇒ 滚动/手动偏移都归零（整份歌词换了 ✓）
         string cur = q.current_name()

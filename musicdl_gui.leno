@@ -427,6 +427,52 @@ struct MusicDlApp {
                 SDL3.markFrameRedraw()
             }
         }
+        // ★ 歌单右击菜单里"动文件 / 弹窗 / 开目录"的那几项（2026-10-08 ✓）
+        //   ⚠ 播放条**故意不碰**这些（不弹系统框、不开资源管理器 ✗）⇒ 它只置标志，由这里办 ✓
+        //     动文件/弹窗的实现与搜索结果右键菜单**同一套**（`dlw.reveal` / `SDL3.msgBox` / `dlw.openfolder` ✓）
+        if pbar is PlayerBar => pbCtx {
+            if pbCtx.ctxWant != "" {
+                string act = pbCtx.ctxWant
+                string pth = pbCtx.ctxWantPath
+                pbCtx.ctxWant = ""
+                pbCtx.ctxWantPath = ""
+                if act == "open" {
+                    if not dlw.openfolder(outdir) { stateLbl.set_text("打开目录失败：" + outdir) }
+                } eif pth != "" {
+                    if act == "reveal" {
+                        if dlw.reveal(pth) {
+                            stateLbl.set_text("已在资源管理器里定位：" + pth)
+                        } else {
+                            stateLbl.set_text("定位失败：" + pth)
+                        }
+                    } eif act == "delfile" {
+                        // ⚠ 回调式（框架明说**不要**写成 `if msgBox(...)` ✗ —— 主循环已经在跑 ✓）
+                        SDL3.msgBox("删除本地文件", [
+                            "要删掉这一首的本地文件吗？",
+                            dirs.basename(pth),
+                            pth,
+                            "（只删音频，不动同名 .lrc 歌词；不进回收站，删了就没了）"
+                        ], "删除", "取消", true, func() {
+                            string qq = pth
+                            bool ok = true
+                            try {
+                                files.delete(qq)
+                            } catch e {
+                                ok = false
+                            }
+                            if ok {
+                                if pbar is PlayerBar => bb { bb.rescan() }   // 列表跟着刷新（删的是正在播的那首 ⇒ 它也会停 ✓）
+                                stateLbl.set_text("已删除：" + qq)
+                            } else {
+                                stateLbl.set_text("删除失败：" + qq + "（若正在播放它 ⇒ 先切到别的歌再删 ✓）")
+                            }
+                            SDL3.markFrameRedraw()
+                        })
+                    }
+                }
+                SDL3.markFrameRedraw()
+            }
+        }
         try {
             pollSearch()
             pollBgDownload()           // 试听配套的"整首下载"回信（进度/完成 ✓）
