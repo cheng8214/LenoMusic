@@ -286,6 +286,26 @@ struct MusicDlApp {
     }
 
     // 勾选的音源 id（跳过不可用/未勾选）
+    // ==================== 界面上"可记忆项"的落盘（2026-10-08 ✓）====================
+    //   记什么：**每源条数** + **音源勾选** + **「同时下载歌词」勾选**（2026-10-08 ✓）
+    //   ⚠ 先 `load()` 再只改这几项 ⇒ 不会把设置窗口刚写的（并行线程数）覆盖掉 ✗
+    //   ⚠ 只有用户**真动了控件**才调它（启动套初值时**不**调 ⇒ 不会平白写盘 ✗）
+    //   ⚠ 歌词这项漏过一次（用户实测：主窗口取消勾选、退出后没保存 ✗）⇒ 现在也归这里 ✓
+    func persist_settings() {
+        DlSettings s = dlset.load()
+        s.limit = _int(limitSpin.get_value())
+        s.lyric = lyricBox.is_checked()     // 主窗口那个勾选框 = 同一份设置（设置弹窗也是它 ✓）
+        Array[string] ids = []
+        int i = 0
+        while i < srcBoxes.len() {
+            if srcAvail[i] and srcBoxes[i].is_checked() { ids.add(srcIds[i]) }
+            i = i + 1
+        }
+        s.sources = ids     // 直接存数组：全不勾就是空数组 ✓（"存过没"另用 sourcesSet 标 ✓）
+        s.sourcesSet = true
+        if dlset.save(s) { cfg = s }        // 存成功就把内存里的 cfg 跟上（状态栏/搜索都读它 ✓）
+    }
+
     func picksources(): Array[string] {
         Array[string] out = []
         int i = 0
@@ -1081,6 +1101,11 @@ struct MusicDlApp {
     func onSettings() {
         if dlswin.show_settings_window() {
             cfg = dlset.load()
+            // ★ 2026-10-08 修：设置里改了「默认同时保存歌词」⇒ **当场回灌**主窗口那个勾选框 ✓
+            //   先前只在启动时套一次（见文件末尾 setupUI 之后那句 ✓）⇒ 用户在设置里取消勾选、
+            //   回头看主窗口**还勾着** ✗（用户实测就是这条 ✓）
+            //   ⚠ `set_checked` 是纯赋值（不触发 on_change ✓ 见 sdl_checkbox）⇒ 不会反向写盘循环 ✓
+            lyricBox.set_checked(cfg.lyric)
             string extra = if cfg.lyric then "，默认带歌词" else ""
             stateLbl.set_text("设置已保存：并行 " + _str(cfg.workers) + " 线程" + extra)
             SDL3.markFrameRedraw()
@@ -1096,10 +1121,17 @@ struct MusicDlApp {
             string name = s[1]
             bool avail = s[2] == "1"
             string note = s[3]
-            CheckBox box = SDL3.createCheckBox({text: name, checked: avail, enabled: avail, font_size: 13, tip: note})
-            // 勾选变化只做提示：真正的音源列表在点搜索时现取（避免缓存状态不一致 ✓）
+            // ★ 勾选记忆（2026-10-08 ✓）：存过就按存的来 ✓
+            //   · `cfg.sourcesSet == false` = **从没存过** ⇒ 出厂默认"可用即勾" ✓
+            //   · 存过 ⇒ 只勾当时勾过的那几个；**不可用的音源一律强制不勾** ✓（哪怕文件里勾着 ✗）
+            //   · "全不勾"也是一种选择（空数组 ✓）⇒ 不能跟"没存过"混为一谈 ✗ 见 sourcesSet ✓
+            bool want = avail
+            if avail and cfg.sourcesSet { want = dlset.sources_has(cfg.sources, id) }
+            CheckBox box = SDL3.createCheckBox({text: name, checked: want, enabled: avail, font_size: 13, tip: note})
+            // 勾选变化：落盘记住（点搜索时仍会现取一遍 ⇒ 两不冲突 ✓）
             box.on_change(func(bool v) {
-                stateLbl.set_text("音源已更新（当前可用音源只有酷我，其余待移植）")
+                stateLbl.set_text("音源勾选已记住（下次启动照旧 ✓）")
+                persist_settings()
                 SDL3.markFrameRedraw()
             })
             srcRow.add(box, {grow: 0, shrink: 0, align: 1})
@@ -1184,8 +1216,11 @@ struct MusicDlApp {
         fmtBox.set_enabled(false)      // 还没搜 ⇒ 只有「全部格式」一项 ⇒ 先灰着（搜完由 refreshFmtItems 打开 ✓）
         row1.add(fmtBox, {grow: 0, shrink: 0, basis: 120, align: 3})
         row1.add(SDL3.createLabel({text: "每源条数", font_size: 13}), {grow: 0, shrink: 0, align: 1})
-        limitSpin = SDL3.createSpinBox({w: 86, h: 32, min: 5, max: 50, step: 5, value: 20, int_mode: true, font_size: 13})
-        limitSpin.set_tip("每个音源最多取多少条（酷我接口的 rn 参数）")
+        // ★ 条数记忆（2026-10-08 ✓）：初值取设置里的（读盘时已钳到 LIMIT_MIN..LIMIT_MAX ✓）；
+        //   范围也直接引 dl_settings 的常量 ⇒ 控件与钳位**只有一处口径**（不会对不上 ✗）
+        limitSpin = SDL3.createSpinBox({w: 86, h: 32, min: dlset.LIMIT_MIN, max: dlset.LIMIT_MAX, step: 5, value: cfg.limit, int_mode: true, font_size: 13})
+        limitSpin.set_tip("每个音源最多取多少条（酷我接口的 rn 参数；改了会记住 ✓）")
+        limitSpin.on_change(func(float v) { persist_settings() })
         row1.add(limitSpin, {grow: 0, shrink: 0, basis: 86, align: 3})
         // 设置入口已移到**标题栏右侧的齿轮按钮**（上面的 actions: [{id:"settings", icon:"gear"}] ✓）
         root.add(row1, {grow: 0, shrink: 0, align: 3})
@@ -1224,7 +1259,8 @@ struct MusicDlApp {
         lyricBox = SDL3.createCheckBox({text: "同时下载歌词", checked: true, font_size: 13})
         lyricBox.set_tip("下载音频时顺带存一份同名 .lrc（酷我官方歌词，含译文行）")
         lyricBox.on_change(func(bool v) {
-            stateLbl.set_text(if v then "下载时将同时保存 .lrc 歌词" else "下载时不再保存歌词（右键菜单仍可单独下歌词）")
+            stateLbl.set_text(if v then "下载时将同时保存 .lrc 歌词（已记住 ✓）" else "下载时不再保存歌词（已记住 ✓；右键菜单仍可单独下歌词）")
+            persist_settings()      // ★ 改了就存（2026-10-08 ✓ 先前改了不存 ⇒ 退出就白改 ✗）
             SDL3.markFrameRedraw()
         })
         row3.add(lyricBox, {grow: 0, shrink: 0, align: 1})

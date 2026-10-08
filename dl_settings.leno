@@ -15,9 +15,24 @@ import files
 export const int WORKERS_MIN = 1
 export const int WORKERS_MAX = 16
 
+// 每源条数的**硬范围**（2026-10-08 ✓）：搜索行 SpinBox 的 min/max 直接引这两个 ⇒ 不会两处对不上 ✗
+export const int LIMIT_MIN = 5
+export const int LIMIT_MAX = 50
+export const int LIMIT_DEF = 20
+
 export struct DlSettings {
     int workers = 4      // 并行下载线程数（**多首歌同时下**）；默认值见 dl_engine.DL_DEFAULT_WORKERS
     bool lyric = true    // 启动时默认勾上"同时下载歌词"
+    int limit = 20       // 每源条数（搜索行那个 SpinBox ✓ 记住上次用的 ✓ 2026-10-08）
+    // 勾选的音源 id（**真数组**存 JSON ✓ 2026-10-08）：
+    //   · 空数组 = 用户**一个都不要**（这跟"从没存过"是两回事 ⇒ 靠下面的 sourcesSet 区分 ✓）
+    //   · `jsons.keys` 现在就是 `Array[string]`、`is Array[string]` 收窄也已在语言侧修好 ✓
+    //     （见 docs/类型收窄与绑定语法改进.md ✓）⇒ 不必再"拍扁成裸串" ✗
+    Array[string] sources = []
+    // 用户**存过**勾选吗（一起落盘 ⇒ 读写对称 ✓）：
+    //   为什么不靠"数组空不空"判断 ✗ —— 空数组 = 用户一个都不要 ✓，跟"从没存过"（应用该走
+    //   出厂默认"可用音源全勾" ✓）是两码事，必须分开记 ✓
+    bool sourcesSet = false
 }
 
 // 钳到合法范围（设置窗口的输入、配置文件的脏值都过这里 ✓）
@@ -25,6 +40,27 @@ export func clamp_workers(int n): int {
     if n < WORKERS_MIN { return WORKERS_MIN }
     if n > WORKERS_MAX { return WORKERS_MAX }
     return n
+}
+
+// 每源条数同样钳一道（手改配置文件 / 旧版本留下的脏值 ⇒ 一律回落合法区间 ✓）
+export func clamp_limit(int n): int {
+    if n < LIMIT_MIN { return LIMIT_MIN }
+    if n > LIMIT_MAX { return LIMIT_MAX }
+    return n
+}
+
+// 某个音源 id 在不在勾选集合里（应用启动时给每个复选框定勾选态要用 ✓）
+//   ⚠ 这里用 `while` 而不是 `for ids to v` ✗ —— 那种写法的 `v` 是**元素本身**（不是下标）：
+//     `for checked to i { songs[i] }` 之所以看着对，是因为 `checked` 恰好是**下标数组**，
+//     元素也是 int ⇒ 拿来当索引用**碰巧成立** ✗（换个 `Array[string]` 立刻报"索引必须是整数"✓）
+export func sources_has(Array[string] ids, string id): bool {
+    int n = ids.len()
+    int k = 0
+    while k < n {
+        if _str(ids[k]) == id { return true }
+        k = k + 1
+    }
+    return false
 }
 
 // 配置目录（平台判断只有这一份 ✓ —— 与 cleaner_whitelist 的 store_path 同路数）
@@ -62,6 +98,27 @@ export func load(): DlSettings {
         if m.has("lyric") {
             s.lyric = jsons.get_bool(m, "lyric", s.lyric)
         }
+        if m.has("limit") {
+            s.limit = clamp_limit(jsons.get_int(m, "limit", s.limit))
+        }
+        // 音源勾选：**键在文件里** ⇒ 就是用户存过（哪怕存的是空数组 = 全不勾 ✓，得照做 ✓）
+        //   ⚠⚠ 解码出来的数组是**弱类型**的 ✗：`arr is Array[string]` **过不了**（实测就挂在这 ✓）
+        //     仓库既有写法是 `if arr is Array` + 逐元素 `_str(...)`
+        //     （见 bilibili_download.leno 读 `data.durl` ✓）—— 照它来 ✓
+        if m.has("sources") {
+            var arr = jsons.get_obj(m, "sources")
+            if arr is Array => raw {
+                Array[string] got = []
+                int i = 0
+                while i < raw.len() {
+                    string one = _str(raw[i])
+                    if one != "" { got.add(one) }
+                    i = i + 1
+                }
+                s.sources = got
+            }
+        }
+        if m.has("sourcesSet") { s.sourcesSet = jsons.get_bool(m, "sourcesSet", false) }
     }
     return s
 }
@@ -69,13 +126,20 @@ export func load(): DlSettings {
 // 写配置（先钳位再落盘 ⇒ 文件里永远不会出现非法值 ✓）
 export func save(DlSettings s): bool {
     int w = clamp_workers(s.workers)
+    int l = clamp_limit(s.limit)
     try {
         dirs.mkdir_p(app_dir())     // 目录从 app_dir() 推导（平台判断只有一份 ✓）
     } catch e {
         return false
     }
+    // ⚠⚠ 数组必须**直接写在字面量字段上** ✓（仓库既有做法：`{version: 1, rules: items}`
+    //   cleaner_whitelist / `{bookmarks: bookmarks}` file_manager ✓）
+    //   —— 试过 `Dict[string, any] d = {}` 再 `d["sources"] = <数组>` ✗：**实测数组被丢掉**
+    //      （落盘只剩标量，`sources` 键根本不在 ✓ 2026-10-08 用例抓到的 ✓）
+    //   ⚠ 另注：`sourcesSet` 也一起落盘 ⇒ 读写对称，"存过没"不会因为文件里多/少一个键而变味 ✓
     try {
-        jsons.write_file(store_path(), {version: 1, workers: w, lyric: s.lyric})
+        jsons.write_file(store_path(), {version: 1, workers: w, lyric: s.lyric, limit: l,
+                                        sources: s.sources, sourcesSet: s.sourcesSet})
     } catch e {
         return false
     }

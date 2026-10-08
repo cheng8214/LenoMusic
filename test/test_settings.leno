@@ -6,6 +6,8 @@
 // ⚠ 会真写配置文件（%APPDATA%\LenoMusicDl\settings.json）：**测完把原值写回去**，不留痕 ✓
 //   （这也是"配置坏了不该让应用起不来"的另一面：读写必须真的经过文件系统才算测过 ✓）
 import strings
+import jsons
+import files
 import "../dl_settings.leno" as cfg
 use cfg.DlSettings
 
@@ -34,11 +36,61 @@ main() {
     cfg.save(low)
     assert_eq(cfg.load().workers, cfg.WORKERS_MIN)
 
-    // 还原用户原来的设置
+    // ---- 每源条数记忆（2026-10-08 ✓）----
+    DlSettings lim = new DlSettings()
+    lim.limit = 35
+    assert_eq(cfg.save(lim), true)
+    assert_eq(cfg.load().limit, 35)
+
+    // 越界值同样"落盘前钳住"（与 workers 一个口径 ✓）
+    DlSettings lw = new DlSettings()
+    lw.limit = 999
+    cfg.save(lw)
+    assert_eq(cfg.load().limit, cfg.LIMIT_MAX)
+    DlSettings ll = new DlSettings()
+    ll.limit = -3
+    cfg.save(ll)
+    assert_eq(cfg.load().limit, cfg.LIMIT_MIN)
+
+    // ---- 音源勾选记忆（2026-10-08 ✓）----
+    //   重点是**真数组**过一遍文件（写 JSON 数组 + 读回按仓库范式逐元素取 ✓）
+    //   ⚠ `sources` 与 `sourcesSet` 要一起给（应用侧 persist_settings 就是一起给的 ✓）
+    DlSettings src = new DlSettings()
+    src.sources = ["kuwo", "qq"]
+    src.sourcesSet = true
+    assert_eq(cfg.save(src), true)
+    DlSettings b2 = cfg.load()
+    assert_eq(b2.sourcesSet, true)
+    assert_eq(b2.sources.len(), 2)
+    assert_eq(b2.sources[0], "kuwo")
+    assert_eq(b2.sources[1], "qq")
+    assert_eq(cfg.sources_has(b2.sources, "qq"), true)
+    assert_eq(cfg.sources_has(b2.sources, "netease"), false)
+
+    // 空数组 = "一个都不要"，但**存过** ⇒ 不能回落成"没存过" ✗（否则下次启动又全勾上 ✓）
+    DlSettings none = new DlSettings()
+    none.sources = []
+    none.sourcesSet = true
+    cfg.save(none)
+    DlSettings b3 = cfg.load()
+    assert_eq(b3.sourcesSet, true)
+    assert_eq(b3.sources.len(), 0)
+
+    // ---- "从没存过勾选"必须**原样读回**（2026-10-08）----
+    //   否则新装用户第一次保存（哪怕只改了线程数）就会把出厂默认"音源全勾"变成"全不勾" ✗
+    DlSettings fresh = new DlSettings()          // sourcesSet 默认 false
+    cfg.save(fresh)
+    DlSettings fb = cfg.load()
+    assert_eq(fb.sourcesSet, false)              // 仍是"没存过" ⇒ 应用会走默认全勾 ✓
+    assert_eq(fb.sources.len(), 0)
+
+    // 还原用户原来的设置（字段级 ✓；因为不补写 sources 键，默认行为也不会被改掉 ✓）
     cfg.save(keep)
     DlSettings fin = cfg.load()
     assert_eq(fin.workers, keep.workers)
     assert_eq(fin.lyric, keep.lyric)
+    assert_eq(fin.limit, keep.limit)
+    assert_eq(fin.sourcesSet, keep.sourcesSet)
 
     print("test_settings passed")
 }

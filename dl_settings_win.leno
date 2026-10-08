@@ -65,7 +65,11 @@ struct SettingsDialog {
         })
         cancelBtn.on_click(func() { finish(false) })
         okBtn.on_click(func() {
-            DlSettings s = new DlSettings()
+            // ⚠⚠ 必须**从当前配置起手**再改这两项 ✓（2026-10-08）：
+            //   先前写的是 `new DlSettings()` ✗ —— 那时结构里只有 workers/lyric ⇒ 正好没事 ✓
+            //   但结构里后来又加了"每源条数 / 音源勾选"⇒ 从零起手保存一次就把它们**抹成默认** ✗
+            //   （弹窗只管这两项，其余的"读进来再原样带过去" = 读-改-写 ✓）
+            DlSettings s = cfg.load()
             s.workers = cfg.clamp_workers(_int(spin.get_text()))
             s.lyric = lyr.is_checked()
             if cfg.save(s) {
