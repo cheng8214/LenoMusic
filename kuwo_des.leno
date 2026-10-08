@@ -1,6 +1,6 @@
 // kuwo_des.leno — 酷我官方接口要用的 DES 变体（encryptquery）
 //
-// 逐行移植 musicdl/modules/utils/kuwoutils.py 的 KuwoMusicClientUtils：
+// 算法：
 //   encryptquery(query) = base64( crypt(utf8(query), SECRET_KEY_SONG, mode=0) )
 //
 // 这不是标准 DES —— 是酷我用的"小端位序"变体，两点与标准 DES 不同：
@@ -10,7 +10,7 @@
 //      （MATRIXNSBOX[b][ (R >> (b*8)) & 0xFF ]，行数只有 64 却不会越界）。
 //      这一点是移植时最容易误判成 bug 的地方 —— 我核对过全部 8 个字节位置都成立。
 //
-// 校验：金标向量来自 Python 侧 kuwoutils.py 的实际输出，见文件末尾注释。
+// 校验：金标向量见文件末尾注释。
 import strings
 
 const MASK32 = 0xFFFFFFFF
@@ -200,7 +200,7 @@ export func encryptquery(string query): string {
     return strings.to_base64(strings.from_bytes(cryptbytes(strings.to_bytes(query), 0)))
 }
 
-// 金标向量（Python 侧 kuwoutils.py 实际输出，移植后应逐字节一致）：
+// 金标向量（实现改动后应逐字节一致）：
 //   "A"           -> 95107a178705ab6e                      -> lRB6F4cFq24=
 //   "ABCDEFG"     -> 73bdbc82ee419139                      -> c728gu5BkTk=
 //   "ABCDEFGH"    -> a0f03aec7f26f6f46a63488853e41dd1      -> oPA67H8m9vRqY0iIU+Qd0Q==

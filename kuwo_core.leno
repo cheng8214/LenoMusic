@@ -1,10 +1,9 @@
 ﻿// kuwo_core.leno — 酷我音乐核心（搜索 / 取直链 / 下载）
 //
-// 对标 Python 版 musicdl 的 musicdl/modules/sources/kuwo.py：
 //   ① 搜索：走**官方**接口 http://www.kuwo.cn/search/searchMusicBykeyWord
-//      （参数集与 musicdl 的 _constructsearchurls 对齐：vipver/client/ft/cluster/strategy/
+//      （参数集：vipver/client/ft/cluster/strategy/
 //        encoding/rformat/mobi/issubtitle/show_copyright_off/pn/rn/all）
-//   ② 取直链：按 musicdl 的 l2 优先级（nxinxz → haitangw 兜底），都返回 JSON 的 data.url
+//   ② 取直链：按优先级（nxinxz → haitangw 兜底），都返回 JSON 的 data.url
 //   ③ 下载：libcurl（LenoWeb 的 downloadResume，自带续传与低速超时）
 //
 // 约定：本文件**不 print、不含 main()、不解析命令行参数** ⇒ 可被 CLI 与 GUI 共用
@@ -22,7 +21,7 @@ const SEARCH_BASE = "http://www.kuwo.cn/search/searchMusicBykeyWord"
 const FILE_SAFE_CHARS = "\\/:*?\"<>|"
 
 // ==================== SongInfo ====================
-// 对标 musicdl 的 SongInfo（只保留 CLI 用得到的字段）
+// SongInfo（只保留 CLI 用得到的字段）
 export struct SongInfo {
     string id = ""          // MUSICRID 去掉 "MUSIC_" 前缀
     string name = ""        // SONGNAME
@@ -264,7 +263,7 @@ export func search(HttpClient client, string keyword, int limit): Array[SongInfo
 // ① 官方 mobi.s：查询串要 DES 加密（见 kuwo_des.leno），不依赖任何第三方 API
 //    响应是纯文本，形如：
 //      format=flac\n bitrate=2000\n url=http://kw-er.kuwo.cn/.../xxx.flac?bitrate$2000&format$flac&...
-//    参数之间用 '$' 分隔 ⇒ 取到第一个 '$' 为止（与 musicdl 的 re.search(r'http[^\s$"]+') 等价）
+//    参数之间用 '$' 分隔 ⇒ 取到第一个 '$' 为止
 func extracturlfrommobi(string body): string {
     Array[string] lines = body.lines()
     for lines to rawline {
@@ -301,7 +300,7 @@ export func officialurl(string songid, string fmt): string {
     return link
 }
 
-// ② 第三方兜底（musicdl 的 l2 优先级）：nxinxz → haitangw
+// ② 第三方兜底：nxinxz → haitangw
 func thirdpartyurl(HttpClient client, string songid): string {
     Array[string] apis = [
         "http://music.nxinxz.com/kw.php?id=" + songid + "&level=lossless&type=json",

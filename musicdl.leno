@@ -1,4 +1,4 @@
-// musicdl.leno — 音乐下载器 CLI（对标 Python 版 musicdl 的 scripts/download_music.py）
+// musicdl.leno — 音乐下载器 CLI
 //
 // 用法：
 //   build\leno.exe musicdl.leno 周杰伦 晴天           # 搜索并下载第 1 首（默认连歌词一起下）
@@ -135,7 +135,7 @@ main() {
     int limit = DEFAULT_LIMIT
     string outdir = ""
     bool searchonly = false
-    bool wantlyric = true          // 默认连歌词一起下（与 musicdl 的行为一致）
+    bool wantlyric = true          // 默认连歌词一起下
     bool lyriconly = false
     Array[string] words = []
 

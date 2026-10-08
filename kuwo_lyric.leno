@@ -1,7 +1,7 @@
 // kuwo_lyric.leno — 酷我歌词（官方 newlyric.lrc 接口）
 //
-// 对标 musicdl 的 musicdl/modules/utils/kuwoutils.py：
-//   buildlyricsparams() → GET http://newlyric.kuwo.cn/newlyric.lrc?<base64> → decodelyrics()
+// 流程：
+//   拼参数 → GET http://newlyric.kuwo.cn/newlyric.lrc?<base64> → 解码
 //
 // 请求参数（明文，UTF-8）：
 //   user=12345,web,web,web&requester=localhost&req=1&rid=MUSIC_<rid>

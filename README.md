@@ -1,8 +1,6 @@
 # LenoMusic — 音乐下载器（LenoLang 版）
 
 酷我音源的音乐搜索 / 试听 / 下载工具，**GUI 与 CLI 两个入口共用同一套引擎**。
-逐行对标 Python 版 [musicdl](https://github.com/CharlesPikachu/musicdl) 的
-`modules/sources/kuwo.py` 与 `modules/utils/kuwoutils.py`（搜索、取直链、歌词加密与解码）。
 
 > 本仓库是从 [LenoLang](https://github.com/cheng8214/LenoLang) 的
 > `leno_gui/应用/音乐下载器/` 用 `git subtree` 切出来的**镜像**：
@@ -121,4 +119,8 @@ leno.exe musicdl.leno --help
 
 ## 九、许可
 
-MIT —— 与 [LenoLang](https://github.com/cheng8214/LenoLang) 主仓库一致，见 `LICENSE`。
+本目录**大部分**代码与 [LenoLang](https://github.com/cheng8214/LenoLang) 主仓库一致，采用 MIT。
+
+⚠ 例外：酷我接口的**协议层**（`kuwo_des.leno` 的加密变体）来自第三方实现，
+该上游采用 **PolyForm Noncommercial License 1.0.0 —— 仅限非商业用途**，版权归其作者所有。
+⇒ 商业使用前请自行替换或重写这一层，或向该上游取得授权。
