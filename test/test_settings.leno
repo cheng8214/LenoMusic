@@ -5,9 +5,6 @@
 //
 // ⚠ 会真写配置文件（%APPDATA%\LenoMusicDl\settings.json）：**测完把原值写回去**，不留痕 ✓
 //   （这也是"配置坏了不该让应用起不来"的另一面：读写必须真的经过文件系统才算测过 ✓）
-import strings
-import jsons
-import files
 import "../dl_settings.leno" as cfg
 use cfg.DlSettings
 
