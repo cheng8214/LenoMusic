@@ -7,6 +7,11 @@
 > 源码与提交历史都在，但**开发仍在主仓库进行**，这里只做同步。
 > 提 issue / PR 请到主仓库。
 
+> **只想直接用？** 到 [Releases](../../releases) 下载 `LenoMusic.exe` —— 单文件，
+> 图标 / 原生库 / 资源全内嵌，目标机器**不需要装 LenoLang**（也不需要装 SDL3），
+> 双击即用（首次运行会自动把依赖解包到用户缓存目录）。
+> 下面是"从源码跑"与"自己打包"的方式。
+
 ## 一、先看这段：运行需要 LenoLang 运行时
 
 本仓库**只有源码**，不含运行时。`leno.exe` / `leno_vm.exe` 与 `leno_module/`
@@ -120,7 +125,3 @@ leno.exe musicdl.leno --help
 ## 九、许可
 
 本目录**大部分**代码与 [LenoLang](https://github.com/cheng8214/LenoLang) 主仓库一致，采用 MIT。
-
-⚠ 例外：酷我接口的**协议层**（`kuwo_des.leno` 的加密变体）来自第三方实现，
-该上游采用 **PolyForm Noncommercial License 1.0.0 —— 仅限非商业用途**，版权归其作者所有。
-⇒ 商业使用前请自行替换或重写这一层，或向该上游取得授权。
