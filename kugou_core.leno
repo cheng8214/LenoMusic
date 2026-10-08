@@ -21,10 +21,17 @@
 //      ⇒ 取第一个非空（upstream 的 `['url'] or ['backup_url'] or ['mp3Url']` 就是这个意思 ✓）
 //   ④ PowerShell 侧测试时会误判：`mobilecdn.kugou.com` 的证书 .NET 不认（TLS 报错），
 //      而 libcurl（LenoWeb）关掉校验就能通 ⇒ **别拿 PS 的结果断定接口挂了** ✓
+//      ★ 同款坑（2026-10-08 又撞上一次）：第三方兜底给的是 `fs.youthandroid2.kugou.com`，
+//        Windows 的 schannel 直接报 `SEC_E_WRONG_PRINCIPAL` ⇒ curl/PS 一律测不通，
+//        而 LenoWeb（libcurl + setSSLVerify(false)）照样 206 拿到真 flac ✓
+//   ⑤ **三档都不可下（付费曲）时走第三方聚合接口**（见 thirdparty.leno 头部）：
+//      上游实测酷狗 flac 30/29 MB 就是这条路拿的 ⇒ 搜索末尾对这些行**逐首试一次**，
+//      成功就把 ext/体积/直链一起写进行里（第 10 项 = 直链，见 dl_engine.F_URL ✓）
 import jsons
 import strings
 import "Crypto" as crypto
 import "web_net" as net
+import "./thirdparty.leno" as thirdparty
 
 use net.(HttpClient)
 use net.(Response)
@@ -35,7 +42,12 @@ const CDN_API = "https://trackercdn.kugou.com/i/v2/"
 
 export func useragent(): string { return UA }
 
-// 酷狗不需要特殊请求头（不像网易要 Referer）；留着这个空函数是为了三个源在引擎里形状一致 ✓
+// 酷狗不需要特殊请求头（不像网易/QQ 要 Referer）；留着这两个空实现是为了各源在引擎里形状一致 ✓
+export func headers(): Array[string] {
+    Array[string] out = []
+    return out
+}
+
 export func prepare(HttpClient client) {
     client.setTimeout(20000)
 }
@@ -123,9 +135,28 @@ export func searchrows(HttpClient client, string keyword, int limit): Array[Arra
         row.add(fmtsize(sizeb))
         row.add(_str(sizeb))
         row.add("kugou")
+        row.add("")             // 直链（第 10 项）：搜索末尾由第三方补上 —— 见头部 ⑤ / dl_engine.F_URL
         rows.add(row)
     }
+
     return rows
+}
+
+// 对**一行**补第三方聚合直链（原地改 ext / 体积 / 直链）；拿不到就保持原样 ✓
+//   为什么从 searchrows 里拧出来：付费曲每条要串 1~2 次请求 ⇒ 交给 dl_engine.probe_rows 并行 ✓
+//   免费曲**不动**：官方 CDN 已经给 flac，不必再发一次请求（省时且不改变既有行为 ✓）
+//   拿不到就保持原样（列表留空 = 下不了 ✓）
+export func proberow(HttpClient client, Array[string] row) {
+    if row[5] != "" { return }
+    Array[string] tp = thirdparty.resolve(client, "kugou", row[0])
+    if tp.len() < 3 { return }
+    row[5] = tp[1]
+    int tb = _int_or(tp[2], 0)
+    if tb > 0 {
+        row[6] = fmtsize(tb)
+        row[7] = _str(tb)
+    }
+    row[9] = tp[0]
 }
 
 // ==================== ② 取直链 ====================

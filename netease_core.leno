@@ -23,10 +23,15 @@
 //      翻唱通常可下 ⇒ 所以搜索后紧跟**一次批量**取直链，把体积/格式/可下性一次补齐，
 //      用户在列表里就看得见"下不了"，而不是点了下载才失败 ✓✓
 //   ⑤ 批量返回**顺序与请求不一致** ⇒ 必须按 id 归位，不能按下标对齐 ✗
+//   ⑥ **无损只能走第三方聚合接口**（2026-10-08 用户实测上游 musicdl 后定的口径）：
+//      未登录态下官方接口永远只给 320k mp3 ⇒ flac 全部来自 thirdparty.leno
+//      （网易 flac 113 MB 实测到手 ✓）。所以搜索末尾会**逐首试一次第三方**，
+//      成功就把 ext/体积/直链一起写进行里（第 10 项 = 直链，见 dl_engine.F_URL ✓）
 import jsons
 import strings
 import "web_net" as net
 import "./netease_crypto.leno" as wc
+import "./thirdparty.leno" as thirdparty
 
 use net.(HttpClient)
 use net.(Response)
@@ -40,8 +45,18 @@ const LEVEL = "exhigh"          // standard=128k / exhigh=320k（lossless 未登
 export func useragent(): string { return UA }
 
 // 网易要的请求头（Referer 必需；Content-Type 用表单类型 —— curl 的 POSTFIELDS 默认就是它 ✓）
+//   ★ 2026-10-08：改成"导出头表 + 调用方 replaceHeaders(headers())"——
+//     多音源共用一个客户端时，addHeaders 会把网易的 Referer 和 QQ 的 y.qq.com Referer **叠成两个** ✗
+//     ⇒ 统一由 dl_engine.preparefor 每首歌/每个音源重置头表 ✓
+export func headers(): Array[string] {
+    Array[string] out = []
+    out.add("Referer: " + BASE + "/")
+    out.add("Content-Type: application/x-www-form-urlencoded")
+    return out
+}
+
 export func prepare(HttpClient client) {
-    client.addHeaders(["Referer: " + BASE + "/", "Content-Type: application/x-www-form-urlencoded"])
+    client.addHeaders(headers())
 }
 
 // ==================== 小工具 ====================
@@ -133,6 +148,7 @@ export func searchrows(HttpClient client, string keyword, int limit): Array[Arra
         row.add("")             // sizeText
         row.add("0")            // sizeBytes
         row.add("netease")      // 音源标记 ✓
+        row.add("")             // 直链（第 10 项）：搜索末尾由第三方补上 —— 见头部 ⑥ / dl_engine.F_URL
         rows.add(row)
         ids.add(sid)
     }
@@ -151,7 +167,26 @@ export func searchrows(HttpClient client, string keyword, int limit): Array[Arra
         }
         k = k + 1
     }
+
     return rows
+}
+
+// 对**一行**补第三方聚合直链（原地改 ext / 体积 / 直链）；拿不到就保持原样 ✓
+//   为什么从 searchrows 里拧出来：这一句在 10 条结果上要串 10~20 次请求（实测 ≈ 11 s）✗
+//   ⇒ 交给 dl_engine.probe_rows 分片**并行**跑（每行仍是一条独立请求，顺序无所谓 ✓）
+//   ★ 直链**写进行里**（下标 9）：qinglvai 对游客每日只给 3 首 ⇒ 搜索已把配额用掉，
+//     下载时再取一次必然失败 ⇒ dl_engine 直接拿行里的直链下 ✓
+//   ★ 拿不到就**保持官方结果**：有 mp3 体积的行照旧可下 ⇒ 第三方全挂也不会比以前差 ✓
+export func proberow(HttpClient client, Array[string] row) {
+    Array[string] tp = thirdparty.resolve(client, "netease", row[0])
+    if tp.len() < 3 { return }
+    row[5] = tp[1]                  // ext 按**直链后缀**（flac / 兜底的 mp3 ✓）
+    int tb = _int_or(tp[2], 0)
+    if tb > 0 {
+        row[6] = fmtsize(tb)
+        row[7] = _str(tb)
+    }
+    row[9] = tp[0]
 }
 
 // id → 可下体积（拿不到直链的 id 不进表 ⇒ 列表里显示空白 = 这首下不了）

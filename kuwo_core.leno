@@ -56,6 +56,12 @@ export struct SongInfo {
 // ==================== 小工具 ====================
 export func useragent(): string { return UA }
 
+// 酷我不需要任何特殊请求头（引擎用 replaceHeaders(headers()) 重置头表 ⇒ 形状统一 ✓）
+export func headers(): Array[string] {
+    Array[string] out = []
+    return out
+}
+
 export func formatduration(int secs): string {
     if secs <= 0 { return "-:-" }
     return _str(secs / 60) + ":" + twodigits(secs % 60)

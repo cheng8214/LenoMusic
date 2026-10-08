@@ -1,0 +1,267 @@
+// qq_crypto.leno — QQ 音乐的**设备指纹（QIMEI36）注册** + 加密原语
+//
+// 为什么非要有它（2026-10-08 实测，别当猜测）：
+//   QQ 的搜索接口 `musicu.fcg` **必须带有效 QIMEI36**才给数据 ——
+//     带：35 KB 真结果（20 个歌曲 mid）；不带：2.2 KB 空壳、item_song 为空 ✗
+//   而上游 musicdl 里那个"公开兜底值"会**时好时坏**（多人在用 ⇒ 被限流 ⇒ 偶发空结果 ✗）
+//   ⇒ 自己注册一个设备指纹才是稳的。
+//
+// 注册协议（三步；材料全部来自 musicdl 的 modules/utils/qqutils.py，都是公开值 ✓）：
+//   ① crypt_key / nonce：各 16 个随机字符（字符集 "adbcdef1234567890"）
+//   ② key    = base64( RSA_PKCS1v15(crypt_key) )        ← 1024 位公钥，e=65537
+//      params = base64( AES-128-CBC(key=crypt_key, iv=crypt_key, PKCS7, 设备指纹 JSON) )
+//   ③ sign   = md5(key + params + str(ts*1000) + nonce + SECRET + '{"appKey":"…"}')
+//      POST 到 api.tencentmusic.com，请求头里再带一个 md5(appid + 盐 + ts) 的 sign ✓
+//   响应是**双重编码**的 JSON：外层 data 是字符串，再解析一次才有 q16 / q36 ✓
+//   ⇒ 注册失败就回落上游那个公开兜底值（能跑，但可能偶发空结果 ✓ 有日志可查）
+import strings
+import jsons
+import rands
+import times
+import "Crypto" as crypto
+import "web_net" as net
+
+use net.(Response, HttpClient)
+
+// ==================== 上游公开常量 ====================
+
+const SECRET = "ZdJqM15EeO2zWc08"
+const APP_KEY = "0AND0HD6FE4HY80F"
+const PROXY = "https://api.tencentmusic.com/tme/trpc/proxy"
+const PROXY_APPID = "qimei_qq_android"
+const PROXY_SIGN_SALT = "qimei_qq_androidpzAuCmaFAaFaHrdakPjLIEqKrGnSOOvH"
+const APP_VERSION = "13.2.5.8"
+const RAND_CHARS = "adbcdef1234567890"
+
+// QQ 客户端内置的 1024 位 RSA 公钥模数（公开值；公钥不是密钥 ✓）
+const MODULUS_HEX = "c4231830a2eb5fc2827170641e79d80fec51bda9a22e4b4ab37d1f205a4ae44d928cda25879f66a3429051663312a127faf8a246bdaaf63918417e90d7c95b5908aa6a2d0f852e4a6770294a548ac1c2fe8f1f252fb826f4ac86ab9a00e7ce47d002a56e7c4b51eb889acc60ca6adbc9f72e81f4d31b1dd7464805264530ab1d"
+const PUB_EXP = 65537
+
+// 上游在注册失败时用的兜底值（能用但不稳 ⇒ 只作最后手段 ✓）
+export const FALLBACK_Q36 = "6c9d3cd110abca9b16311cee10001e717614"
+
+// ==================== 大整数（照 netease_crypto 的写法 ✓）====================
+
+func powmod(int base, int exp, int n): int {
+    int result = 1
+    base = base % n
+    while exp > 0 {
+        if exp % 2 == 1 { result = (result * base) % n }
+        exp = exp >> 1
+        base = (base * base) % n
+    }
+    return result
+}
+
+func hex2int(string hex): int {
+    Array[int] bytes = crypto.hex_to_bytes(hex)
+    int acc = 0
+    for bytes to b { acc = acc * 256 + b }
+    return acc
+}
+
+func int2hex(int value): string {
+    Array[int] raw = []
+    int x = value
+    while x > 0 {
+        raw.add(x % 256)
+        x = x / 256
+    }
+    Array[int] rev = []
+    int i = raw.len() - 1
+    while i >= 0 {
+        rev.add(raw[i])
+        i = i - 1
+    }
+    return crypto.bytes_to_hex(rev)
+}
+
+func padleft(string s, int width): string {
+    string out = s
+    while out.len() < width { out = "0" + out }
+    return out
+}
+
+// ==================== 加密原语 ====================
+
+// RSA PKCS#1 v1.5：EM = 00 || 02 || PS(非零随机，≥8 字节) || 00 || M，整块 = 128 字节（1024 位）
+//   注意：这与网易那种"直接把字符串当大整数"的做法不同 —— 这里有标准填充 ✓
+func rsapkcs1(string msg): string {
+    Array[int] m = strings.to_bytes(msg)
+    int pslen = 128 - 3 - m.len()
+    if pslen < 8 { return "" }
+    Array[int] em = []
+    em.add(0)
+    em.add(2)
+    int i = 0
+    while i < pslen {
+        int b = rands.ints(1, 255)              // 非零填充字节
+        em.add(b)
+        i = i + 1
+    }
+    em.add(0)
+    for m to b { em.add(b) }
+    int v = hex2int(crypto.bytes_to_hex(em))
+    return padleft(int2hex(powmod(v, PUB_EXP, hex2int(MODULUS_HEX))), 256)
+}
+
+// AES-128-CBC（Crypto 内部已 PKCS7 ✓），**IV 就是 key**（上游 `modes.CBC(key)` ✓）
+func aesb64(string text, string key): string {
+    Array[int] ct = crypto.aes128_cbc_encrypt_str(strings.to_bytes(key), strings.to_bytes(key), text)
+    return strings.to_base64(strings.from_bytes(ct))
+}
+
+// ==================== 设备指纹 JSON ====================
+
+// JSON 字符串值转义（关键词/路径里带引号时不至于把 payload 拼坏）
+func jsonescape(string s): string {
+    string out = ""
+    int i = 0
+    while i < s.len() {
+        string c = s[i]
+        if c == "\"" { out = out + "\\\"" }
+        else if c == "\\" { out = out + "\\\\" }
+        else { out = out + c }
+        i = i + 1
+    }
+    return out
+}
+
+// 15 位 IMEI（末位是校验位，算法照上游；纯粹为了"像真机" ✓）
+func randomimei(): string {
+    string head = ""
+    int i = 0
+    while i < 14 {
+        head = head + _str(rands.ints(0, 9))
+        i = i + 1
+    }
+    int sum = 0
+    i = 0
+    while i < head.len() {
+        int d = _int(head[i])
+        if i % 2 == 0 {
+            int t = d * 2
+            sum = sum + t / 10 + t % 10
+        } else {
+            sum = sum + d
+        }
+        i = i + 1
+    }
+    return head + _str(sum * 9 % 10)
+}
+
+// beaconIdSrc：40 段 "k1:…;k2:…;" —— 照上游格式（服务端基本不校验，但保持形状一致 ✓）
+func randombeacon(): string {
+    string stamp = "2026-10-01"
+    string r1 = _str(rands.ints(100000, 999999))
+    string r2 = _str(rands.ints(100000000, 999999999))
+    string out = ""
+    int i = 1
+    while i <= 40 {
+        if i == 1 or i == 2 or i == 13 or i == 14 or i == 17 or i == 18 or i == 21 or i == 22 or i == 25 or i == 26 or i == 29 or i == 30 or i == 33 or i == 34 or i == 37 or i == 38 {
+            out = out + "k" + _str(i) + ":" + stamp + r1 + "." + r2
+        } else if i == 3 {
+            out = out + "k3:0000000000000000"
+        } else if i == 4 {
+            out = out + "k4:" + rands.str(16, "123456789abcdef")
+        } else {
+            out = out + "k" + _str(i) + ":" + _str(rands.ints(0, 9999))
+        }
+        out = out + ";"
+        i = i + 1
+    }
+    return out
+}
+
+// 设备指纹 JSON（字段名/取值照上游 randompayloadbydevice ✓）
+func payloadjson(): string {
+    string androidid = crypto.bytes_to_hex(strings.to_bytes(rands.str(8, "0123456789abcdef")))
+    string reserved = "{\"harmony\":\"0\",\"oz\":\"UhYmelwouA+V2nPWbOvLTgN2/m8jwGB+yUB5v9tysQg=\",\"oo\":\"Xecjt+9S1+f8Pz2VLSxgpw==\",\"kelong\":\"0\",\"uptimes\":\"2026-10-08 12:00:00\",\"clone\":\"0\",\"containe\":\"\",\"multiUser\":\"0\",\"bod\":\"Xiaomi\",\"dv\":\"sagit\",\"firstLevel\":\"\",\"manufact\":\"Xiaomi\",\"name\":\"MI 6\",\"host\":\"se.infra\",\"kernel\":\"Linux 5.4.0-54-generic\"}"
+    string out = "{"
+    out = out + "\"androidId\":\"" + androidid + "\","
+    out = out + "\"platformId\":1,"
+    out = out + "\"appKey\":\"" + APP_KEY + "\","
+    out = out + "\"appVersion\":\"" + APP_VERSION + "\","
+    out = out + "\"beaconIdSrc\":\"" + randombeacon() + "\","
+    out = out + "\"brand\":\"Xiaomi\","
+    out = out + "\"channelId\":\"10003505\","
+    out = out + "\"cid\":\"\","
+    out = out + "\"imei\":\"" + randomimei() + "\","
+    out = out + "\"imsi\":\"\","
+    out = out + "\"mac\":\"\","
+    out = out + "\"model\":\"MI 6\","
+    out = out + "\"networkType\":\"unknown\","
+    out = out + "\"oaid\":\"\","
+    out = out + "\"osVersion\":\"Android 10,level 29\","
+    out = out + "\"qimei\":\"\","
+    out = out + "\"qimei36\":\"\","
+    out = out + "\"sdkVersion\":\"1.2.13.6\","
+    out = out + "\"targetSdkVersion\":\"33\","
+    out = out + "\"audit\":\"\","
+    out = out + "\"userId\":\"{}\","
+    out = out + "\"packageId\":\"com.tencent.qqmusic\","
+    out = out + "\"deviceType\":\"Phone\","
+    out = out + "\"sdkName\":\"\","
+    out = out + "\"reserved\":\"" + jsonescape(reserved) + "\""
+    out = out + "}"
+    return out
+}
+
+// ==================== 注册 ====================
+
+// ★ 实测结论（2026-10-08，逐项对照上游后仍失败 ⇒ 记录在案，别再重走一遍）：
+//   本函数发出的报文与上游 obtainqimei **逐项一致**（RSA PKCS#1 v1.5 / AES key=IV+PKCS7 /
+//   md5(key+params+ts*1000+nonce+SECRET+extra) / 头部 md5(appid+盐+ts) / 双重编码响应解析），
+//   但服务端一律回 `{"code":-30000,"msg":"接口鉴权失败"}` ✗
+//   ⇒ 最可能是**服务端已轮换那个 RSA 公钥或改了鉴权**（上游代码里那句 `except:` 直接兜底硬编码
+//     q36 也正是为这种情况准备的 ✓）
+//   ⇒ 保留这段实现（哪天恢复就能用 ✓），失败即回落 FALLBACK_Q36；搜索侧用**空结果重试**兜住抖动 ✓
+
+// 返回 QIMEI36；失败返回空串（调用方自行回落兜底值 ✓）
+export func registerqimei(): string {
+    string cryptkey = rands.str(16, RAND_CHARS)
+    string nonce = rands.str(16, RAND_CHARS)
+    var ts = times.now()                    // ★ times.now() = Unix 秒 ✓（times.ms() 是**单调**毫秒，不是墙钟 ✗ 踩过）
+    string rsah = rsapkcs1(cryptkey)
+    if rsah == "" { return "" }
+    string key = strings.to_base64(strings.from_bytes(crypto.hex_to_bytes(rsah)))
+    string params = aesb64(payloadjson(), cryptkey)
+    string extra = "{\"appKey\":\"" + APP_KEY + "\"}"
+    string sign = crypto.md5(key + params + _str(ts * 1000) + nonce + SECRET + extra)
+    string hsign = crypto.md5(PROXY_APPID + PROXY_SIGN_SALT + _str(ts))
+
+    HttpClient client = net.createClient()
+    if not client.isOk() { return "" }
+    client.setSSLVerify(false, false)
+    client.setTimeout(20000)
+    client.replaceHeaders([
+        "Host: api.tencentmusic.com",
+        "method: GetQimei",
+        "service: trpc.tme_datasvr.qimeiproxy.QimeiProxy",
+        "appid: " + PROXY_APPID,
+        "sign: " + hsign,
+        "user-agent: QQMusic",
+        "timestamp: " + _str(ts),
+        "Content-Type: application/json"
+    ])
+    string body = "{\"app\":0,\"os\":1,\"qimeiParams\":{\"key\":\"" + key + "\",\"params\":\"" + params + "\",\"time\":\"" + _str(ts) + "\",\"nonce\":\"" + nonce + "\",\"sign\":\"" + sign + "\",\"extra\":\"" + jsonescape(extra) + "\"}}"
+    Response resp = client.post(PROXY, body)
+    string q = ""
+    if resp.ok() {
+        var root = jsons.decode(resp.body) as Dict[string, any]
+        if root != null {
+            // 外层 data 是**字符串**，再解析一次才有 q16/q36 ✓
+            string inner = jsons.get_str(root, "data", "")
+            if inner != "" {
+                var mid = jsons.decode(inner) as Dict[string, any]
+                if mid != null {
+                    var d = mid["data"] as Dict[string, any]
+                    if d != null { q = jsons.get_str(d, "q36", "") }
+                    else { q = jsons.get_str(mid, "q36", "") }
+                }
+            }
+        }
+    }
+    client.close()
+    return q
+}

@@ -1,0 +1,74 @@
+// qq_lyric.leno — QQ 音乐歌词（LRC）
+//
+// 接口：GET https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=<mid>&format=json…
+//   · 免登录、免签名 ✓（实测 retcode=0、lyric 字段是 **base64 的 LRC**）
+//   · 必须带 Referer: https://y.qq.com/portal/player.html ✓（与播放页一致）
+//   · 传错 mid ⇒ `{"retcode":1101}`（实测：拿专辑 mid 去问就是这个 ✓）
+//   · 响应里还有个 `trans`（译文），可像网易那样合并 —— 暂时不并，注释里留个记号 ✓
+//
+// songid 是 QQ 的**复合 id**（`<songmid>#<前缀>`，见 qq_core.leno）⇒ 这里只取 "#" 前面那半 ✓
+import strings
+import jsons
+import files
+import "web_net" as net
+
+use net.(Response, HttpClient)
+
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+const LYRIC = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg"
+const REFERER = "https://y.qq.com/portal/player.html"
+const BOM = "\uFEFF"
+
+// 复合 id → 纯 songmid
+func songmid(string songid): string {
+    int h = strings.find(songid, "#")
+    if h < 0 { return songid }
+    return songid.slice(0, h)
+}
+
+// 取歌词文本（已补 BOM；失败/无歌词 ⇒ ""）
+export func fetchlyric(string songid): string {
+    string mid = songmid(songid)
+    if mid == "" { return "" }
+    HttpClient client = net.createClient()
+    if not client.isOk() { return "" }
+    client.setUserAgent(UA)
+    client.addHeaders(["Referer: " + REFERER])
+    client.setTimeout(20000)
+    client.setSSLVerify(false, false)
+    string out = ""
+    try {
+        string url = LYRIC + "?songmid=" + mid + "&format=json&g_tk=5381&loginUin=0&hostUin=0&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq&needNewCode=0"
+        Response resp = client.get(url)
+        if resp.ok() {
+            var root = jsons.decode(resp.body) as Dict[string, any]
+            if root != null and jsons.get_int(root, "retcode", -1) == 0 {
+                string b64 = jsons.get_str(root, "lyric", "")
+                if b64 != "" {
+                    string lrc = strings.from_base64(b64)       // base64 → LRC 文本 ✓
+                    lrc = lrc.replace("\r\n", "\n")
+                    if lrc != "" {
+                        if lrc.starts_with(BOM) { out = lrc }
+                        else { out = BOM + lrc }                // 与网易同口径：统一带 BOM ✓
+                    }
+                }
+            }
+        }
+    } catch e {
+        out = ""
+    }
+    client.close()
+    return out
+}
+
+// 取歌词并写到 targetpath（返回写入字节数；0 = 没有歌词/取失败/写不进去）
+export func savelyric(string songid, string targetpath): int {
+    string text = fetchlyric(songid)
+    if text == "" { return 0 }
+    try {
+        files.write(targetpath, text)
+    } catch e {
+        return 0
+    }
+    return text.byte_len()
+}

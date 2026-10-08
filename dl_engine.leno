@@ -21,9 +21,14 @@ export const int F_SIZETEXT = 6
 export const int F_BYTES = 7
 // 音源标记（2026-10-08 加网易源时新增）：取直链与抓歌词都按它分发到对应音源模块 ✓
 export const int F_SRC = 8
+// 直链（2026-10-08 加第三方聚合接口时新增）：搜索时第三方**已经取回来的直链**，落盘时直接用 ✓
+//   为什么必须带在行里：网易那条 flac 通路（qinglvai）对**游客每日只给 3 首** ⇒
+//   搜索那一次已经吃掉配额，落盘时再取一次必然失败 ✗（实测 42903）
+//   · 空串 / 老行没有第 10 项 ⇒ 回落 `directurl(client, src, id)`（向后兼容 ✓）
+export const int F_URL = 9
 //
 // 进度消息（channel 里的 Array[string]，固定 5 段；kind 在第 0 段）：
-//   ["search", 音源id, 命中数, "",   ""]
+//   ["search", 音源id, 入表条数, 隐藏条数(没有歌曲大小 ⇒ 没入表), ""]
 //   ["serror", "",      "",     "",   原因]
 //   ["resolve",任务序,  "0",    "0",  ""]        取直链中
 //   ["start",  任务序,  "0",    期望字节, 落盘路径]
@@ -47,6 +52,8 @@ import "./netease_core.leno" as netease
 import "./netease_lyric.leno" as netlyric
 import "./kugou_core.leno" as kugou
 import "./kugou_lyric.leno" as kugoulyric
+import "./qq_core.leno" as qq
+import "./qq_lyric.leno" as qqlyric
 
 use net.(Response, HttpClient)
 use kuwo.SongInfo
@@ -90,7 +97,7 @@ export func sources(): Array[Array[string]] {
     out.add(["kuwo", "酷我", "1", "官方 mobi.s 取链（DES 加密）+ 第三方兜底"])
     out.add(["netease", "网易云", "1", "weapi（AES×2 + RSA）；未登录只有 320k mp3，付费曲无直链"])
     out.add(["kugou", "酷狗", "1", "移动端搜索 + CDN 取链（免签名）；免费曲能给 flac，付费曲无直链"])
-    out.add(["qq", "QQ音乐", "0", "待移植"])
+    out.add(["qq", "QQ音乐", "1", "官方 musicu.fcg（需设备指纹 QIMEI36）；免费曲能给 flac，付费曲无直链"])
     out.add(["migu", "咪咕", "0", "待移植"])
     return out
 }
@@ -122,10 +129,51 @@ export func srcid(Array[string] row): string {
     return s
 }
 
+// 行 → 搜索时第三方**已经取回来的直链**（没有第 10 项 / 空串 ⇒ "" = 由调用方现取 ✓ 向后兼容）
+export func songurl(Array[string] row): string {
+    if row.len() <= F_URL { return "" }
+    return row[F_URL]
+}
+
+// 这一行"有没有歌曲大小"——没有就不进结果表（2026-10-08 用户口径：取到的信息里没有大小 ⇒ 别加进 table）
+//   为什么"没有大小"就等于"下不了"：三个音源观测到的口径完全一致 ✓
+//     酷我：MINFO 里没有可用档位 ⇒ 格式/体积都空
+//     网易：搜索后紧跟的那次批量取直链没给 url ⇒ 体积空（见 netease_core 头部 ④）
+//     酷狗：`pay_type*`/`price*`/`*privilege` 判定为付费 ⇒ 体积空（见 kugou_core 头部 ②）
+//   ⇒ 过滤只做在**引擎**这一处（GUI 不各写一套），且必须在 songs 落地**之前**做：
+//      表格行与 songs 是按下标一一对应的（pickchecked/右键都按行号取 songs[i]）
+//      ⇒ 只"隐藏不删"会下错歌 ✗
+export func has_size(Array[string] row): bool {
+    if row.len() <= F_SIZETEXT { return false }
+    if row[F_SIZETEXT] == "" { return false }
+    return _int(row[F_BYTES]) > 0
+}
+
+// 按音源把客户端的 UA 与**请求头表重置**成该源要的那一套
+//   为什么必须 replaceHeaders：`addHeaders` 是追加 ⇒ 多音源共用一个客户端时，
+//   网易的 Referer 会与 QQ 的 y.qq.com Referer **叠成两个实现** ✗；而取音频分片用的
+//   `Range` 头本身也是整表替换 ⇒ 干脆"每次解析前重置一次"，谁都不污染谁 ✓
+export func preparefor(HttpClient client, string src) {
+    if src == "netease" {
+        client.setUserAgent(netease.useragent())
+        client.replaceHeaders(netease.headers())
+    } else if src == "kugou" {
+        client.setUserAgent(kugou.useragent())
+        client.replaceHeaders(kugou.headers())
+    } else if src == "qq" {
+        client.setUserAgent(qq.useragent())
+        client.replaceHeaders(qq.headers())
+    } else {
+        client.setUserAgent(kuwo.useragent())
+        client.replaceHeaders(kuwo.headers())
+    }
+}
+
 // 按音源取直链（空串 = 拿不到）。**唯一**的取直链入口 ⇒ 下载与试听走同一条路 ✓
 export func directurl(HttpClient client, string src, string songid): string {
     if src == "netease" { return netease.getdirecturl(client, songid) }
     if src == "kugou" { return kugou.getdirecturl(client, songid) }
+    if src == "qq" { return qq.getdirecturl(client, songid) }
     return kuwo.getdirecturl(client, songid)
 }
 
@@ -207,63 +255,172 @@ func waitcmd(any cmd): string {
 }
 
 // ==================== ① 搜索 ====================
-// 按勾选的音源逐个搜（当前只有酷我可用），命中行合并返回。
-// 参数只有字符串数组 ⇒ 可安全跨线程 ✓
-export func search_entry(Array[string] srcids, string keyword, int limit, any ch): Array[Array[string]] {
+// ★ 2026-10-08 拆成"两阶段"，只为**并行**（原先一把梭串行：4 源 10 条实测 ≈ 20~25 s ✗）：
+//     阶段 A  `search_source(src, …)`   **一个音源**的官方搜索（1~2 次请求）⇒ 行
+//     阶段 B  `probe_rows(rows)`        一批行逐首问第三方聚合接口（无损直链就在这里）
+//     收尾    `keep_downloadable(rows)` 没有歌曲大小的行**不入表**（= 拿不到直链 ✓ 见 has_size）
+//   ⚠ 过滤必须放在**阶段 B 之后**：付费/原唱曲官方给不出体积（阶段 A 看不到大小），
+//     它们正是靠阶段 B 补上直链才可下的 ⇒ 阶段 A 就过滤会把它们全丢掉 ✗
+//   ⚠ 行的数量与耗时都由第三方请求主导 ⇒ 阶段 B 按**行**切片并行（见 musicdl_gui 的 probe_worker ✓）
+//   ⚠ 每个线程**自己建客户端**：共用会互相覆盖头表（见 preparefor ✓）
+//   ⚠ 线程入口必须是**主脚本文件**的函数（语言硬约束，见 threads.c 的前置校验）
+//      ⇒ 本模块只提供"能被线程调用的纯函数"，起线程一律在 musicdl_gui.leno ✓
+
+// 阶段 A：**一个音源**的官方搜索。进度消息：["search", src, 命中数, 0, ""] / ["serror", src, …]
+//   返回的**不过滤**（没体积的行交给阶段 B 补 ✓）
+export func search_source(string src, string keyword, int limit, any ch): Array[Array[string]] {
     Array[Array[string]] rows = []
     HttpClient client = net.createClient()
     if not client.isOk() {
-        sendmsg(ch, ["serror", "", "", "", "网络客户端初始化失败"])
+        sendmsg(ch, ["serror", src, "", "", "网络客户端初始化失败"])
         return rows
     }
     client.setUserAgent(kuwo.useragent())
     client.setTimeout(20000)
     client.setSSLVerify(false, false)
-    for srcids to src {
-        if src == "kuwo" {
-            // 网络/解析失败 ⇒ kuwo.search 自己返回空列表（不抛异常）；这里再兜一层 try
-            Array[SongInfo] songs = []
-            try {
-                songs = kuwo.search(client, keyword, limit)
-            } catch e {
-                // ⚠ 这里原先是 `_str(e)` ⇒ 界面只会显示 `<object>`，等于把真因扔了（见 B4）
-                sendmsg(ch, ["serror", src, "", "", errmsg(e)])
-            }
-            for songs to s {
-                rows.add(encode(s))
-            }
-            sendmsg(ch, ["search", src, _str(songs.len()), "", ""])
-        } else if src == "netease" {
-            // 网易：weapi 要 Referer（见 netease_core.prepare）；返回的**已经是行**（自带音源标记）
-            //   ⇒ 不必再经 encode ✓。搜索内部已顺带批量补齐体积与"能不能下" ✓
-            netease.prepare(client)
-            Array[Array[string]] nrows = []
-            try {
-                nrows = netease.searchrows(client, keyword, limit)
-            } catch e {
-                sendmsg(ch, ["serror", src, "", "", errmsg(e)])
-            }
-            for nrows to r {
-                rows.add(r)
-            }
-            sendmsg(ch, ["search", src, _str(nrows.len()), "", ""])
-        } else if src == "kugou" {
-            // 酷狗：移动端搜索（免签名）⇒ 三档体积与付费标记搜索时就带回来了，不额外发请求 ✓
-            kugou.prepare(client)
-            Array[Array[string]] krows = []
-            try {
-                krows = kugou.searchrows(client, keyword, limit)
-            } catch e {
-                sendmsg(ch, ["serror", src, "", "", errmsg(e)])
-            }
-            for krows to r {
-                rows.add(r)
-            }
-            sendmsg(ch, ["search", src, _str(krows.len()), "", ""])
+    if src == "kuwo" {
+        // 网络/解析失败 ⇒ kuwo.search 自己返回空列表（不抛异常）；这里再兜一层 try
+        Array[SongInfo] songs = []
+        try {
+            songs = kuwo.search(client, keyword, limit)
+        } catch e {
+            // ⚠ 这里原先是 `_str(e)` ⇒ 界面只会显示 `<object>`，等于把真因扔了（见 B4）
+            sendmsg(ch, ["serror", src, "", "", errmsg(e)])
         }
+        for songs to s {
+            rows.add(encode(s))
+        }
+        sendmsg(ch, ["search", src, _str(songs.len()), "0", ""])
+    } else if src == "netease" {
+        // 网易：weapi 要 Referer（见 netease_core.prepare）；返回的**已经是行**（自带音源标记）
+        //   ⇒ 不必再经 encode ✓。搜索内部已顺带批量补齐体积与"能不能下" ✓
+        preparefor(client, "netease")
+        Array[Array[string]] nrows = []
+        try {
+            nrows = netease.searchrows(client, keyword, limit)
+        } catch e {
+            sendmsg(ch, ["serror", src, "", "", errmsg(e)])
+        }
+        for nrows to r {
+            rows.add(r)
+        }
+        sendmsg(ch, ["search", src, _str(nrows.len()), "0", ""])
+    } else if src == "kugou" {
+        // 酷狗：移动端搜索（免签名）⇒ 三档体积与付费标记搜索时就带回来了，不额外发请求 ✓
+        preparefor(client, "kugou")
+        Array[Array[string]] krows = []
+        try {
+            krows = kugou.searchrows(client, keyword, limit)
+        } catch e {
+            sendmsg(ch, ["serror", src, "", "", errmsg(e)])
+        }
+        for krows to r {
+            rows.add(r)
+        }
+        sendmsg(ch, ["search", src, _str(krows.len()), "0", ""])
+    } else if src == "qq" {
+        // QQ：搜索响应自带各档体积与付费标记 ⇒ 不额外发请求；
+        //   搜索内部带**空结果重试**（公开兜底 q36 偶发空 ⇒ 见 qq_core 头部 ②）
+        preparefor(client, "qq")
+        Array[Array[string]] qrows = []
+        try {
+            qrows = qq.searchrows(client, keyword, limit)
+        } catch e {
+            sendmsg(ch, ["serror", src, "", "", errmsg(e)])
+        }
+        for qrows to r {
+            rows.add(r)
+        }
+        sendmsg(ch, ["search", src, _str(qrows.len()), "0", ""])
     }
     client.close()
     return rows
+}
+
+// 阶段 B：把这一批行**逐首**补第三方聚合直链（原地改 ext/体积/直链 ⇒ 返回值就是同一批行 ✓）
+//   各源的口径由各自的 `proberow` 定（网易/QQ 每行都试、酷狗只试"三档都不可下"的行 ✓）
+//   酷我行是空过（第 8 项当 kuwo ⇒ 没有第三方通路，直接跳过 ⇒ 不发任何请求 ✓）
+export func probe_rows(Array[Array[string]] rows): Array[Array[string]] {
+    if rows.len() == 0 { return rows }
+    HttpClient client = net.createClient()
+    if not client.isOk() { return rows }        // 建不出来 ⇒ 原样返回（保持官方结果 ✓）
+    client.setTimeout(20000)
+    client.setSSLVerify(false, false)
+    string cur = ""
+    int i = 0
+    while i < rows.len() {
+        Array[string] row = rows[i]
+        string src = srcid(row)
+        // 同一片里的行往往同源 ⇒ 只在**换源**时重置头表（重置是整表替换，不必每行都来一遍 ✓）
+        if src != cur {
+            if src == "netease" or src == "qq" or src == "kugou" {
+                preparefor(client, src)
+                cur = src
+            } else {
+                cur = ""
+            }
+        }
+        if src == "netease" {
+            netease.proberow(client, row)
+        } else if src == "qq" {
+            qq.proberow(client, row)
+        } else if src == "kugou" {
+            kugou.proberow(client, row)
+        }
+        i = i + 1
+    }
+    client.close()
+    return rows
+}
+
+// 把行切成 k 份**轮转片**（第 j 份拿 j、j+k、j+2k…）⇒ 交给 k 条线程并行探测 ✓
+//   ★ 必须轮转、**不能切连续片** ✗：行是"按音源分段"的，而各源每行耗时差 3~5 倍
+//     （酷我 0 ms / 网易 ≈ 1 s，见 A8）⇒ 连续片会让某条线程独占全部网易行、其余线程闲着
+//     （实测：连续片 8.06 s，轮转片 6.5 s，k=8 ✓）
+//   ★ 不重不漏是**硬要求**（丢一首＝少一首歌，重一首＝表格与 songs 下标错位 ✗✗）
+//     ⇒ 放在引擎里当纯函数，离线回归能直接压它（见 test/test_parallel_dl.leno ✓）
+export func slice_rows(Array[Array[string]] rows, int k): Array[Array[Array[string]]] {
+    Array[Array[Array[string]]] parts = []
+    int total = rows.len()
+    if k < 1 { k = 1 }
+    if k > total { k = total }
+    int j = 0
+    while j < k {
+        Array[Array[string]] part = []
+        int t = j
+        while t < total {
+            part.add(rows[t])
+            t = t + k
+        }
+        parts.add(part)
+        j = j + 1
+    }
+    return parts
+}
+
+// 收尾：没有歌曲大小的行**不入表**（= 拿不到直链 ✓ 见 has_size 的注释）
+export func keep_downloadable(Array[Array[string]] rows): Array[Array[string]] {
+    Array[Array[string]] out = []
+    for rows to r {
+        if has_size(r) {
+            out.add(r)
+        }
+    }
+    return out
+}
+
+// ★ 串行版"一把梭"（A → B → 过滤）。**GUI 不走这里**（它自己并行跑两阶段 ✓）；
+//   留着是给脚本 / 无界面自检 / 回归测试一个现成入口（CLI 与 GUI 的口径因此只有一份 ✓）
+export func search_entry(Array[string] srcids, string keyword, int limit, any ch): Array[Array[string]] {
+    Array[Array[string]] rows = []
+    for srcids to src {
+        Array[Array[string]] one = search_source(src, keyword, limit, ch)
+        for one to r {
+            rows.add(r)
+        }
+    }
+    probe_rows(rows)
+    return keep_downloadable(rows)
 }
 
 // ==================== ② 分片下载 ====================
@@ -281,26 +438,22 @@ export func search_entry(Array[string] srcids, string keyword, int limit, any ch
 // 返回落盘字节数（>0 成功；<0 失败）
 // ⚠ 本函数**不起线程**（语言硬约束：线程入口必须与调用方同文件 ✓）⇒ 由应用在自己的 worker 里调 ✓
 // src：音源 id（默认 kuwo ⇒ 既有调用点不用改 ✓）
-export func dl_preview(string songId, string outpath, int bytes, any ch, string tag, string src = "kuwo"): int {
+// link：搜索时第三方**已经取回来的直链**（可空 ⇒ 现取；理由同 dl_entry_shard 里那段 ✓）
+export func dl_preview(string songId, string outpath, int bytes, any ch, string tag, string src = "kuwo", string link = ""): int {
     if bytes < 65536 { bytes = 65536 }
     HttpClient client = net.createClient()
     if not client.isOk() { sendmsg(ch, ["fail", tag, "no-client"]); return -1 }
-    if src == "netease" {
-        client.setUserAgent(netease.useragent())
-        netease.prepare(client)
-    } else if src == "kugou" {
-        client.setUserAgent(kugou.useragent())
-        kugou.prepare(client)
-    } else {
-        client.setUserAgent(kuwo.useragent())
-    }
+    // UA 与请求头按音源重置一次（QQ 要 y.qq.com 的 Referer、网易要 music.163.com 的 ✓）
+    preparefor(client, src)
     client.setTimeout(30000)
     client.setSSLVerify(false, false)
 
-    string link = ""
-    try { link = directurl(client, src, songId) } catch e { link = "" }
-    if link == "" { client.close(); sendmsg(ch, ["fail", tag, "no-link"]); return -1 }
-    int n = dl_preview_url(client, link, outpath, bytes, ch, tag)
+    string used = link
+    if used == "" {
+        try { used = directurl(client, src, songId) } catch e { used = "" }
+    }
+    if used == "" { client.close(); sendmsg(ch, ["fail", tag, "no-link"]); return -1 }
+    int n = dl_preview_url(client, used, outpath, bytes, ch, tag)
     client.close()
     return n
 }
@@ -423,8 +576,8 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
         return ["0", _str(mine), "0"]
     }
     client.setUserAgent(kuwo.useragent())
-    // 网易取直链要 Referer（酷我不看它 ⇒ 带上无副作用）；一次带上，两个源共用这个客户端 ✓
-    netease.prepare(client)
+    // 请求头**每首歌解析前会按音源重置**（见 preparefor）⇒ 这里只做初值 ✓
+    preparefor(client, "kuwo")
     client.setTimeout(30000)
     client.setSSLVerify(false, false)
     int i = shard
@@ -457,11 +610,18 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
         }
 
         sendmsg(ch, ["resolve", _str(i), "0", "0", ""])
-        string link = ""
-        try {
-            link = directurl(client, srcid(job), job[0])
-        } catch e {
-            link = ""
+        // ★ 每首歌按**自己的音源**重置 UA 与头表：上一首取分片时写进去的 Range 头/别家 Referer
+        //   不会污染这一首（Range 头是整表替换的写法 ⇒ 必须重置 ✓ 见 preparefor 注释）
+        preparefor(client, srcid(job))
+        // ★ 搜索时第三方**已经把直链取回来了**（下标 9）⇒ 优先用它：网易那条通路对游客
+        //   每日只给 3 首、配额在搜索时就用掉了 ⇒ 这里再取一次必然失败 ✗（见 F_URL 注释 ✓）
+        string link = songurl(job)
+        if link == "" {
+            try {
+                link = directurl(client, srcid(job), job[0])
+            } catch e {
+                link = ""
+            }
         }
         if link == "" {
             fail = fail + 1
@@ -519,6 +679,8 @@ func savelyricsafe(Array[string] job, string lrcout, string src): int {
             n = kugoulyric.savelyric_by(job, lrcout)
         } else if src == "netease" {
             n = netlyric.savelyric(job[0], lrcout)
+        } else if src == "qq" {
+            n = qqlyric.savelyric(job[0], lrcout)
         } else {
             n = lyric.savelyric(job[0], lrcout)
         }

@@ -1,0 +1,274 @@
+// thirdparty.leno — 第三方聚合接口取直链（上游 musicdl 的 `_parsewiththirdpartapis` 的 Leno 版）
+//
+// ★ 为什么需要它（2026-10-08 用户在上游 musicdl 上实测复现后定的口径）：
+//   官方接口在**未登录 / 未开会员**时根本拿不到无损 ——
+//     网易 weapi      → 只有 320k mp3；付费/原唱曲连 mp3 都不给（code=404）
+//     QQ musicu       → F000(flac) 的 purl 为空，只能逐级回落到 M800/M500
+//     酷狗 trackercdn → 免费曲给 flac，付费曲回 status=2
+//   而"上游能拿到 flac"靠的全是**第三方聚合接口**（同一轮实测：网易 flac 113/59/86 MB、
+//   酷狗 flac 30/29 MB、QQ flac 178/205/151 MB；对照组网易 mp3 8.7 MB、QQ ogg 12.4 MB）。
+//
+// ★ 本文件用**逐个真跑验过**的接口（2026-10-08，抓前 1KB 验魔数 = "fLaC" ✓）：
+//   网易：music.qinglvai.top（`route=/music/url`）
+//         档位必须用**字符串**（jymaster/hires/…）—— 用上游那套 `level=999` 会被回
+//         `code=40012 当前音源不支持所选音质` ✗（实测）
+//         ⚠ 该站对**游客每日只给 3 首**（`code=42903`）⇒ 用尽后退到 mp3 兜底
+//         mp3 兜底：musicapi.haitangw.net/music/wy.php —— ⚠ **会降档**
+//         （实测标签写「超清母带」、给的却是 .mp3 ⇒ 所以 ext 一律按**直链后缀**如实回填 ✓）
+//   QQ  ：api.vkeys.cn（`music/tencent/song/link?quality=`）
+//         quality：14=臻品母带2.0 / 13=全景声 / 12=杜比 / 11=Hi-Res / 10=SQ无损 / 9=HQ增强
+//         兜底：api.baka.plus/meting（server=tencent，302 ⇒ CDN 直链）
+//   酷狗：api.baka.plus/meting（server=kugou，302）—— 上游 `_parsewithbakaapi` 用的就是这个端点
+//   酷我：**不在本文件**（kuwo_core.thirdpartyurl 已有 nxinxz → haitangw 兜底 ✓ 不动它）
+//
+// ★ 对外只有一个出口 `resolve(client, src, songid)` → [直链, ext, 字节数]；拿不到 ⇒ []
+//   · 体积优先取接口自报；没自报就用**调用方那个客户端**探一次 HEAD
+//     （同源复用连接 ⇒ 阶段 B 快一截；拿了 Range 头的那一步换临时客户端，绝不污染头表 ✓）
+//   · 返回的 ext 来自**直链后缀**（kuwo.extfromurl）⇒ 服务端给什么就报什么，不吹不瞒 ✓
+//
+// ⚠ 302 的通路（baka）**只读 Location**：web_net 的客户端默认跟随重定向，
+//   直接 GET 会把整个 flac 拉进内存 ✗ ⇒ 临时关掉跟随、读完立刻恢复（见 redirecttarget ✓）
+import jsons
+import strings
+import "web_net" as net
+import "./kuwo_core.leno" as kuwo     // 复用 extfromurl（直链后缀 → 扩展名；一处定义 ✓）
+
+use net.(Response, HttpClient)
+
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+
+// 网易档位（**字符串**，不是 999 —— 见文件头 ✓），从高到低
+//   导出是给离线回归**锁顺序**用（档位顺序 = 音质高低，改了必须看得见 ✓）
+export const Array[string] NETEASE_LEVELS = ["jymaster", "hires", "lossless", "exhigh", "standard"]
+// QQ vkeys 档位，从高到低（14 = 臻品母带2.0）
+export const QQ_QUALITIES = [14, 13, 12, 11, 10, 9]
+// 酷狗 baka 的 br 档，从高到低（见 kugouurl 的注释：一个档可能回 502 ⇒ 要多试 ✓）
+export const Array[string] KUGOU_BRS = ["2000", "999000"]
+
+// 三个接口的 URL 配方（导出 ⇒ 能被离线回归整串锁死，照 kugou_core.cdnurl 的做法 ✓）
+export func qinglvaiurl(string songid, string level): string {
+    return "https://music.qinglvai.top/api/index.php?route=/music/url&id=" + songid + "&level=" + level + "&use=play&source=netease"
+}
+
+export func vkeysurl(string mid, int quality): string {
+    return "https://api.vkeys.cn/music/tencent/song/link?mid=" + mid + "&quality=" + _str(quality)
+}
+
+export func bakametingurl(string server, string id, string br): string {
+    return "https://api.baka.plus/meting/?server=" + server + "&type=url&id=" + id + "&br=" + br
+}
+
+// haitangw 的网易通路（`music/wy.php`）；酷我那支（`music/kw.php`）在 kuwo_core 里**已存在**，不动它 ✓
+export func haitangwwyurl(string songid, string level): string {
+    return "https://musicapi.haitangw.net/music/wy.php?id=" + songid + "&level=" + level + "&type=json"
+}
+
+export func useragent(): string { return UA }
+
+// ==================== 体积探测 ====================
+// "bytes 0-0/186980254" 里的总长；拿不到 ⇒ -1
+//   ⚠ 与 dl_engine 里那份同口径（那边是文件私有）——改动要一起改
+func totalfromrange(string cr): int {
+    if cr == "" { return -1 }
+    int slash = strings.find(cr, "/")
+    if slash < 0 { return -1 }
+    string tail = cr.slice(slash + 1, cr.len()).trim()
+    if tail == "" or tail == "*" { return -1 }
+    for tail.byte_len() to i {
+        var b = tail.byte(i)
+        if b is int {
+            if b < 48 or b > 57 { return -1 }
+        }
+    }
+    return _int_or(tail, -1)
+}
+
+// 直链的真实体积（接口没自报时用）；探不到 ⇒ 0
+//   ★ 走**调用方的客户端**（不是每次新建）：libcurl 会**复用同源连接** ⇒ 同一 CDN 的第 2 条起
+//     省掉一次 TLS 握手（实测阶段 B 由 ~8.1 s 降到 ~5 s ✓）；探测只发 **HEAD**（不动头表 ✓），
+//     少数 CDN 不支持 HEAD 才退到 `Range`（那一步换**临时客户端** ⇒ 绝不污染调用方的头表 ✗）
+//   ★ 先 HEAD 最省：QQ/网易/酷狗 CDN 实测都回 Content-Length ✓
+func remotelen(HttpClient client, string url): int {
+    if not client.isOk() { return 0 }
+    int n = 0
+    try {
+        Response r = client.head(url)
+        if r.statusCode >= 200 and r.statusCode < 300 {
+            n = _int_or(r.getHeader("content-length"), 0)
+        }
+    } catch e {
+        n = 0
+    }
+    if n > 0 { return n }
+    // ② HEAD 没给 Total 的（如 `Transfer-Encoding: chunked`）⇒ 带 `Range: bytes=0-0` **再 HEAD 一次**，
+    //    读 `Content-Range: bytes 0-0/186980254` 里的总长
+    //   ★ 这里必须是 HEAD：用 GET 的话，服务端一旦**忽略 Range** 就会把整个 flac 拉进内存 ✗✗
+    //   ★ Range 是**整表替换**的写法 ⇒ 用一次性客户端，绝不污染调用方的头表 ✓
+    HttpClient tmp = net.createClient()
+    if not tmp.isOk() { return 0 }
+    tmp.setUserAgent(UA)
+    tmp.setTimeout(20000)
+    tmp.setSSLVerify(false, false)
+    try {
+        tmp.replaceHeaders(["Range: bytes=0-0"])
+        Response r2 = tmp.head(url)
+        if r2.statusCode == 206 {
+            n = totalfromrange(r2.getHeader("content-range"))
+        } else if r2.statusCode == 200 {
+            n = _int_or(r2.getHeader("content-length"), 0)
+        }
+    } catch e {
+        n = 0
+    }
+    tmp.close()
+    if n < 0 { return 0 }
+    return n
+}
+
+// 收尾：补齐体积，吐 [直链, ext, 字节数]
+func payload(HttpClient client, string link, int size): Array[string] {
+    if size <= 0 { size = remotelen(client, link) }
+    Array[string] out = []
+    out.add(link)
+    out.add(kuwo.extfromurl(link))
+    out.add(_str(size))
+    return out
+}
+
+// ==================== 302 目标 ====================
+// 只读 Location，**别把整个 flac 拉下来**：关跟随 → 读头 → 立刻恢复跟随（10 跳的初值 ✓）
+//   ★ 拿不到 Location 就**必须认输**（返回 ""）：有实例会在限流/该档不存在时回 502 或
+//     `{"code":201,"msg":"error"}`，而**关掉跟随**时 `effectiveUrl` 就是**接口地址本身** ⇒
+//     拿它当直链行会把"接口地址"写成直链 ✗（实测踩到：baka 的 `br=2000` 回 502 ✓）
+//   ★ 少数实例不 302 而是**直接回 JSON**（`{"url":"…"}`）⇒ 也认（body 以 { 开头才解析 ✓）
+func redirecttarget(HttpClient client, string api): string {
+    client.setFollowRedirect(false)
+    string link = ""
+    try {
+        Response r = client.get(api)
+        link = r.getHeader("location").trim()
+        string b = r.body.trim()
+        if link == "" and b.starts_with("{") {
+            var j = jsons.decode(b) as Dict[string, any]
+            if j != null { link = jsons.get_str(j, "url", "").trim() }
+        }
+    } catch e {
+        link = ""
+    }
+    client.setFollowRedirect(true)
+    if not link.starts_with("http") { return "" }
+    if link == api { return "" }        // 没真的跳转 ⇒ 服务端出错（别把接口地址当直链 ✗）
+    return link
+}
+
+// ==================== 响应解析（**纯函数** ⇒ 可离线金标回归 ✓ 见 test/test_thirdparty.leno）====================
+
+// qinglvai → [直链, 字节数(可能 "0"), 业务码]；解析不出来 ⇒ []
+//   业务码 0 = 正常 / 42903 = **游客每日 3 首用尽**（调用方据此停止逐档重试 ✓）
+//   ⚠ 业务码 ≠ 0 时**直链位是空串**（别让调用方以为"有一条名叫 0 的直链" ✗）
+//   形状：{"code":0,"data":{"song":{"url":"…flac","br":3511167,"size":118834452}}}
+export func parseqinglvai(string body): Array[string] {
+    var root = jsons.decode(body) as Dict[string, any]
+    if root == null { return [] }
+    int code = jsons.get_int(root, "code", -1)
+    if code != 0 { return ["", "0", _str(code)] }
+    var song = jsons.get_obj(jsons.get_obj(root, "data"), "song")
+    string link = jsons.get_str(song, "url", "")
+    if not link.starts_with("http") { return [] }
+    Array[string] out = []
+    out.add(link)
+    out.add(_str(jsons.get_int(song, "size", 0)))
+    out.add("0")
+    return out
+}
+
+// vkeys → 直链（`data.url`）；没有 ⇒ ""（形状见 test/test_thirdparty.leno 里的真响应 ✓）
+export func parsevkeys(string body): string {
+    var root = jsons.decode(body) as Dict[string, any]
+    if root == null { return "" }
+    string link = jsons.get_str(jsons.get_obj(root, "data"), "url", "")
+    if not link.starts_with("http") { return "" }
+    return link
+}
+
+// haitangw → 直链（网易/酷我都是 `data.url`）；没有 ⇒ ""
+//   ⚠ 实测有 `"url":"None"` 这种**字符串占位**（id 不存在时）⇒ starts_with("http") 就是判据 ✓
+export func parsehaitangw(string body): string {
+    var root = jsons.decode(body) as Dict[string, any]
+    if root == null { return "" }
+    string link = jsons.get_str(jsons.get_obj(root, "data"), "url", "")
+    if not link.starts_with("http") { return "" }
+    return link
+}
+
+// ==================== 各音源 ====================
+
+// 网易那条的"**游客配额已用尽**"记忆（见 A8-③）：一旦见过 42903，本进程内就别再逐首试了
+//   ★ 纯优化、不改结果：配额是按 IP 按天的，用尽之后**当天不可能再恢复** ✓
+//   ★ 并行下不必纠结可见性：共享 ⇒ 全进程学一次；线程各拿一份 ⇒ 每个切片自己学一次，
+//     两种都正确（省掉的是"用尽之后还逐首去撞"的那一串无用请求 ✓）
+var wynoflac = false
+
+// 网易：qinglvai（真 flac）→ haitangw（320k mp3 兜底）
+//   id 用**数字 songid**（不是原唱/翻唱之分，接口只认 id ✓）
+export func neteaseurl(HttpClient client, string songid): Array[string] {
+    for NETEASE_LEVELS to lv {
+        if wynoflac { break }              // 配额已用尽 ⇒ 直接走下面那条 mp3 兜底 ✓
+        string api = qinglvaiurl(songid, lv)
+        Response resp = client.get(api)
+        if not resp.ok() { continue }
+        Array[string] p = parseqinglvai(resp.body)
+        if p.len() == 0 { continue }
+        // 42903 = 游客每日 3 首用尽 ⇒ 记下来（后面每首都能省掉这一串请求 ✓）+ 直接走 mp3 兜底
+        if p[2] == "42903" {
+            wynoflac = true
+            break
+        }
+        if p[2] != "0" { continue }        // 其余业务码（如 40012 该档不支持）⇒ 换下一档 ✓
+        return payload(client, p[0], _int_or(p[1], 0))
+    }
+    // mp3 兜底（**会降档** ⇒ ext 按直链后缀如实回填 ✓）
+    Response h = client.get(haitangwwyurl(songid, "jymaster"))
+    if h.ok() {
+        string link = parsehaitangw(h.body)
+        if link != "" { return payload(client, link, 0) }
+    }
+    return []
+}
+
+// QQ：vkeys（臻品母带 → HQ 逐级降）→ baka meting 兜底
+//   mid 用 **songmid**（专辑 mid / media_mid 都不行 —— 见 qq_core 头部 ✓）
+export func qqurl(HttpClient client, string mid): Array[string] {
+    for QQ_QUALITIES to q {
+        string api = vkeysurl(mid, q)
+        Response resp = client.get(api)
+        if not resp.ok() { continue }
+        string link = parsevkeys(resp.body)
+        if link != "" { return payload(client, link, 0) }
+    }
+    string link2 = redirecttarget(client, bakametingurl("tencent", mid, "999000"))
+    if link2 != "" { return payload(client, link2, 0) }
+    return []
+}
+
+// 酷狗：baka meting（上游 `_parsewithbakaapi` 同款端点 ✓）
+//   hash **大小写敏感**，原样传（见 kugou_core 头部 ✓）
+//   ★ br 要**多试几个**：实测同一个 hash，`br=2000` 会回 502（该档没有）、`br=999000` 却正常 302 ✓
+//     ⇒ 逐个降档试（与上游"逐档降"是同一个思路 ✓）
+export func kugouurl(HttpClient client, string hash): Array[string] {
+    for KUGOU_BRS to br {
+        string link = redirecttarget(client, bakametingurl("kugou", hash, br))
+        if link != "" { return payload(client, link, 0) }
+    }
+    return []
+}
+
+// ==================== 对外唯一出口 ====================
+// [直链, ext, 字节数]；拿不到 ⇒ []（调用方据此保持官方结果 / 如实报"下不了" ✓）
+export func resolve(HttpClient client, string src, string songid): Array[string] {
+    if songid == "" { return [] }
+    if src == "netease" { return neteaseurl(client, songid) }
+    if src == "qq" { return qqurl(client, songid) }
+    if src == "kugou" { return kugouurl(client, songid) }
+    return []
+}

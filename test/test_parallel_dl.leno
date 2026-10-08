@@ -16,6 +16,7 @@
 // 四组断言：
 //   ① 并行度口径：`dl_workers`（任务少就少开 / 上限来自设置 / 上限非法回落默认）+ 设置钳位
 //   ② 分片切法：引擎里的**步进**写法 与 规范定义 `dl_mine` **对拍**，且全量下标不重不漏
+//   ②.5 搜索切片（2026-10-08 加）：`slice_rows` **轮转切**、不重不漏、份间差 ≤ 1、钳位
 //   ③ **真并行**：4 个线程各下一首、**4 个各自独立的服务端**（每个响应前延迟 200ms）
 //        · 汇总 join 结果、每个 idx 都收到进度消息、4 个文件逐字节正确
 //        · 墙钟 ≈ 1×200ms 而不是 4×200ms ⇒ **确实同时在跑**（串行会 ≥800ms ✓）
@@ -278,6 +279,43 @@ main() {
         }
     }
     eq("分片：不重不漏 + 与 dl_mine 对拍（nshards 1..5）", splitbad, 0)
+
+    // ---------- ②.5 搜索结果的并行切片（阶段 B 用；**必须轮转**且不重不漏）----------
+    //   与下载分片同属"并行机制"的风险面：丢一首 = 结果里少一首歌 ✗；重一首 = 表格与
+    //   songs 下标错位（下载会下错那一首 ✗✗）。切法见 dl_engine.slice_rows 的注释 ✓
+    Array[Array[string]] srows = []
+    int si = 0
+    while si < 11 {
+        Array[string] srow = ["s" + _str(si), "歌" + _str(si), "手", "辑", "1:00", "flac", "1 MB", "1", "kuwo"]
+        srows.add(srow)
+        si = si + 1
+    }
+    int slicebad = 0
+    for 1:5 to sk {
+        Array[Array[Array[string]]] parts = eng.slice_rows(srows, sk)
+        int minn = 11
+        int maxn = 0
+        int tot = 0
+        for parts to p {
+            if p.len() < minn { minn = p.len() }
+            if p.len() > maxn { maxn = p.len() }
+            tot = tot + p.len()
+        }
+        if tot != 11 { slicebad = slicebad + 1 }          // 不重不漏
+        if maxn - minn > 1 { slicebad = slicebad + 1 }    // 份间尽量均（差 ≤ 1 ⇒ 负载才均 ✓）
+        // ★ 轮转性质：第 j 份的第 1 条必须是原第 j 条
+        //   （有人把它改回"连续切"就会红 —— 连续切会让某条线程独占某个音源的全部行 ✗）
+        int sj = 0
+        while sj < parts.len() and sj < 11 {
+            if parts[sj][0][0] != "s" + _str(sj) { slicebad = slicebad + 1 }
+            sj = sj + 1
+        }
+    }
+    eq("切片：k=1..5 不重不漏 + 份间差 ≤ 1 + 确为轮转切法", slicebad, 0)
+    eq("切片：k=0 ⇒ 钳到 1 份", eng.slice_rows(srows, 0).len(), 1)
+    eq("切片：k 超过行数 ⇒ 每行一份", eng.slice_rows(srows, 20).len(), 11)
+    Array[Array[string]] norows = []
+    eq("切片：空表 ⇒ 0 份（不崩）", eng.slice_rows(norows, 4).len(), 0)
 
     // ---------- ③ 真并行：4 首同时下（**4 个独立服务端**，每个延迟 200ms）----------
     string outdir = dirs.join(_tmpdir(), "leno_parallel_dl_test")

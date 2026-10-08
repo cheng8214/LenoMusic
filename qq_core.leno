@@ -1,0 +1,325 @@
+// qq_core.leno — QQ 音乐核心（搜索 / 取直链）
+//
+// 行格式与其它音源完全一致，第 9 项 = "qq"：
+//   [id, name, artist, album, duration(秒), ext, sizeText, sizeBytes, "qq"]
+//   其中 id 是 **复合 id**：`<songmid>#<前缀>`（如 0039MnYb0qxYhV#F000）
+//     · songmid = 歌曲 mid（**不是** file.media_mid、也不是专辑 mid ✗ 三种都试过）
+//     · 前缀 = 官方音质档（F000=flac / A000=ape / M800=320k mp3 / O600=192k ogg / M500=128k mp3）
+//   为什么要复合：取直链时"歌 + 档"缺一不可，而引擎只把 F_ID 原样传回来 ✓
+//
+// ★ 实测结论（2026-10-08，逐条真跑过）：
+//   ① 搜索 `musicu.fcg` + `music.search.SearchCgiService.DoSearchForQQMusicMobile`
+//      **必须带 QIMEI36**（见 qq_crypto.leno）：带 ⇒ 35 KB 真结果；不带 ⇒ 2.2 KB 空壳 ✗
+//   ② 空结果是**偶发**的（公开兜底 q36 被多人共用、会被限流）⇒ 本文件内置重试 ✓
+//   ③ 取直链 `music.vkey.GetVkey.UrlGetVkey` 免登录可用（回 `sip[]` + vkey）；
+//      用错 mid ⇒ `result=101404` ✗（专辑 mid / file.media_mid 都不行）
+//   ④ 付费曲：`pay.pay_down != 0`（晴天 =1、price_track=200）⇒ purl 为空、免登录拿不到
+//      ⇒ **列表里就不给大小**（= 下不了，被引擎的 has_size 过滤掉 ✓）
+//      与网易/酷狗同口径：付费曲只能靠"账号已购买/会员"，不走任何第三方聚合源 ✓
+//   ⑤ 各档体积搜索时就带回来了（`file.size_128mp3 / size_320mp3 / size_flac / size_ape / size_192ogg`）
+//      ⇒ 不额外发请求就能把列表体积与"能不能下"填满 ✓
+//   ⑥ 免登录时**无损档基本拿不到**（实测：同一首免费曲 F000 的 purl 为空、M800 正常回链 ✓）
+//      ⇒ getdirecturl 里做了**逐级回落**（flac → 320k → 128k），宁可下到 mp3 也不"点了失败" ✓
+//   ⑦ QIMEI 注册被服务端拒（`-30000 接口鉴权失败`，见 qq_crypto.leno）⇒ 用公开兜底值；
+//      该值会被**短时限流**（此时响应变成 2.3 KB 空壳、内层 code=2001）⇒ 4 次指数退避重试 ✓
+//      ⚠ 注意：连着搜多个音源时 QQ 最容易被限流；重试已能兜住大部分，但短时间内反复搜仍可能空 ✓
+//   ⑧ **无损只能走第三方聚合接口**（2026-10-08 用户实测上游 musicdl 后定的口径）：
+//      免登录时官方 F000 的 purl 一律为空 ⇒ flac 全部来自 thirdparty.leno
+//      （上游实测 QQ flac 178 MB / ≈5.3 Mbps，比标准无损还高一档 —— 用 vkeys `quality=14`
+//       臻品母带拿到的就是同一档 ✓）。所以搜索末尾会**逐首试一次第三方**，
+//      成功就把 ext/体积/直链一起写进行里（第 10 项 = 直链，见 dl_engine.F_URL ✓）
+import strings
+import jsons
+import rands
+import times
+import "web_net" as net
+import "./qq_crypto.leno" as qc
+import "./thirdparty.leno" as thirdparty
+
+use net.(Response, HttpClient)
+
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+const API = "https://u.y.qq.com/cgi-bin/musicu.fcg"
+const MOD_SEARCH = "music.search.SearchCgiService"
+const METH_SEARCH = "DoSearchForQQMusicMobile"
+const MOD_VKEY = "music.vkey.GetVkey"
+const METH_VKEY = "UrlGetVkey"
+
+// comm 里的客户端标识（上游 qqutils.py 的公开值 ✓；ct 搜索 11 / 取链 19 ✓）
+const CV = "13020508"
+const V = "13020508"
+const UID = "3931641530"
+const GUID = "1000000000"
+
+// 进程内缓存 q36（注册一次、全程复用 ✓）
+var cachedq36 = ""
+
+export func useragent(): string { return UA }
+
+// QQ 要 Referer / Origin / JSON 体（与网易一样，属"引擎下载时也要带上"的头 ✓）
+export func headers(): Array[string] {
+    Array[string] out = []
+    out.add("Referer: https://y.qq.com/")
+    out.add("Origin: https://y.qq.com")
+    out.add("Content-Type: application/json")
+    return out
+}
+
+export func prepare(HttpClient client) {
+    client.addHeaders(headers())
+}
+
+// ==================== 小工具 ====================
+
+func jsonescape(string s): string {
+    string out = ""
+    int i = 0
+    while i < s.len() {
+        string c = s[i]
+        if c == "\"" { out = out + "\\\"" }
+        else if c == "\\" { out = out + "\\\\" }
+        else { out = out + c }
+        i = i + 1
+    }
+    return out
+}
+
+// 上游 randomsearchid（纯装饰，服务端不校验 ✓）；用 var 是因为要超过 int32 ✓
+func searchid(): string {
+    var t = rands.ints(1, 20) * 18014398509481984
+    var n = rands.ints(0, 4194304) * 4294967296
+    var r = times.now() % 86400
+    return _str(t + n + r)
+}
+
+// QIMEI36：注册一次并缓存；注册失败回落上游公开兜底值 ✓
+func q36(): string {
+    if cachedq36 != "" { return cachedq36 }
+    string q = ""
+    try { q = qc.registerqimei() } catch e { q = "" }
+    if q == "" { q = qc.FALLBACK_Q36 }
+    cachedq36 = q
+    return q
+}
+
+func comm(string ct): string {
+    return "{\"ct\":" + ct + ",\"cv\":" + CV + ",\"v\":" + V + ",\"QIMEI36\":\"" + q36() + "\",\"tmeAppID\":\"qqmusic\",\"format\":\"json\",\"inCharset\":\"-utf-8\",\"outCharset\":\"-utf-8\",\"uid\":\"" + UID + "\"}"
+}
+
+// 档位表：[前缀, 扩展名, 体积字段]，**从高到低** ⇒ 取第一个有体积且非付费的 ✓
+func tiers(): Array[Array[string]] {
+    Array[Array[string]] t = []
+    t.add(["F000", "flac", "size_flac"])
+    t.add(["A000", "ape", "size_ape"])
+    t.add(["M800", "mp3", "size_320mp3"])
+    t.add(["O600", "ogg", "size_192ogg"])
+    t.add(["M500", "mp3", "size_128mp3"])
+    return t
+}
+
+func extfromprefix(string prefix): string {
+    if prefix == "F000" { return "flac" }
+    if prefix == "A000" { return "ape" }
+    if prefix == "O600" { return "ogg" }
+    return "mp3"
+}
+
+// 复合 id → [songmid, 前缀]（没带 "#" ⇒ 按 128k mp3 ✓）
+export func parseid(string songid): Array[string] {
+    Array[string] out = []
+    int h = strings.find(songid, "#")
+    if h < 0 {
+        out.add(songid)
+        out.add("M500")
+        return out
+    }
+    out.add(songid.slice(0, h))
+    string p = songid.slice(h + 1, songid.len())
+    if p == "" { p = "M500" }
+    out.add(p)
+    return out
+}
+
+// 纯 songmid（歌词接口要它 ✓）
+export func songmidof(string songid): string {
+    Array[string] parts = parseid(songid)
+    return parts[0]
+}
+
+// ==================== ① 搜索 ====================
+
+// 真发一次搜索；失败或空结果 ⇒ 空数组
+func searchonce(HttpClient client, string keyword, int limit): Array[Array[string]] {
+    Array[Array[string]] rows = []
+    string payload = "{\"searchid\":\"" + searchid() + "\",\"query\":\"" + jsonescape(keyword) + "\",\"search_type\":0,\"num_per_page\":" + _str(limit) + ",\"page_num\":1,\"highlight\":1,\"grp\":1}"
+    string body = "{\"comm\":" + comm("11") + ",\"" + MOD_SEARCH + "." + METH_SEARCH + "\":{\"module\":\"" + MOD_SEARCH + "\",\"method\":\"" + METH_SEARCH + "\",\"param\":" + payload + "}}"
+    Response resp = client.post(API, body)
+    if not resp.ok() { return rows }
+    var root = jsons.decode(resp.body) as Dict[string, any]
+    if root == null { return rows }
+    var mod = root[MOD_SEARCH + "." + METH_SEARCH] as Dict[string, any]
+    if mod == null { return rows }
+    var data = mod["data"] as Dict[string, any]
+    if data == null { return rows }
+    var b = data["body"] as Dict[string, any]
+    if b == null { return rows }
+    var items = b["item_song"]
+    if not (items is Array) { return rows }
+
+    for items to it {
+        var s = it as Dict[string, any]
+        if s == null { continue }
+        string mid = jsons.get_str(s, "mid", "")
+        if mid == "" { continue }
+        var f = s["file"] as Dict[string, any]
+        if f == null { continue }
+        // 付费曲（pay_down != 0）⇒ 不给大小 = 下不了（见头部 ④）
+        var pay = s["pay"] as Dict[string, any]
+        int paydown = 0
+        if pay != null { paydown = jsons.get_int(pay, "pay_down", 0) }
+
+        // 歌手：singer[] 的 name 用 "/" 连起来（与其它源同格式 ✓）
+        string artist = ""
+        var singers = s["singer"]
+        if singers is Array {
+            for singers to a {
+                var ad = a as Dict[string, any]
+                if ad == null { continue }
+                if artist != "" { artist = artist + "/" }
+                artist = artist + jsons.get_str(ad, "name", "")
+            }
+        }
+        // 专辑名
+        string album = ""
+        var al = s["album"] as Dict[string, any]
+        if al != null { album = jsons.get_str(al, "name", "") }
+
+        // 选档：高到低取第一个有体积的（付费时 paydown != 0 ⇒ 一个都不选 ✓）
+        string prefix = ""
+        string ext = ""
+        int sizeb = 0
+        Array[Array[string]] ts = tiers()
+        for ts to t {
+            if prefix != "" { continue }
+            int sz = jsons.get_int(f, t[2], 0)
+            if sz > 0 and paydown == 0 {
+                prefix = t[0]
+                ext = t[1]
+                sizeb = sz
+            }
+        }
+        string sizetext = ""
+        if sizeb > 0 { sizetext = strings.fmt_size(sizeb) }
+
+        Array[string] row = []
+        row.add(mid + "#" + prefix)
+        row.add(jsons.get_str(s, "name", ""))
+        row.add(artist)
+        row.add(album)
+        row.add(_str(jsons.get_int(s, "interval", 0)))
+        row.add(ext)
+        row.add(sizetext)
+        row.add(_str(sizeb))
+        row.add("qq")
+        row.add("")             // 直链（第 10 项）：搜索末尾由第三方补上 —— 见头部 ⑧ / dl_engine.F_URL
+        rows.add(row)
+    }
+
+    return rows
+}
+
+// 对**一行**补第三方聚合直链（原地改 ext / 体积 / 直链）；拿不到就保持原样 ✓
+//   为什么从 searchrows 里拧出来：10 条结果要串 10~20 次请求（实测 ≈ 7 s）✗
+//   ⇒ 交给 dl_engine.probe_rows 分片**并行**跑 ✓
+//   第三方只认 **songmid**（复合 id 的前半段）✓；拿不到就保持官方结果（免费曲的 M800/M500 照旧可下 ✓）
+export func proberow(HttpClient client, Array[string] row) {
+    Array[string] tp = thirdparty.resolve(client, "qq", parseid(row[0])[0])
+    if tp.len() < 3 { return }
+    string oldext = row[5]
+    string ext = tp[1]
+    int tb = _int_or(tp[2], 0)
+    row[5] = ext
+    if tb > 0 {
+        row[6] = strings.fmt_size(tb)
+        row[7] = _str(tb)
+    } else if oldext != ext {
+        // 档位跟原列表不同、体积又探不到 ⇒ **不冒充**（宁可这行被 has_size 过滤 ✓）
+        row[6] = ""
+        row[7] = "0"
+    }
+    row[9] = tp[0]
+}
+
+// 搜索（带重试）：公开兜底 q36 会被限流 ⇒ 偶发返回空壳
+//   ⇒ 最多 4 次、**指数退避**（300/600/1200ms）；实测"四源连着搜"时正是这种抖动 ✓
+export func searchrows(HttpClient client, string keyword, int limit): Array[Array[string]] {
+    int i = 0
+    int wait = 300
+    while i < 4 {
+        Array[Array[string]] rows = searchonce(client, keyword, limit)
+        if rows.len() > 0 { return rows }
+        i = i + 1
+        if i < 4 {
+            sleep(wait)
+            wait = wait * 2
+        }
+    }
+    return []
+}
+
+// ==================== ② 取直链 ====================
+
+// 问一次 vkey（指定档位）；拿到 ⇒ "sip+purl"，拿不到 ⇒ 空串
+func vkey(HttpClient client, string mid, string prefix): string {
+    string filename = prefix + mid + "." + extfromprefix(prefix)
+    string param = "{\"guid\":\"" + GUID + "\",\"songmid\":[\"" + mid + "\"],\"songtype\":[0],\"uin\":\"0\",\"loginflag\":1,\"platform\":\"20\",\"filename\":[\"" + filename + "\"]}"
+    string body = "{\"comm\":" + comm("19") + ",\"" + MOD_VKEY + "." + METH_VKEY + "\":{\"module\":\"" + MOD_VKEY + "\",\"method\":\"" + METH_VKEY + "\",\"param\":" + param + "}}"
+    Response resp = client.post(API, body)
+    if not resp.ok() { return "" }
+    var root = jsons.decode(resp.body) as Dict[string, any]
+    if root == null { return "" }
+    var mod = root[MOD_VKEY + "." + METH_VKEY] as Dict[string, any]
+    if mod == null { return "" }
+    var d = mod["data"] as Dict[string, any]
+    if d == null { return "" }
+    // 播放地址 = sip[0] + midurlinfo[0].purl（两者缺一不可 ✓）
+    string sip = ""
+    var sla = d["sip"]
+    if sla is Array {
+        for sla to x {
+            if sip == "" { sip = _str(x) }
+        }
+    }
+    string purl = ""
+    var infos = d["midurlinfo"]
+    if infos is Array {
+        for infos to it {
+            if purl != "" { continue }
+            var info = it as Dict[string, any]
+            if info == null { continue }
+            purl = jsons.get_str(info, "purl", "")
+        }
+    }
+    if purl == "" or sip == "" { return "" }
+    return sip + purl
+}
+
+// 空串 = 拿不到（付费/无权限/失效）⇒ 引擎如实报"取直链失败" ✓
+//   ★ 逐级回落（2026-10-08 实测）：免登录时**无损档基本拿不到** ——
+//     同一首免费曲（Lucky小爱《晴天》深情版）：F000（flac）**purl 为空** ✗、M800（320k）正常回链 ✓
+//   ⇒ 先按列表选的档试，失败就降到 320k → 128k，避免"列表有大小、点了却失败" ✗
+//     （落盘扩展名由引擎按**实际直链后缀**校正 ⇒ 下到 mp3 就叫 .mp3，不骗人 ✓）
+export func getdirecturl(HttpClient client, string songid): string {
+    Array[string] parts = parseid(songid)
+    string mid = parts[0]
+    string want = parts[1]
+    string link = vkey(client, mid, want)
+    if link != "" { return link }
+    Array[string] lower = ["M800", "M500"]
+    for lower to p {
+        if p == want { continue }
+        link = vkey(client, mid, p)
+        if link != "" { return link }
+    }
+    return ""
+}

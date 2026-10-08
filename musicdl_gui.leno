@@ -24,7 +24,9 @@
 //     本文件只做三件事：判定"要下哪些歌" → 把数据与状态栏交给它 → 每 120ms 调它的 tick() ✓
 //
 // 线程模型（照 cleaner_master / cache_cleaner 的套路）
-//   搜索：threads.start(search_worker, ...) + channel 回传命中数 + 120ms 定时器排空
+//   搜索：**两阶段并行**（2026-10-08 改）—— 阶段 A：每个音源一条线程（官方搜索，channel 回传命中数）；
+//         阶段 B：每片行一条线程（逐首补第三方无损直链）。UI 侧 120ms 一拍排空 channel，
+//         等"线程全停 + 通道排空"后由 advanceSearch 推进下一阶段 / 收尾 ✓
 //   下载：**多首歌并行** —— threads.start(dl_worker_shard, ..., shard, nshards) × N 个 worker
 //         （N = dl_engine.dl_workers(任务数)，各领一份 i % N == shard 的任务）+ 共用一个 channel
 //         回传逐片进度（消息带全量下标）+ **每个 worker 一条**命令通道做暂停/取消 ✓
@@ -41,6 +43,7 @@ import dirs
 import files
 import strings
 import threads
+import times
 import "./dl_engine.leno" as eng
 import "./dl_window.leno" as dlw
 import "./dl_settings.leno" as dlset        // 设置：读/写/钳位（纯逻辑 ⇒ 能被 test/ 单测 ✓）
@@ -62,9 +65,21 @@ use dlset.DlSettings
 //   ⇒ 子线程入口必须是**本文件的具名全局函数**，在里面再调引擎层的模块函数
 //   （cleaner_master 的 scan_entry/delete_entry 就是这个套路 ✓）
 // 另外：入口**不能是闭包**（闭包会被 GC ✗）
-func search_worker(Array[string] srcids, string keyword, int limit, any ch): Array[Array[string]] {
-    return eng.search_entry(srcids, keyword, limit, ch)
+// ★ 2026-10-08 搜索拆成**两阶段并行**（原先一条线程串完所有源 + 所有第三方请求 ≈ 20~25 s ✗）：
+//   阶段 A：**一个音源**一条线程（各源官方搜索互不相干）
+//   阶段 B：**一片行**一条线程（第三方直链请求才是耗时大头：10 条 ≈ 7~11 s）
+//   ⚠ 阶段 B 的 worker 不传通道：它只补行、不发消息（进度由 UI 侧"进入阶段 B"时显示 ✓）
+func search_src_worker(string src, string keyword, int limit, any ch): Array[Array[string]] {
+    return eng.search_source(src, keyword, limit, ch)
 }
+
+func probe_worker(Array[Array[string]] rows): Array[Array[string]] {
+    return eng.probe_rows(rows)
+}
+
+// 阶段 B 的并行度。实测（4 源 × 10 条，40 行 / 约 23 行真去问接口）：
+//   串行 ~26 s → 5 路 ~9.0 s → **8 路 ~5.6 s**（再往上收益递减，且第三方都是免费公开接口 ⇒ 8 封顶 ✓）
+const int PROBE_THREADS = 8
 
 // ⚠ 下载窗口（dl_window.leno）的"开始"也走这个入口 —— 起线程的必须还是本文件 ✓
 //   shard / nshards = 本 worker 领第几份 / 共几份（**多首歌并行**，切法见 dl_engine.dl_entry_shard ✓）
@@ -73,9 +88,9 @@ func dl_worker_shard(Array[Array[string]] jobs, string outdir, any ch, any cmd, 
 }
 
 // 试听 worker（同一条硬约束：线程入口必须是**本文件**的具名全局函数 ✓）
-//   只做转发 ⇒ 真正的 HTTP 与"发消息"都在 dl_engine.dl_preview 里 ✓（与 search_worker 同款 ✓）
-func preview_worker(string songId, string outpath, int bytes, string tag, string src, any ch): int {
-    return eng.dl_preview(songId, outpath, bytes, ch, tag, src)
+//   只做转发 ⇒ 真正的 HTTP 与"发消息"都在 dl_engine.dl_preview 里 ✓（与搜索/下载 worker 同款 ✓）
+func preview_worker(string songId, string link, string outpath, int bytes, string tag, string src, any ch): int {
+    return eng.dl_preview(songId, outpath, bytes, ch, tag, src, link)
 }
 
 // ==================== 无头自检钩子（环境变量；与 dashboard / cleaner_master 同一套约定 ✓）====================
@@ -114,18 +129,26 @@ struct MusicDlApp {
     // ===== 音源（与 dl_engine.sources() 的行平行） =====
     Array[CheckBox] srcBoxes
     Array[string] srcIds
+    Array[string] srcNames        // 中文显示名（表格「来源」列用 ✓ 取自 dl_engine.sources()，不硬编码）
     Array[bool] srcAvail
 
     // ===== 数据 =====
     Array[Array[string]] songs       // 搜索结果（歌曲行）
     string outdir = ""
 
-    // ===== 搜索线程状态 =====
-    Thread? searchThread = null
+    // ===== 搜索线程状态（2026-10-08 拆两阶段并行 ⇒ 线程是**一批**而不是一条 ✓）=====
+    //   阶段 A：每个音源一条（官方搜索）；阶段 B：每片行一条（补第三方无损直链）
+    //   ⚠ 线程入口必须是**本文件**的具名全局函数（语言硬约束 → 见文件头的线程入口包装 ✓）
+    Array[Thread] searchThreads = []
+    int searchPhase = 0                      // 0 = 阶段 A；1 = 阶段 B
+    Array[Array[string]] searchRowsA = []    // 阶段 A 收集到的行（阶段 B 的输入 ✓）
+    Array[Array[Array[string]]] searchParts = []  // 阶段 B 各线程的入参（join 失手时退回它 ⇒ 一首都不丢 ✓）
     Channel? searchCh = null
     bool searching = false
     string searchErr = ""            // 搜索失败原因（worker 报错时记下，别让"没搜到结果"盖掉真因 ✓）
+    int searchHidden = 0             // 本次搜索被隐藏的条数（没有歌曲大小 = 拿不到直链 ⇒ 不入表 ✓ 见 dl_engine.has_size）
     int busyPhase = 0                // 进度条脉冲相位（"忙"指示）
+    int searchT0 = 0                 // 发起时刻（只给 DSEARCH 自检报耗时用 ✓）
 
     // ===== 下载窗口（2026-10-07 拧成独立模块 dl_window.leno ✓）=====
     //   窗口自带它的控件与每任务进度状态；本文件只持有它、每 120ms 调一次 tick() ✓
@@ -145,9 +168,20 @@ struct MusicDlApp {
 
     // ==================== 数据辅助 ====================
 
+    // 音源 id → 中文显示名（表格「来源」列用 ✓；名字来自 dl_engine.sources()，不硬编码）
+    func srcname(string id): string {
+        int i = 0
+        while i < srcIds.len() {
+            if srcIds[i] == id { return srcNames[i] }
+            i = i + 1
+        }
+        return id
+    }
+
     // 歌曲行 → 表格行（表格列顺序见 setupUI 里的 headers）
+    //   ★ 2026-10-08：末尾加「来源」列（多音源同搜时，同一首歌会出现多行 ⇒ 靠它分辨 ✓）
     func tablerow(Array[string] s): Array[string] {
-        return ["", s[eng.F_NAME], s[eng.F_ARTIST], s[eng.F_ALBUM], eng.fmtduration(_int(s[eng.F_DURATION])), s[eng.F_EXT], s[eng.F_SIZETEXT]]
+        return ["", s[eng.F_NAME], s[eng.F_ARTIST], s[eng.F_ALBUM], eng.fmtduration(_int(s[eng.F_DURATION])), s[eng.F_EXT], s[eng.F_SIZETEXT], srcname(eng.srcid(s))]
     }
 
     func fillTable() {
@@ -300,6 +334,7 @@ struct MusicDlApp {
 
         searching = true
         searchErr = ""
+        searchHidden = 0
         songs = []
         table.set_rows([])
         table.clear_selection()
@@ -310,19 +345,87 @@ struct MusicDlApp {
         stateLbl.set_text("正在搜索「" + keyword + "」（音源：" + strings.join(srcs, "、") + "）…")
         busyPhase = 5
         busyBar.set_value(5.0)
+        searchT0 = _int(times.ms())
         searchCh = threads.channel(4096)
-        searchThread = threads.start(search_worker, srcs, keyword, limit, searchCh)
+        startPhaseA(srcs, keyword, limit)
         SDL3.markFrameRedraw()
     }
 
-    // 搜索收尾：join 取回结果行（worker 已结束 ⇒ join 立即返回）
-    func finishSearch() {
-        Array[Array[string]] rows = []
-        if searchThread is Thread {
-            var r = searchThread.join() as Array[Array[string]]
-            if r != null { rows = r }
+    // ==================== 搜索两阶段（都并行；起线程的只能是本文件 ✓）====================
+
+    // 阶段 A：**每个音源一条线程**（原先是一条线程里串着所有源 ⇒ 3~4 源时白白串了 3 次等待 ✗）
+    func startPhaseA(Array[string] srcs, string keyword, int limit) {
+        searchPhase = 0
+        searchThreads = []
+        searchRowsA = []
+        searchParts = []
+        for srcs to s {
+            searchThreads.add(threads.start(search_src_worker, s, keyword, limit, searchCh))
         }
-        searchThread = null
+    }
+
+    // 阶段 B：把阶段 A 的行切成 PROBE_THREADS 片，一片一条线程（第三方请求是耗时大头 ✓）
+    //   切片用 eng.slice_rows（**轮转片**；为什么必须轮转、以及"不重不漏"的硬要求见那边的注释 ✓）
+    //   ★ 代价：结果顺序变成"轮转序"（不再按音源聚在一起）—— 表里那一列「来源」正是为此而加 ✓
+    func startPhaseB() {
+        int total = searchRowsA.len()
+        if total == 0 {
+            finishSearch([])
+            return
+        }
+        int k = PROBE_THREADS
+        if k > total { k = total }
+        searchPhase = 1
+        searchThreads = []
+        searchParts = eng.slice_rows(searchRowsA, k)   // 轮转切片（切法见 dl_engine.slice_rows ✓）
+        stateLbl.set_text("已搜到 " + _str(total) + " 首，正在逐首取无损直链（" + _str(searchParts.len()) + " 路并行）…")
+        for searchParts to part {
+            searchThreads.add(threads.start(probe_worker, part))
+        }
+    }
+
+    // 本阶段的线程全停了吗（通道里可能还有最后一波消息 ⇒ 调用方还要看通道长度 ✓）
+    func searchRunning(): bool {
+        for searchThreads to t {
+            if t.state() == "running" { return true }
+        }
+        return false
+    }
+
+    // 阶段切换 / 收尾：由 120ms 定时器在"线程都停了 + 通道排空"之后调 ✓
+    func advanceSearch() {
+        Array[Array[string]] rows = []
+        int idx = 0
+        for searchThreads to t {
+            var got = t.join() as Array[Array[string]]
+            if got == null {
+                // ★ 线程失手（极罕见）⇒ 退回**它那份入参**（未补直链、但仍是官方结果 ✓ 一首都不丢）
+                if searchPhase == 1 and idx < searchParts.len() { got = searchParts[idx] }
+            }
+            if got != null {
+                Array[Array[string]] one = got
+                for one to row { rows.add(row) }
+            }
+            idx = idx + 1
+        }
+        searchThreads = []
+        if searchPhase == 0 {
+            searchRowsA = rows
+            startPhaseB()
+        } else {
+            Array[Array[string]] kept = eng.keep_downloadable(rows)
+            // ★ 隐藏数 = 阶段 A 总数 − 最终保留数（付费/无直链的 ⇒ 不入表 ✓ 见 has_size）
+            searchHidden = rows.len() - kept.len()
+            finishSearch(kept)
+        }
+    }
+
+    // 搜索收尾：行已经拿齐（线程都 join 过了）
+    func finishSearch(Array[Array[string]] rows) {
+        searchThreads = []
+        searchParts = []
+        searchRowsA = []
+        searchPhase = 0
         if searchCh is Channel { searchCh.close() }
         searchCh = null
         searching = false
@@ -337,11 +440,24 @@ struct MusicDlApp {
             //   （"青衣"那次就是这么被误判成"搜不到"的 ✓）
             if searchErr != "" {
                 stateLbl.set_text("搜索失败：" + searchErr)
+            } else if searchHidden > 0 {
+                // ★ 搜到了、但全都没直链 ⇒ 必须说清，否则和"搜不到"长得一模一样 ✗
+                stateLbl.set_text("搜到 " + _str(searchHidden) + " 首，但都没拿到直链（付费/无版权）—— 已全部隐藏")
             } else {
                 stateLbl.set_text("没搜到结果（接口可能被限流，或关键词无匹配）")
             }
         } else {
-            stateLbl.set_text("搜索完成：命中 " + _str(rows.len()) + " 首（默认已全部勾选）")
+            // ★ 隐藏数一并报出（否则用户会以为"搜索结果怎么少了" ✓）
+            string hid = ""
+            if searchHidden > 0 { hid = "；另 " + _str(searchHidden) + " 首没拿到直链（付费/无版权）已隐藏" }
+            stateLbl.set_text("搜索完成：命中 " + _str(rows.len()) + " 首（默认已全部勾选）" + hid)
+        }
+        // ★ 搜索自检收尾（见 gAutoSearch 注释 ✓）：打印结果后走正常退出路径
+        if gAutoSearch != "" {
+            int dt = _int(times.ms()) - searchT0
+            print("[dsearch] 命中 " + _str(rows.len()) + " 首 / 隐藏 " + _str(searchHidden) + " 首 / 耗时 " + _str(dt) + " ms\n")
+            gAutoSearch = ""
+            SDL3.requestExit()
         }
         SDL3.markFrameRedraw()
     }
@@ -409,6 +525,14 @@ struct MusicDlApp {
             if gExitTicks == 0 {
                 print("[diag] 走正常退出路径（requestExit）\n")
                 SDL3.requestExit()
+            }
+        }
+        // 搜索自检（见 gAutoSearch 注释 ✓）：第 2 拍界面已建好 ⇒ 自动搜一次
+        if gAutoSearch != "" {
+            gAutoSearchTick = gAutoSearchTick + 1
+            if gAutoSearchTick == 2 {
+                keywordEdit.set_text(gAutoSearch)
+                onSearch()
             }
         }
         // ★ 歌词面板里点了"立即下载歌词" ⇒ 由**本文件**去下（要起线程 + 开下载窗口，只有这里能做 ✓）
@@ -537,16 +661,12 @@ struct MusicDlApp {
             }
         }
         if not searching { return }
-        // 线程还活着 ⇒ 继续等（worker 结束 + 通道排空后再收尾，避免丢最后几条消息）
-        bool running = false
-        if searchThread is Thread {
-            if searchThread.state() == "running" { running = true }
-        }
-        if running { return }
+        // 线程还活着 ⇒ 继续等（worker 结束 + 通道排空后再推进，避免丢最后几条消息）
+        if searchRunning() { return }
         if searchCh is Channel {
             if searchCh.len() > 0 { return }
         }
-        finishSearch()
+        advanceSearch()          // 阶段 A ⇒ 阶段 B，或最终收尾 ✓
     }
 
     // ==================== 下载：判定"要下哪些歌" + 起线程 ====================
@@ -601,7 +721,7 @@ struct MusicDlApp {
         string out = dirs.join(_tmpdir(), "leno_preview_" + one[eng.F_ID] + "." + ext)
         string tag = eng.songlabel(one)                    // "歌名 - 歌手" ✓（界面显示用 ✓）
         gPreviewCh = threads.channel(8)
-        gPreviewThread = threads.start(preview_worker, one[eng.F_ID], out, PREVIEW_BYTES, tag, eng.srcid(one), gPreviewCh)
+        gPreviewThread = threads.start(preview_worker, one[eng.F_ID], eng.songurl(one), out, PREVIEW_BYTES, tag, eng.srcid(one), gPreviewCh)
         startBgDownload(one)                               // ★ ② 同时整首下（静默 ✓）
         stateLbl.set_text("试听：正在取前一段并下载整首…（" + tag + "）")
         SDL3.markFrameRedraw()
@@ -985,6 +1105,7 @@ struct MusicDlApp {
             srcRow.add(box, {grow: 0, shrink: 0, align: 1})
             srcBoxes.add(box)
             srcIds.add(id)
+            srcNames.add(name)
             srcAvail.add(avail)
         }
     }
@@ -1125,10 +1246,12 @@ struct MusicDlApp {
         // ---- 结果表格 ----
         // 第 0 列是复选框列（表头可全选/全不选）；其余 6 列与 dl_engine 的歌曲行字段对应
         table = SDL3.createTable({
-            headers: ["", "歌名", "歌手", "专辑", "时长", "格式", "大小"],
-            col_widths: [40.0, 300.0, 150.0, 200.0, 70.0, 66.0, 110.0],
-            aligns: [1, 0, 0, 0, 1, 1, 2],
-            header_aligns: [1, 0, 0, 0, 1, 1, 2],
+            // ★ 2026-10-08：末尾加「来源」（多音源搜索结果里，同一首歌会有多行 ⇒ 靠它分辨是哪家 ✓）
+            //   宽度：总 986px（窗口 1060）⇒ 加 90px 后把「专辑」从 200 压到 160，正好装下 ✓
+            headers: ["", "歌名", "歌手", "专辑", "时长", "格式", "大小", "来源"],
+            col_widths: [40.0, 300.0, 150.0, 160.0, 70.0, 66.0, 110.0, 90.0],
+            aligns: [1, 0, 0, 0, 1, 1, 2, 1],
+            header_aligns: [1, 0, 0, 0, 1, 1, 2, 1],
             check_col: 0,
             // ★ 图标列（2026-10-08 ✓）：框架的 `image_col` = 把该列画成 **[图标 + 文字]** ✓
             //   ⇒ 图标自然落在**歌名前** ✓（列 1 = 歌名；列 0 是勾选列 ✓ 见 check_col ✓）
@@ -1332,6 +1455,13 @@ Array[string] gPrevRow = []
 //   `DHOVER=1` ⇒ 第 2 拍把指针移到播放键上，配合 `DSHOT` 截图即可验"悬停色到底画没画" ✓
 //   用法：DCROP=110 DSHOT=<png> DSHOT_AT=30 DHOVER=1 build\leno.exe <本文件> ✓
 int gHoverTick = 0
+// 搜索自检（`DSEARCH=<关键词>`）：第 2 拍自动跑一次**真搜索**（勾着的音源全部），
+//   收尾时打印 `[dsearch] 命中 X 首 / 隐藏 Y 首 / 耗时 Z ms` 然后正常退出 ✓
+//   为什么值得有：本应用的主路径是"手点搜索"，而搜索是**联网 + 两阶段并行**的 ——
+//   没有它就只能人手开窗看，并行改造（切片 / join / 阶段切换）一概测不到 ✗
+//   用法：DSEARCH=周杰伦\ 晴天 build\leno.exe musicdl_gui.leno
+string gAutoSearch = ""
+int gAutoSearchTick = 0
 
 main() {
     var ex = _env("DEXIT")
@@ -1346,6 +1476,8 @@ main() {
     if dc != null { gClickStep = 1 }
     var dh = _env("DHOVER")
     if dh != null { gHoverTick = 2 }
+    var sq = _env("DSEARCH")
+    if sq != null { gAutoSearch = _str(sq) }
     MusicDlApp app = new MusicDlApp()
     app.run()
 }

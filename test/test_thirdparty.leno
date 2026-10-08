@@ -1,0 +1,122 @@
+// test_thirdparty.leno — 第三方聚合接口的**URL 配方 + 响应解析**回归（离线、不需要网络 ✓）
+//
+// 为什么必须有它：网易那条真 flac 通路（qinglvai）对**游客每日只给 3 首** ⇒
+//   真跑一次就把配额用掉（实测：用完之后一律回 `code=42903`，当天再也拿不到 flac）✗
+//   ⇒ 唯一能反复验证的办法就是**把真实响应录下来**，把「解析」与「URL 配方」锁死 ✓
+//   （与 test_kugou_cdn 锁 cdnurl / test_netease_crypto 锁加密向量同一个思路 ✓）
+//
+// 金标来源：2026-10-08 逐条 curl 抓到的**真实响应**（只留用到的字段；
+//   URL 里的签名查询串按终端输出原样保留、尾部可能被截断 —— 解析只用到 `http` 前缀与后缀 ✓）
+// 跑：build\leno.exe leno_gui\应用\音乐下载器\test\test_thirdparty.leno
+import strings
+import "../thirdparty.leno" as tp
+import "../kuwo_core.leno" as kuwo
+
+// ① 网易 qinglvai 成功（id=2668397359，level=jymaster）—— 直链是真 flac、体积是接口自报的字节数
+const RAW_QINGLVAI_OK = "{\"code\":0,\"message\":\"ok\",\"data\":{\"song\":{\"id\":2668397359," +
+    "\"url\":\"https://m801.music.126.net/20261008174426/948104232c4c0b74ca17c143af3ec2a7/jdymusic/obj/wo3DlMOGwrbDjj7DisKw/58258119146/44de/a085/f8fb/e5be6d5e6bdabde1ee2c420a72ed35e2.flac?vuutv=7dLWmwwCnDDMnAhc+4eMeq2TGbBh4v5oP1HmNhhyIcC+FIBo/DhRmCua\"," +
+    "\"br\":3511167,\"size\":118834452}}}"
+
+// ② 网易 qinglvai **游客配额用尽**（当天第 4 首起）
+const RAW_QINGLVAI_QUOTA = "{\"code\":42903,\"message\":\"游客每日最多试听 3 首，注册登录可解锁更多次数\",\"data\":null,\"request_id\":\"da4cad9f5b7b0e3308916f6a65a48f1e\"}"
+
+// ③ 网易 qinglvai **档位名不对**（上游那套 `level=999` 就会撞这条 ⇒ 本实现必须用字符串档位 ✓）
+const RAW_QINGLVAI_BADLEVEL = "{\"code\":40012,\"message\":\"当前音源不支持所选音质\",\"data\":null,\"request_id\":\"170e5b544939eae4b4c735f6b92876d6\"}"
+
+// ④ QQ vkeys 成功（mid=0039MnYb0qxYhV，quality=14 = 臻品母带2.0；5.5 Mbps ⇒ 178 MB 那一档 ✓）
+const RAW_VKEYS_OK = "{\"code\":0,\"message\":\"访问成功\",\"data\":{\"songID\":97773,\"songMID\":\"0039MnYb0qxYhV\",\"kbps\":\"5549kbps\"," +
+    "\"link\":\"https://i.y.qq.com/v8/playsong.html?songmid=0039MnYb0qxYhV&type=0\"," +
+    "\"url\":\"http://ws.stream.qqmusic.qq.com/AI00001diEF43yBtZk.flac?guid=0&vkey=D33544B21249B3EED1722BA5B30EE606508CDBD49E7A65DAF11A787AA4CA1019B8473280A64FADE3E01A91305646918F2F27D23811EC0936__v21e2a1605&uin=1152921505349757380&fromtag=119724\"}," +
+    "\"time\":\"2026-10-08 17:20:07\",\"pid\":307,\"tips\":\"欢迎使用落月API-V3\"}"
+
+// ⑤ haitangw 网易通路成功 —— ⚠ **标签写「超清母带」、直链却是 .mp3**（降档！）
+//    所以 ext 必须按**直链后缀**回填，不能信标签（本文件就是在锁这条口径 ✓）
+const RAW_HAITANGW_WY = "{\"code\":200,\"msg\":\"解析成功\",\"data\":{\"rid\":\"2668397359\",\"name\":\"晴天 (原唱 周杰伦)\",\"artist\":\"RyaVocal\",\"quality\":\"超清母带\"," +
+    "\"size\":\"10.33 MB\",\"url\":\"https://iot202.music.126.net/Yml6PWlvdCZjaGFubmVsPW5ldGVhc2Umc2NlbmU9YW5kcmNhcg/20261008174547/59b22f51443468627cff0e59e4d457cd/jdymusic/obj/wo3DlMOGwrbDjj7DisKw/57805176072/bd3c/9ae5/2741/39c5dfb981f46982085157a170b08ed4.mp3\"}}"
+
+// ⑥ haitangw 的**占位**形态：id 不存在时给字符串 "None"（不是空串！⇒ 必须判 http 前缀 ✓）
+const RAW_HAITANGW_NONE = "{\"code\":200,\"msg\":\"解析成功\",\"data\":{\"url\":\"None\"}}"
+
+// ⑦ haitangw 出错（酷狗那支 kg.php 实测就会这么回）
+const RAW_HAITANGW_ERR = "{\"code\":201,\"msg\":\"error\"}"
+
+int passed = 0
+int failed = 0
+
+func check(string name, bool ok) {
+    if ok {
+        passed = passed + 1
+        print("  PASS ✓ " + name)
+    } else {
+        failed = failed + 1
+        print("  FAIL ✗ " + name)
+    }
+}
+
+func checkeq(string name, string got, string want) {
+    bool ok = got == want
+    check(name, ok)
+    if not ok {
+        print("       got  = " + got)
+        print("       want = " + want)
+    }
+}
+
+main() {
+    print("=== 第三方聚合接口：配方 + 响应解析 回归 ===")
+
+    // ---- ① URL 配方整串锁死（参数名/顺序/取值变了这里就红）----
+    checkeq("qinglvai 整串",
+        tp.qinglvaiurl("2668397359", "jymaster"),
+        "https://music.qinglvai.top/api/index.php?route=/music/url&id=2668397359&level=jymaster&use=play&source=netease")
+    checkeq("vkeys 整串",
+        tp.vkeysurl("0039MnYb0qxYhV", 14),
+        "https://api.vkeys.cn/music/tencent/song/link?mid=0039MnYb0qxYhV&quality=14")
+    checkeq("baka meting 整串",
+        tp.bakametingurl("kugou", "d667bc5ee93f201126697cb3ba745006", "2000"),
+        "https://api.baka.plus/meting/?server=kugou&type=url&id=d667bc5ee93f201126697cb3ba745006&br=2000")
+    checkeq("haitangw 网易整串",
+        tp.haitangwwyurl("2668397359", "jymaster"),
+        "https://musicapi.haitangw.net/music/wy.php?id=2668397359&level=jymaster&type=json")
+    check("三个接口都在 https 上（除 QQ 直链本身是 http ✓）",
+        strings.starts_with(tp.qinglvaiurl("1", "hires"), "https://") and strings.starts_with(tp.bakametingurl("kugou", "1", "2000"), "https://"))
+
+    // ---- ② 档位表**顺序**（就是音质高低）：顺序错了不会报错，只会静默降档 ✗ ----
+    check("网易档位首档 = jymaster（最高档不是 999 ✓）", tp.NETEASE_LEVELS[0] == "jymaster")
+    check("网易档位共 5 档", tp.NETEASE_LEVELS.len() == 5)
+    check("QQ 档位首档 = 14（臻品母带2.0）", _str(tp.QQ_QUALITIES[0]) == "14")
+    check("酷狗 br 首档 = 2000", tp.KUGOU_BRS[0] == "2000")
+
+    // ---- ③ qinglvai 解析 ----
+    Array[string] ok1 = tp.parseqinglvai(RAW_QINGLVAI_OK)
+    check("qinglvai 正常响应能解出 3 项", ok1.len() == 3)
+    if ok1.len() == 3 {
+        check("  直链是 flac（按后缀判，不信标签 ✓）", kuwo.extfromurl(ok1[0]) == "flac")
+        checkeq("  体积 = 接口自报字节数", ok1[1], "118834452")
+        checkeq("  业务码 = 0", ok1[2], "0")
+    }
+    Array[string] quota = tp.parseqinglvai(RAW_QINGLVAI_QUOTA)
+    check("配额用尽 ⇒ 业务码 42903（调用方据此停止逐档重试 ✓）", quota.len() == 3 and quota[2] == "42903")
+    Array[string] bad = tp.parseqinglvai(RAW_QINGLVAI_BADLEVEL)
+    check("档位名不对 ⇒ 业务码 40012", bad.len() == 3 and bad[2] == "40012")
+    check("非 JSON ⇒ 空数组（不抛异常 ✓）", tp.parseqinglvai("不是 json").len() == 0)
+    check("空串 ⇒ 空数组", tp.parseqinglvai("").len() == 0)
+
+    // ---- ④ vkeys 解析 ----
+    string vk = tp.parsevkeys(RAW_VKEYS_OK)
+    check("vkeys 直链是 flac", kuwo.extfromurl(vk) == "flac")
+    check("vkeys 直链指向 qqmusic 的 CDN", vk.has("ws.stream.qqmusic.qq.com"))
+    checkeq("vkeys 空对象 ⇒ 空串", tp.parsevkeys("{}"), "")
+    checkeq("vkeys 非 JSON ⇒ 空串", tp.parsevkeys("<html>"), "")
+
+    // ---- ⑤ haitangw 解析（含「标签与直链不一致」这条口径）----
+    string ht = tp.parsehaitangw(RAW_HAITANGW_WY)
+    check("haitangw 直链拿得到", ht != "")
+    check("haitangw **降档**如实回填成 mp3（不信 quality 标签 ✓）", kuwo.extfromurl(ht) == "mp3")
+    checkeq("haitangw 的 \"None\" 占位 ⇒ 空串（不能当下得了 ✗）", tp.parsehaitangw(RAW_HAITANGW_NONE), "")
+    checkeq("haitangw 出错码 ⇒ 空串", tp.parsehaitangw(RAW_HAITANGW_ERR), "")
+
+    print("")
+    print("通过 " + _str(passed) + " 项，失败 " + _str(failed) + " 项")
+    print(if failed == 0 then "=== 全部通过 ===" else "=== 有失败 ✗ ===")
+}
