@@ -50,7 +50,7 @@ import "./dl_settings.leno" as dlset        // 设置：读/写/钳位（纯逻�
 import "./dl_settings_win.leno" as dlswin    // "设置"弹窗（SDL3）—— 标题栏右侧 ⚙ 打开 ✓
 import "./player_bar.leno" as pb             // 播放条（嵌在主界面里 ✓ 见它的文件头）
 
-use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, CheckBox, Table, ProgressBar, HBox, VBox, Edit, SpinBox, Separator, Scancode, ComboBox, ImageView)
+use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, CheckBox, Table, ProgressBar, HBox, VBox, Edit, SpinBox, Separator, Scancode, ComboBox, ImageView, TabControl)
 use dlw.DlWindow
 use pb.PlayerBar
 use dlset.DlSettings
@@ -91,6 +91,22 @@ func dl_worker_shard(Array[Array[string]] jobs, string outdir, any ch, any cmd, 
 //   只做转发 ⇒ 真正的 HTTP 与"发消息"都在 dl_engine.dl_preview 里 ✓（与搜索/下载 worker 同款 ✓）
 func preview_worker(string songId, string link, string outpath, int bytes, string tag, string src, any ch): int {
     return eng.dl_preview(songId, outpath, bytes, ch, tag, src, link)
+}
+
+// 榜单 worker（两条，同一条硬约束：入口必须是**本文件**的具名全局函数 ✓）
+//   ⚠ 榜单菜单/歌曲都要走网络 ⇒ 必须放线程里（同步调会卡住 UI 1~2 秒 ✗）
+//   ⚠ 结果由主线程 `t.join() as Array[Array[string]]` 取（同搜索阶段 A/B 的做法 ✓）
+//     引擎层已保证不抛异常（内部 try 兜住、失败给空列表 ✓）⇒ 这里再兜一层，纯 defensive
+func bang_menu_worker(string src): Array[Array[string]] {
+    Array[Array[string]] menu = []
+    try { menu = eng.bang_menu(src) } catch e { menu = [] }
+    return menu
+}
+
+func bang_worker(string src, string bid, int limit): Array[Array[string]] {
+    Array[Array[string]] rows = []
+    try { rows = eng.bang_rows(src, bid, limit) } catch e { rows = [] }
+    return rows
 }
 
 // ==================== 无头自检钩子（环境变量；与 dashboard / cleaner_master 同一套约定 ✓）====================
@@ -165,6 +181,34 @@ struct MusicDlApp {
     //   入口是**标题栏右侧**的两个动作按钮：`download`（下载窗口）与 `settings`（设置）✓
     //   图标用应用自带的 images/download.png、images/setting.png（路径见 setupUI ✓）
     DlSettings cfg
+
+    // ===== 页签（2026-10-09 新增 ✓ 参考 leno_gui/应用/数据看板/dashboard.leno 的做法）=====
+    //   为什么改成页签：原来第一行要塞「关键词+格式+条数+搜索」和「音源+目录」两行，
+    //     榜单再加进来就挤不下了 ⇒ 榜单独立成页，搜索页一行都不用将就 ✓
+    //   为什么播放条**不放进页里**：它在 TabControl **外面** ⇒ 切页不打断播放 ✓
+    TabControl tab
+    int curPage = 0
+    // 左侧导航按钮（选中态靠文字前的● 标记 —— 图标以后再补★ 先不用图标免得引入依赖 ✗）
+    Button navSearch
+    Button navBang
+
+    // ===== 榜单页（接口移植自二创，2026-10-09 ✓）=====
+    //   数据源：dl_engine.bang_menu(src) 拿菜单、bang_rows(src, id, limit) 拿歌曲行
+    //   ⚠ 榜单行**不做 has_size 过滤**（榜单接口多数不给体积 ⇒ 「大小」列天然为空 ✓）
+    ComboBox bangSrcBox               // 榜单页的音源下拉（决定"哪个站的榜"）
+    ComboBox bangBox                  // 榜单下拉（选项随音源动态生成 ✓）
+    Button bangReloadBtn
+    Table bangTable
+    Label bangLbl
+    Array[string] bangIds = []        // 与 bangBox 选项平行：第 i 项对应哪个榜单 id
+    Array[Array[string]] bangSongs = []   // 榜单歌曲行（与搜索行同构 ⇒ 下载/试听都能直接用 ✓）
+    Thread? bangThread = null         // 取榜单歌曲的那条线程（⚠ 入口必须是本文件函数 ⇒ 见文件头 ✓）
+    Thread? bangMenuThread = null // 取榜单**菜单**的那条线程（kuwo/qq 是内置常量、瞬时 ✓；另两个要发请求）
+    bool bangLoading = false
+    string bangCurSrc = "kuwo"
+    string bangCurId = ""
+    int bangLoadedFor = -1// 菜单已加载过几轮（切页懒加载用：-1 = 从没加载 ✓）
+    int bangLimit = 100               // 一次取多少首（榜单接口最多给 300；100 够看也够下 ✓）
 
     // ==================== 数据辅助 ====================
 
@@ -485,6 +529,9 @@ struct MusicDlApp {
     // ==================== 主循环定时器（120ms 一拍） ====================
     // 搜索进度、下载进度、忙指示都在这里推进 —— 唯一一处"UI 线程排空 channel"的地方
     func onTick() {
+      // ★ 榜单页的两条线程也要在这儿收（菜单 → 歌曲，顺序有依赖 ⇒ 菜单先收 ✓）
+        pollBangMenu()
+        pollBang()
         // 退出路径自检（见 gExitTicks 注释 ✓）
         // 悬停自检（见 gHoverTick 注释 ✓）：把指针注入到播放键上 ✓
         if gHoverTick > 0 {
@@ -1183,6 +1230,11 @@ struct MusicDlApp {
 
         var root = SDL3.createVBox({padX: 12, padY: 10, spacing: 8})
 
+        // ---- 搜索页（页 0）的内容容器 ----
+        //   ★ 2026-10-09：整页交给一个 VBox + `tab.setPageLayout(0, page0)`⇒ **页内也布局驱动**
+        //     （窗口缩放时页里跟着重排 ✓ 不用一行绝对坐标；做法照数据看板 dashboard.leno ✓）
+        var page0 = SDL3.createVBox({padX: 0, padY: 0, spacing: 0})
+
         // ---- 搜索行 ----
         var row1 = SDL3.createHBox({h: 34, padX: 0, padY: 0, spacing: 8})
         // ★ 搜索框左边的小音符（2026-10-08 ✓）：`images\music.png`
@@ -1223,7 +1275,7 @@ struct MusicDlApp {
         limitSpin.on_change(func(float v) { persist_settings() })
         row1.add(limitSpin, {grow: 0, shrink: 0, basis: 86, align: 3})
         // 设置入口已移到**标题栏右侧的齿轮按钮**（上面的 actions: [{id:"settings", icon:"gear"}] ✓）
-        root.add(row1, {grow: 0, shrink: 0, align: 3})
+        page0.add(row1, {grow: 0, shrink: 0, align: 3})
 
         // ---- 音源 + 输出目录行 ----
         srcRow = SDL3.createHBox({h: 30, padX: 0, padY: 0, spacing: 10})
@@ -1240,7 +1292,7 @@ struct MusicDlApp {
         dirBtn = SDL3.createButton({w: 88, h: 28, text: "选择目录", font_size: 13})
         dirBtn.on_click(func() { onPickDir() })
         srcRow.add(dirBtn, {grow: 0, shrink: 0, basis: 88, align: 3})
-        root.add(srcRow, {grow: 0, shrink: 0, align: 3})
+        page0.add(srcRow, {grow: 0, shrink: 0, align: 3})
 
         // ---- 操作行 ----
         var row3 = SDL3.createHBox({h: 32, padX: 0, padY: 0, spacing: 8})
@@ -1277,7 +1329,7 @@ struct MusicDlApp {
         row3.add(selGroup, {grow: 0, shrink: 0, align: 3})
         countLbl = SDL3.createLabel({text: "已选 0 / 0 首", font_size: 13})
         row3.add(countLbl, {grow: 1, shrink: 1, align: 2})
-        root.add(row3, {grow: 0, shrink: 0, align: 3})
+        page0.add(row3, {grow: 0, shrink: 0, align: 3})
 
         // ---- 结果表格 ----
         // 第 0 列是复选框列（表头可全选/全不选）；其余 6 列与 dl_engine 的歌曲行字段对应
@@ -1308,25 +1360,251 @@ struct MusicDlApp {
         })
         table.on_context_will_open(func(int row) { buildMenu(row) })
         table.on_context_select(func(int row, string id) { onMenu(row, id) })
-        root.add(table, {grow: 1, shrink: 1, align: 3})
+        page0.add(table, {grow: 1, shrink: 1, align: 3})
 
-        // ★ 播放条（2026-10-07）：**嵌在表格下方、状态栏上方** ✓（不另开窗口 ✓）
-        //   它自带两行：① 歌名 + 进度 + 时间  ② 上一首/播放/下一首/循环 + 音量 + 重扫 + 序号
-        //   目录 = 输出目录（downloads/ ⇒ 播的是已下好的本地文件 ✓）
-        pbar = pb.create_player_bar(outdir, imgDir, stateLbl)
-        root.add(pbar.box, {grow: 0, shrink: 0, align: 3})
+        // ---- 忙指示 + 状态栏（属搜索页 ⇒ 挂 page0 ✓）----
+                busyBar = SDL3.createProgressBar({h: 6, show_text: false})
+                busyBar.set_value(0.0)
+                page0.add(busyBar, {grow: 0, shrink: 0, align: 3})
+                var statusRow = SDL3.createHBox({h: 24, padX: 0, padY: 0, spacing: 12})
+                stateLbl = SDL3.createLabel({text: "就绪", font_size: 13})
+                statusRow.add(stateLbl, {grow: 1, shrink: 1, align: 1})
+                statusRow.add(SDL3.createLabel({text: "双击某行 = 下载这一首；右键列表 = 批量/复制/打开目录", font_size: 12}), {grow: 0, shrink: 0, align: 2})
+                page0.add(statusRow, {grow: 0, shrink: 0, align: 3})
 
-        // ---- 忙指示 + 状态栏 ----
-        busyBar = SDL3.createProgressBar({h: 6, show_text: false})
-        busyBar.set_value(0.0)
-        root.add(busyBar, {grow: 0, shrink: 0, align: 3})
-        var statusRow = SDL3.createHBox({h: 24, padX: 0, padY: 0, spacing: 12})
-        stateLbl = SDL3.createLabel({text: "就绪", font_size: 13})
-        statusRow.add(stateLbl, {grow: 1, shrink: 1, align: 1})
-        statusRow.add(SDL3.createLabel({text: "双击某行 = 下载这一首；右键列表 = 批量/复制/打开目录", font_size: 12}), {grow: 0, shrink: 0, align: 2})
-        root.add(statusRow, {grow: 0, shrink: 0, align: 3})
+            // ---- 页签：0 = 搜索、1 = 榜单 ----
+                      //   ★ 做法照 leno_gui/应用/数据看板/dashboard.leno：TabControl **隐藏标签栏**
+            //     （`show_header:false`）当纯页面容器，切页由左侧按钮 `set_active` 驱动 ✓
+                  //   ⚠ `tabs` 仍要照常传（`set_active` 按下标校验 ⇒ 越界/同页被TabControl 自己忽略 ✓）
+               //   ⚠ 不用 `tab_h:0` 代替 show_header：那样标签文字照样画，只是画在上方 ⇒ 换个位置就露馅 ✗
+               //   ⚠ bg_color 必须显式给：Tab 内容区用自己的 _bgColor 打底（默认取主题色 ⇒ 与页面浅灰
+              //     不一致，会看到一条明显色带 ✗）
+                // ---- 左侧导航 + 页签内容 ----
+                        //   ⚠ **侧栏必须窄（68px）**：搜索页表格 986px 正好等于窗口 1060 扣掉边距后的宽度
+                        //     ⇒ 侧栏每宽 1px 都从表格那里扣（dashboard 那种 190px 文字侧栏会让表格
+                        //     出横向滚动条 ✗ —— 这里的横向预算和仪表盘完全不同）
+                        var side = SDL3.createVBox({padX: 0, padY: 6, spacing: 6, bg_color: #E9EBEEFF})
+                        navSearch = SDL3.createButton({w: 68, h: 44, text: "● 搜索", font_size: 13})
+                        navSearch.set_tip("搜索页：关键词 → 勾选 → 下载")
+                        navSearch.on_click(func() { tab.set_active(0) })
+                        side.add(navSearch, {grow: 0, shrink: 0, basis: 68, align: 1})
+                        navBang = SDL3.createButton({w: 68, h: 44, text: "榜单", font_size: 13})
+                        navBang.set_tip("榜单页：各站排行榜")
+                        navBang.on_click(func() { tab.set_active(1) })
+                   side.add(navBang, {grow: 0, shrink: 0, basis: 68, align: 1})
+                        // 弹性空隙放最后 ⇒ 两个按钮被顶到**上面**（下面留白给以后加"下载队列 / 设置"入口 ✓）
+                        side.add(SDL3.createLabel({text: ""}), {grow: 1, shrink: 0, align: 1})
 
-        win.setRootAt(root, 0, titleH)
+                        tab = SDL3.createTabControl({x: 0, y: 0, w: 992, h: 520,
+                            tabs: ["搜索", "榜单"], active: 0, show_header: false, border: false,
+                            bg_color: #F5F6F8FF})
+                        tab.setPageLayout(0, page0)              // 页 0 = 搜索页（布局驱动 ✓）
+                        buildBangPage()               // 页 1 = 榜单页（见该函数 ✓）
+                  tab.on_change(func(int idx) { onTabChanged(idx) })
+
+                        // 侧栏 + 页签内容并排（TabControl 吃剩余宽度 ⇒ 窗口缩放时页内跟着重排 ✓）
+                        var body = SDL3.createHBox({padX: 0, padY: 0, spacing: 0})
+                        body.add(side, {grow: 0, shrink: 0, basis: 68, align: 3})
+                        body.add(tab, {grow: 1, shrink: 1, align: 3})
+                root.add(body, {grow: 1, shrink: 1, align: 3})
+
+          // ---- 播放条（★ 2026-10-09：移到 TabControl **外面** ⇒ 切页不打断播放 ✓）----
+                //   它自带两行：① 歌名 + 进度 + 时间  ② 上一首/播放/下一首/循环 + 音量 + 重扫 + 序号
+                //   目录 = 输出目录（downloads/ ⇒ 播的是已下好的本地文件 ✓）
+           pbar = pb.create_player_bar(outdir, imgDir, stateLbl)
+                root.add(pbar.box, {grow: 0, shrink: 0, align: 3})
+
+                win.setRootAt(root, 0, titleH)
+    }
+
+    // ==================== 榜单页（页 1）====================
+    //   移植自二创（LenoMusic-main(1)）的榜单功能，2026-10-09 改造成独立页签 ✓
+    //   ⚠ 菜单与歌曲**都要走网络** ⇒ 都放线程里同步调会卡住 UI
+    //     （kuwo/qq 的菜单是内置常量、瞬时 ✓；netease/kugou 的要发请求 ⇒ 1~2 秒 ✗）
+    //   ⚠ 结果用 `t.join() as Array[Array[string]]` 取（与搜索阶段 A/B 同一套 ✓ 见 advanceSearch）
+
+    // 榜单页的音源下标 → 音源 id（与搜索页的 srcIds 平行；用 dl_engine.sources() 的顺序 ✓）
+    func bangsrcid(int idx): string {
+        if idx == 1 { return "netease" }
+        if idx == 2 { return "kugou" }
+        if idx == 3 { return "qq" }
+        return "kuwo"
+    }
+
+    // 榜单歌曲行 → 表格行（列比搜索页少一个「来源」：榜单本身就是单一音源 ✓）
+    func bangtablerow(Array[string] s): Array[string] {
+        return ["", s[eng.F_NAME], s[eng.F_ARTIST], s[eng.F_ALBUM],
+                eng.fmtduration(_int(s[eng.F_DURATION])), s[eng.F_EXT], s[eng.F_SIZETEXT]]
+    }
+
+    func fillBangTable() {
+        Array[Array[string]] rows = []
+        for bangSongs to s { rows.add(bangtablerow(s)) }
+        bangTable.set_rows(rows)
+        bangTable.check_all()
+    }
+
+    // ---- 切页：第一次进榜单页才拉菜单（懒加载 ⇒ 不拖慢启动 ✓）----
+    func onTabChanged(int idx) {
+            curPage = idx
+            // 选中态：文字前的 ●（图标以后再补★ 先不引图标依赖 ✓）
+            //   两个入口都走这一个回调（点侧栏按钮 / 程序 set_active）⇒ 状态不会漂移 ✓
+            navSearch.set_text(if idx == 0 then "● 搜索" else "搜索")
+            navBang.set_text(if idx == 1 then "● 榜单" else "榜单")
+       if idx == 1 and bangLoadedFor < 0 { loadBangMenu() }
+          SDL3.markFrameRedraw()
+      }
+
+    // ---- 拉某个音源的榜单菜单（走线程 ✓）----
+    func loadBangMenu() {
+        string src = bangsrcid(bangSrcBox.get_selected())
+        if src == bangCurSrc and bangLoadedFor >= 0 { return }   // 已有 ⇒ 不重复拉 ✓
+        bangCurSrc = src
+        bangLbl.set_text("正在取" + srcname(src) + "的榜单列表…")
+        bangMenuThread = threads.start(bang_menu_worker, src)
+    }
+
+    // ---- 菜单到手：填下拉 + 自动加载第 0 个榜单 ----
+    func onBangMenuGot(Array[Array[string]] menu) {
+        Array[string] names = []
+        bangIds = []
+        for menu to it {
+            if it.len() < 2 { continue }
+            bangIds.add(it[0])
+            names.add(it[1])
+        }
+        bangLoadedFor = 1
+        if names.len() == 0 {
+            bangBox.set_items(["（该音源暂无榜单）"])
+            bangLbl.set_text(srcname(bangCurSrc) + "：没取到榜单（网络不通或接口变了）")
+            return
+        }
+        bangBox.set_items(names)
+        bangCurId = bangIds[0]
+        bangLbl.set_text(srcname(bangCurSrc) + "：" + names[0] + "（共 " + _str(names.len()) + " 个榜，正在取歌…）")
+        loadBangRows()
+    }
+
+    // ---- 取某个榜单的歌曲（走线程 ✓）----
+    func loadBangRows() {
+        if bangCurId == "" { return }
+        if bangLoading { return }         // 上一票还在跑 ⇒ 等它收尾（切榜太快会丢结果 ✗）
+        bangLoading = true
+        bangReloadBtn.set_enabled(false)
+        bangLbl.set_text("正在取「" + bangBox.get_selected_text() + "」的歌曲…")
+        bangThread = threads.start(bang_worker, bangCurSrc, bangCurId, bangLimit)
+    }
+
+    // ---- 下拉 interactions ----
+    func onBangSrcChanged(int idx) {
+        bangLoadedFor = -1        // 强制重拉菜单（换站了 ✓）
+        bangIds = []
+        bangSongs = []
+        bangTable.set_rows([])
+        loadBangMenu()
+    }
+
+    func onBangPicked(int idx) {
+        if idx < 0 or idx >= bangIds.len() { return }
+        bangCurId = bangIds[idx]
+        loadBangRows()
+    }
+
+    // ---- 120ms 一拍：把两条线程的结果收回来 ----
+    func pollBang() {
+        if not bangLoading { return }
+        if bangThread == null { return }
+        Thread? t = bangThread
+        if t == null { return }
+        if t.state() == "running" { return }
+        var got = t.join() as Array[Array[string]]
+        bangThread = null
+        bangLoading = false
+        bangReloadBtn.set_enabled(true)
+        Array[Array[string]] rows = []
+        if got != null { rows = got }
+        bangSongs = rows
+        fillBangTable()
+        if rows.len() == 0 {
+            bangLbl.set_text(srcname(bangCurSrc) + "：「" + bangBox.get_selected_text() + "」没取到歌（接口可能变了或网络不通）")
+        } else {
+            // ⚠ 榜单行**没有体积**（「大小」列天然为空 ⇒ 不是 bug，见 dl_engine.bang_rows 注释 ✓）
+            bangLbl.set_text(srcname(bangCurSrc) + "：「" + bangBox.get_selected_text() + "」共 " + _str(rows.len())
+                + " 首　·　双击某行 = 下载这一首　·　榜单多数不给体积，下载时按 Range 头算真实大小")
+        }
+    }
+
+    // 菜单线程单独收（它比歌曲线程先起 ✓）
+    func pollBangMenu() {
+        if bangMenuThread == null { return }
+        Thread? t = bangMenuThread
+        if t == null { return }
+        if t.state() == "running" { return }
+        var got = t.join() as Array[Array[string]]
+        bangMenuThread = null
+        Array[Array[string]] menu = []
+        if got != null { menu = got }
+        onBangMenuGot(menu)
+    }
+
+    // ==================== 榜单页（页 1）====================
+    //   页内也用布局驱动（setPageLayout(1, page1) ⇒ 窗口缩放跟着重排 ✓ 照 dashboard 的做法）
+    func buildBangPage() {
+        var page1 = SDL3.createVBox({padX: 0, padY: 0, spacing: 0})
+
+        // ---- 工具行：音源 + 榜单 + 重新加载 ----
+        var brow = SDL3.createHBox({h: 32, padX: 0, padY: 0, spacing: 8})
+        brow.add(SDL3.createLabel({text: "站点", font_size: 13}), {grow: 0, shrink: 0, align: 1})
+        //   站点下拉：只用**有榜单的四个源**（咪咕还没接 ⇒ 不进这个下拉 ✓）
+        bangSrcBox = SDL3.createComboBox({
+            w: 110, h: 30, font_size: 13, item_h: 26, selected: 0,
+            items: ["酷我", "网易云", "酷狗", "QQ音乐"],
+            tip: "选哪个站的榜（换站 ⇒ 榜单菜单重新拉）"
+        })
+        bangSrcBox.on_change(func(int idx) { onBangSrcChanged(idx) })
+        brow.add(bangSrcBox, {grow: 0, shrink: 0, basis: 110, align: 3})
+        brow.add(SDL3.createLabel({text: "榜单", font_size: 13}), {grow: 0, shrink: 0, align: 1})
+        bangBox = SDL3.createComboBox({
+            w: 230, h: 30, font_size: 13, item_h: 26, selected: 0,
+            items: ["（切到本页自动加载）"],
+            tip: "选一个榜单（选项按所选站点动态生成 ✓）"
+        })
+        bangBox.on_change(func(int idx) { onBangPicked(idx) })
+        brow.add(bangBox, {grow: 0, shrink: 0, basis: 230, align: 3})
+        bangReloadBtn = SDL3.createButton({w: 96, h: 30, text: "重新加载", font_size: 13})
+        bangReloadBtn.set_tip("重新取这个榜单的歌曲（接口抽风时用）")
+        bangReloadBtn.on_click(func() { loadBangRows() })
+        bangReloadBtn.set_enabled(false)
+        brow.add(bangReloadBtn, {grow: 0, shrink: 0, basis: 96, align: 3})
+        brow.add(SDL3.createLabel({text: ""}), {grow: 1, shrink: 0, align: 1})
+        page1.add(brow, {grow: 0, shrink: 0, align: 3})
+
+        // ---- 榜单歌曲表格 ----
+        //   列与搜索表一致、少了「来源」（榜单本身就是单一站点 ✓）；第 0 列仍是勾选列 ✓
+        bangTable = SDL3.createTable({
+            headers: ["", "歌名", "歌手", "专辑", "时长", "格式", "大小"],
+            col_widths: [40.0, 300.0, 150.0, 180.0, 70.0, 66.0, 110.0],
+            aligns: [1, 0, 0, 0, 1, 1, 2],
+            header_aligns: [1, 0, 0, 0, 1, 1, 2],
+            check_col: 0,
+            image_col: 1, image_size: 18, image_gap: 6, image_path: rowIcon,
+            sortable: true, zebra: true, row_h: 26, header_h: 30, font_size: 14,
+            multi: true,
+            empty_text: "还没有榜单 —— 切到本页会自动加载所选站点的第1 个榜单"
+        })
+        //   双击 = 下载这一首（与搜索表同一套语义 ✓）
+        bangTable.on_dbl_click(func(int row, int col) {
+            if row >= 0 and row < bangSongs.len() { startDownload([bangSongs[row]], downloadflags()) }
+        })
+        page1.add(bangTable, {grow: 1, shrink: 1, align: 3})
+
+        // ---- 状态行 ----
+        var bstatus = SDL3.createHBox({h: 24, padX: 0, padY: 0, spacing: 12})
+        bangLbl = SDL3.createLabel({text: "切到本页会自动加载所选站点的第 1 个榜单（免登录 ✓）", font_size: 12, truncate: 1, max_w: 1040.0})
+        bstatus.add(bangLbl, {grow: 1, shrink: 1, align: 1})
+        page1.add(bstatus, {grow: 0, shrink: 0, align: 3})
+
+        tab.setPageLayout(1, page1)
     }
 
     // ==================== 事件与主入口 ====================
@@ -1403,6 +1681,22 @@ struct MusicDlApp {
         cfg = dlset.load()
 
         setupUI()
+        // ★ 自检钩子：DBANG=1 ⇒ 启动就切到「榜单」页（照数据看板 dashboard 的 DPAGE 约定 ✓）
+        //   配合 DSHOT 用：DBANG=1 DSHOT=x.png DSHOT_AT=150 ⇒ 能截到榜单加载完的样子 ✓
+        var dbang = _env("DBANG")
+                if dbang != null and _int(_str(dbang)) > 0 {
+         tab.set_active(1)
+                    // DBANGSRC=<1..4>顺带选中某个站点（自检用：kuwo/qq 是**内置菜单**、瞬时 ✓；
+                    //   netease/kugou 的菜单是**现拉接口** ⇒ 另一条代码路径，得单独验 ✓）
+         var dbs = _env("DBANGSRC")
+                    if dbs != null {
+                int si = _int(_str(dbs))
+            if si > 0 and si <= 4 {
+                  bangSrcBox.set_selected(si - 1)
+              onBangSrcChanged(si - 1)
+              }
+                }
+                }
         // ⚠ setupUI 之后才能碰控件：套上设置里的"默认带歌词"，并在状态栏报一下并行度 ✓
         lyricBox.set_checked(cfg.lyric)
         stateLbl.set_text("就绪（并行 " + _str(cfg.workers) + " 线程；标题栏右上「下载 / 设置」两个图标）")

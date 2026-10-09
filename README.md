@@ -35,6 +35,18 @@
 
 ## 二、功能
 
+> 界面是**两页签**：`搜索` / `榜单`（★ 2026-10-09，参考 `leno_gui/应用/数据看板/dashboard.leno`
+> 的 `TabControl` 用法；**播放条在页签之外** ⇒ 切页不打断播放 ✓）。
+> 自检：`DBANG=1` 启动即切到榜单页，`DBANGSRC=<1..4>` 顺带选中站点，配合 `DSHOT` 可无头截图 ✓
+
+- **榜单**（v0.1.6 ✓，移植自二创并改成独立页）：选站点（酷我 / 网易云 / 酷狗 / QQ）⇒
+  选榜单 ⇒ 取该榜歌曲（默认 100 首）；**切到本页才加载**（懒加载，不拖慢启动 ✓）
+  - 酷我 **31 个**榜单 + QQ **9 个**榜单**内置成常量表**（免网络、瞬时 ✓）
+  - 网易云 / 酷狗的榜单菜单**现拉接口**（各自榜单接口，免登录 ✓）
+  - 四个源的榜单接口与坑（`rankid ≠ id`、缺 `singername`、URL 结尾多个 `?` 会让首个参数失效…）
+    全部记在各自 core 的注释里；离线可测的部分钉在 `test/test_bang_recipe.leno`（38 项 ✓）
+  - ⚠ **榜单行不做「有没有体积」过滤**：榜单接口多数不给体积 ⇒「大小」列天然为空（**不是 bug**），
+    下载时按 `Range` 头算真实总量 ✓
 - **搜索**：关键词 + 每源条数；**多音源**（酷我 / 网易云 / 酷狗 / QQ）一起搜、结果表按音源混排；
   音源复选框按注册表**动态生成**（加新源只需在注册表加一行 ✓）
 - **结果表**：勾选列（表头可全选）/ 排序 / 多选 / 双击下载这一首 / 右键菜单
@@ -76,7 +88,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `musicdl_gui.leno` | GUI 主程序：主窗口（搜索栏 / 音源勾选 / 结果表 / 右键菜单）+ 标题栏动作 |
+| `musicdl_gui.leno` | GUI 主程序：**两页签**（`搜索` / `榜单`，`TabControl`）+ 标题栏动作；**播放条在页签之外**（切页不打断播放 ✓）|
 | `songrow.leno` | **歌曲行的字段契约**：10 个下标常量（`F_*`）+ 具名存取（`rowname` / `rowext` / `rowbytes` …）。全仓唯一事实来源 —— 引擎转发一份 `eng.F_*` 保兼容，GUI/下载窗口零改动 |
 | `parsing.leno` | **严格解析**工具（纯逻辑）：`parse_secs` / `parse_millis` / `parse_word_span` / `parse_uint` 一律用**多返回值**`(值, 是否成功)`，不用 -1 哨兵；外加越界安全取值 `at` / `at_int` / `tail_from` |
 | `dl_engine.leno` | **引擎层**（无 UI、无 print、无 main）：音源注册表 + 分片下载（进度 / 续传 / 暂停取消）+ 跨线程 worker 入口；对外一律传「纯字符串数组行」（struct 不能跨线程 ✗） |
@@ -85,7 +97,7 @@
 | `player_bar.leno` | 播放条 UI（嵌在主界面表格下方、状态栏上方） |
 | `dl_settings.leno` | 设置**纯逻辑**（读写配置 + 取值钳位；不 import SDL3 ⇒ 可单测 ✓） |
 | `dl_settings_win.leno` | 设置弹窗（SDL3） |
-| `kuwo_core.leno` | 酷我核心：搜索 / 取直链 |
+| `kuwo_core.leno` | 酷我核心：搜索 / 取直链 / **榜单**（内置 31 榜菜单 + `kbangserver` 老接口）|
 | `kuwo_des.leno` | 酷我官方接口要用的 DES 变体（`encryptquery`） |
 | `kuwo_lyric.leno` | 酷我歌词：`newlyric.lrc` 接口 + zlib 解压 + gb18030 解码 + 落盘 |
 | `netease_core.leno` | 网易核心：`weapi/search/get` 搜索 + 批量取直链（顺带补齐体积与"能不能下"）|
@@ -126,10 +138,11 @@ leno.exe musicdl.leno --help
 
 ## 五、跑测试
 
-10 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
+11 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
 
 ```bat
 <发行包>\leno.exe test\test_player_state.leno      :: 播放器规则：认哪些扩展名 / 下一首是谁 / 循环三态 / 失败要安全
+<发行包>\leno.exe test\test_bang_recipe.leno        :: 榜单配方金标：31/9 榜常量表 + 酷我 URL 配方 + formats→ext + 脏行丢弃（38 项 ✓）
 <发行包>\leno.exe test\test_parsing.leno           :: parsing/songrow 的边界：at_int 脏数据**不抛** / 解析严格性 / 老行兼容（43 项断言 ✓）
 <发行包>\leno.exe test\test_lrc_parse.leno         :: 歌词解析金标：标准 LRC / 逐字时间轴 / 译文行 / 非法标签（22 项断言 ✓）
 <发行包>\leno.exe test\test_parallel_dl.leno       :: 多首歌并行下载（离线服务端）
