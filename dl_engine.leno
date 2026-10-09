@@ -130,6 +130,15 @@ export func songlabel(Array[string] row): string {
     return srow.rowname(row) + " - " + srow.rowartist(row)
 }
 
+// 歌曲行 → **消毒基名**（落盘音频与歌词共用的那个名字：sanitizefilename("歌名 - 歌手")）
+//   为什么单独暴露它（★ 2026-10-09，移植自二创 LenoMusic-main ✓）：播放队列要拿它去**认领**
+//   已经下好的本地文件与同名 .lrc（见 resolve_locals ✓）—— 不能"按搜索行的格式列拼一个确切文件名"
+//   ✗，因为落盘扩展名由服务端给的格式定（realext），跟列表里的"格式"列不一定一致 ⇒ 拼名字会漏 ✓
+export func base_of(Array[string] row): string {
+    if row.len() <= F_ARTIST { return "" }
+    return kuwo.sanitizefilename(srow.rowname(row) + " - " + srow.rowartist(row))
+}
+
 // 歌曲行 → 期望字节数（列表标注；可能为 0/偏低，仅用于进度分母的初值）
 export func songbytes(Array[string] row): int {
     return srow.rowbytes(row)
@@ -535,49 +544,12 @@ export func search_entry(Array[string] srcids, string keyword, int limit, any ch
 // 进度经 ch 上报，控制命令经 cmd 收。
 // ⚠ 导出是给**无 GUI 的并行测试**直接调用的（test/test_parallel_dl.leno：把"直链"指向本机
 //   服务端 ⇒ 离线就能压 N 线程并行、共用通道按 idx 归位、取消广播）；产品路径仍只走 dl_entry_shard ✓
-// ==================== ①.5 试听：只拉**前一段** ====================
-// 为什么这么干：实测"下载是**顺序追加写** ⇒ 截断文件**前缀自洽** ⇒ 能 load / 能播 / 能给位置" ✓
-//   ⇒ 试听只要前 1~2MB 就够听几十秒 ✓（比等整首快一个量级 ✓）
-// 返回落盘字节数（>0 成功；<0 失败）
-// ⚠ 本函数**不起线程**（语言硬约束：线程入口必须与调用方同文件 ✓）⇒ 由应用在自己的 worker 里调 ✓
-// src：音源 id（默认 kuwo ⇒ 既有调用点不用改 ✓）
-// link：搜索时第三方**已经取回来的直链**（可空 ⇒ 现取；理由同 dl_entry_shard 里那段 ✓）
-export func dl_preview(string songId, string outpath, int bytes, any ch, string tag, string src = "kuwo", string link = ""): int {
-    if bytes < 65536 { bytes = 65536 }
-    HttpClient client = net.createClient()
-    if not client.isOk() { sendmsg(ch, ["fail", tag, "no-client"]); return -1 }
-    // UA 与请求头按音源重置一次（QQ 要 y.qq.com 的 Referer、网易要 music.163.com 的 ✓）
-    preparefor(client, src)
-    client.setTimeout(30000)
-    client.setSSLVerify(false, false)
-
-    string used = link
-    if used == "" {
-        try { used = directurl(client, src, songId) } catch e { used = "" }
-    }
-    if used == "" { client.close(); sendmsg(ch, ["fail", tag, "no-link"]); return -1 }
-    int n = dl_preview_url(client, used, outpath, bytes, ch, tag)
-    client.close()
-    return n
-}
-
-// 试听的"拉取"那一半：**单独的直链** ⇒ 可离线测（把直链指向本机服务端即可 ✓，
-//   与 test/test_parallel_dl.leno 测 dl_one 是同一套路 ✓）
-export func dl_preview_url(HttpClient client, string link, string outpath, int bytes, any ch, string tag): int {
-    // 只要前 bytes 字节；服务端可能忽略 Range（回 200）⇒ 那也照收（可能收到整首，无妨 ✓）
-    client.replaceHeaders(["Range: bytes=0-" + _str(bytes - 1)])
-    Response r = client.get(link)
-    if r.statusCode != 200 and r.statusCode != 206 {
-        sendmsg(ch, ["fail", tag, "http " + _str(r.statusCode)])
-        return -1
-    }
-    string raw = r.rawBody()
-    int n = raw.byte_len()
-    if n <= 0 { sendmsg(ch, ["fail", tag, "0"]); return -1 }
-    files.write(outpath, raw)            // 覆盖写临时文件 ✓（binary 安全 ✓）
-    sendmsg(ch, ["ready", outpath, tag, _str(n)])   // 回传：文件路径 + 标签 + 字节数 ✓
-    return n
-}
+// ==================== ①.5 （原"试听：只拉前一段"已退役 ✓ 2026-10-09）====================
+// 为什么删：那一套是"先拉 1~2MB 到临时文件立刻出声 + 后台静默下整首、下完切过去"，
+//   现在被"**播整表 + 边下边播**"取代（播放器直接播那个正在长大的最终文件 ⇒ 更简单、也更快 ✓）
+//   ⇒ `dl_preview` / `dl_preview_url` 连同 `preview_worker` 一起删掉 ✓
+//   ⚠ 唯一值得留的知识点：**下载是顺序追加写、文件前缀自洽**，所以"半截文件也能播"——
+//     这正是边下边播能成立的前提（见 dl_one 那边每一片的追加写 ✓）
 
 export func dl_one(HttpClient client, string link, string outpath, any ch, int jobIdx, any cmd): int {
     int got = fsize(outpath)          // 本地已有的部分 ⇒ 从这里续传
@@ -735,7 +707,16 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
             string realext = kuwo.extfromurl(link)
             if realext == "" { realext = srow.rowext(job) }
             if realext == "" { realext = "flac" }
-            string outpath = outdir + _sep() + base + "." + realext
+            string finalpath = outdir + _sep() + base + "." + realext
+            // ★ 2026-10-09（对齐二创 LenoMusic-main 的想法）：**没下完的先带 `@` 前缀**，下完才改名 ✓
+            //   为什么要它：半截文件若就叫最终名 ⇒ ① 别的播放器 / 资源管理器双击会误播它 ✗
+            //     ② 我们的 `resolve_locals` 会把它当"本地已有"⇒ 双击这首会**直接播半截**、
+            //        而且**不会**触发边下边播 ✗✗（这正是群友指出的那个坑 ✓）
+            //   ⇒ 一切"算不算已下载"的判定都**排掉 `@` 开头的**（见 find_local / resolve_locals /
+            //     player.is_audio 三处 ✓）—— 三处口径必须一致 ✓
+            //   ⚠ 老文件兼容：只有**最终名**存在（旧版本下的）⇒ 仍按它续传（不把老下载判成"没下过" ✓）
+            string outpath = outdir + _sep() + "@" + base + "." + realext
+            if fsize(outpath) <= 0 and fsize(finalpath) > 0 { outpath = finalpath }
             sendmsg(ch, ["start", _str(i), "0", srow.rowbytes_text(job), outpath])
             int got = -1
             try {
@@ -744,8 +725,19 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
                 got = -1
             }
             if got > 0 {
+                // ★ 下完 ⇒ 把 `@` 去掉（改名失败就**保留 `@` 名**并如实回传路径 ✓ 不硬来 ✗）
+                string realpath = outpath
+                if outpath != finalpath {
+                    try {
+                        if files.exists(finalpath) { files.delete(finalpath) }
+                        dirs.rename(outpath, finalpath)
+                        realpath = finalpath
+                    } catch e {
+                        realpath = outpath              // 被占用 / 权限 ⇒ 留着 `@` 名（下次还能续 ✓）
+                    }
+                }
                 ok = ok + 1
-                sendmsg(ch, ["done", _str(i), _str(got), srow.rowbytes_text(job), outpath])
+                sendmsg(ch, ["done", _str(i), _str(got), srow.rowbytes_text(job), realpath])
             } else if got == -2 {
                 // 被取消：不算失败（半截文件留着，下次重下会自动从断点续传 ✓）
                 sendmsg(ch, ["cancelled", _str(i), "0", "0", ""])
@@ -824,6 +816,7 @@ export func find_local(Array[string] job, string outdir): string {
     var names = dirs.listdir(outdir)
     for names to nm {
         string s = _str(nm)
+        if s.slice(0, 1) == "@" { continue }     // ★ `@` = 还没下完的半截文件 ⇒ **不算"已有"** ✓（见落盘处）
         if s.len() > base.len() + 1 {
             if s.slice(0, base.len()) == base {
                 if s.slice(s.len() - 4, s.len()) != ".lrc" {
@@ -834,6 +827,47 @@ export func find_local(Array[string] job, string outdir): string {
         }
     }
     return ""
+}
+
+// 一次列目录，把**每一行**"本地是否已有这一首"解析出来（有 ⇒ 完整路径；没有 ⇒ ""）
+//   ★ 2026-10-09（移植自二创 LenoMusic-main ✓）：播放队列来源改成"当前界面那张表"之后，
+//     入队时要给每行标出"要不要边下边播" ⇒ 几十上百行逐行调 find_local 会退化成
+//     O(行数 × 目录项数) ✗ ⇒ 这里**只扫一次目录**，再拿每行的消毒基名去前缀匹配 ✓
+//   ⚠ 判据与 find_local **逐字一致**：`<基名>` 前缀 + 非 .lrc + 文件真的在 ⇒ 才算
+//     —— 这样"播放队列认为本地有没有"与"右键定位/删除认为有没有"永远同口径 ✓
+export func resolve_locals(Array[Array[string]] rows, string outdir): Array[string] {
+    Array[string] out = []
+    Array[string] names = []
+    if dirs.exists(outdir) {
+        var ls = dirs.listdir(outdir)
+        for ls to nm {
+            string s = _str(nm)
+            if s.slice(0, 1) == "@" { continue }   // ★ `@` = 还没下完 ⇒ 不算"本地已有"（否则双击会播半截 ✗）
+            if s.len() > 4 and s.slice(s.len() - 4, s.len()) != ".lrc" { names.add(s) }
+        }
+    }
+    int i = 0
+    while i < rows.len() {
+        string base = base_of(rows[i])
+        string hit = ""
+        if base != "" {
+            int k = 0
+            while k < names.len() {
+                string s = names[k]
+                if s.len() > base.len() + 1 and s.slice(0, base.len()) == base {
+                    string full = dirs.join(outdir, s)
+                    if files.exists(full) {
+                        hit = full
+                        k = names.len()        // 命中即收手 ✓
+                    }
+                }
+                k = k + 1
+            }
+        }
+        out.add(hit)
+        i = i + 1
+    }
+    return out
 }
 
 export func errmsg(any e): string {

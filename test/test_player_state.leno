@@ -95,12 +95,25 @@ main() {
     // ---- ⑤ 播放条的纯逻辑（不建控件也能调 ⇒ 宿主/测试都好用 ✓）----
     check("播放条：没建过 -> playable_count 为 0（不崩）", pb.playable_count(null) == 0)
 
-    // ---- ⑥ 试听（右击菜单「播放试听」✓）：状态机要能安全失败、不污染播放列表 ✓ ----
-    check("试听：文件不存在 -> 安全失败（返回 false、不崩）", not p.preview(dir + "/没有这个文件.mp3", "试听测试") == true)
-    check("试听失败后 previewing 归位（不留半截状态）", not p.previewing)
-    check("试听：失败原因写进 err（界面能说清）", p.err != "")
-    p.stop_preview()
-    check("stop_preview 幂等（没在试听时调用也不崩）", true)
+    // ---- ⑥ 播放（原"试听"那条已退役 2026-10-09 ⇒ 换成"安全失败"这条口径 ✓）----
+    //   ⚠ 没喂队列时 `play_index` 走老口径（扫下载目录的 list）⇒ 下标越界必须**安全失败** ✓
+    int beforeIdx = p.index
+    check("play_index 越界 -> 安全失败（返回 false、不崩）", not p.play_index(99))
+    check("越界失败**不动**当前下标（状态没被弄脏 ✓）", p.index == beforeIdx)
+
+    // ---- ⑥.5 ★ `@` 前缀（未下完的半截文件）不算"本地已有"（2026-10-09，对齐二创 ✓）----
+    //   为什么要它：半截文件若不带 `@`，`resolve_locals` 会把**正在下载的那首**当"已有"
+    //   ⇒ 双击它就直接播半截、还不触发边下边播 ✗（群友指出的坑 ✓）
+    //   三处口径必须一致：dl_engine.find_local / dl_engine.resolve_locals / player.is_audio ✓
+    files.write(dirs.join(dir, "@半截 - 歌手.mp3"), "x")
+    check("find_local：`@` 半截文件不算已有 ", eng.find_local(["kuwo", "半截", "歌手"], dir) == "")
+    check("resolve_locals：`@` 半截文件同样不算 ", eng.resolve_locals([["kuwo", "半截", "歌手"]], dir)[0] == "")
+    files.write(dirs.join(dir, "完整 - 歌手.mp3"), "x")
+    check("find_local：正常名照认（半截不挡成品 ✓）", eng.find_local(["kuwo", "完整", "歌手"], dir) != "")
+    Player sA = new Player()
+    check("is_audio：`@` 半截文件不当音频（扫目录不列出 ✓）", (not sA.is_audio("@半截 - 歌手.mp3")) and sA.is_audio("完整 - 歌手.mp3"))
+    files.delete(dirs.join(dir, "@半截 - 歌手.mp3"))
+    files.delete(dirs.join(dir, "完整 - 歌手.mp3"))
 
     // ---- ⑦ 文件名拆分（播放条显示"歌名 + 歌手"用 ✓，命名规则见 dl_engine ✓）----
     //   规则 = 下载落盘的命名「**歌名 - 歌手**」（dl_engine:377 + F_NAME=1/F_ARTIST=2 ✓）
@@ -112,15 +125,16 @@ main() {
     check("去扩展名：只去掉**最后**一个点之后", pl.strip_ext("a.b.mp3") == "a.b")
 
     // ---- ⑧ 拖进度的**闸门** + "整首下完切过去"要用的按名找下标（2026-10-07 新增 ✓）----
-    //   为什么要有闸门：试听播的是**前一段的截断文件** ⇒ 拖了会跳到并不存在的位置 ✗
+    //   为什么要有闸门：**没有声音对象**时拖进度没有意义（离线建不了 Sound ⇒ 正好测这条 ✓）
+    //   ★ 2026-10-09：边下边播**允许拖**（拖到未下区会自动停下等缓冲 ✓）⇒ 那条单独在下面测 ✓
     Player s1 = new Player()
     check("闸门：什么都没播 -> 不许拖 ", not s1.can_seek())
     s1.list = ["后来 - 刘若英.flac", "夜曲 - 周杰伦.mp3"]
     s1.index = 0
     check("闸门：选了歌但**声音对象还没建**（离线建不了）-> 不许拖 ", not s1.can_seek())
-    s1.previewing = true
-    check("闸门：试听态一律不许拖（截断文件）", not s1.can_seek())
-    s1.previewing = false
+    s1.streaming = true
+    check("闸门：边下边播 -> **允许拖**（拖到未下区会自动等缓冲 ✓）", s1.can_seek())
+    s1.streaming = false
     check("按名找下标：命中 -> 1 ", s1.index_of("夜曲 - 周杰伦.mp3") == 1)
     check("按名找下标：只比 basename（带目录也认）", s1.index_of("D:\\music\\夜曲 - 周杰伦.mp3") == 1)
     check("按名找下标：没有这首 -> -1 ", s1.index_of("不存在.mp3") == -1)
@@ -169,19 +183,20 @@ main() {
     // ---- ⑪ 试听态的歌词（2026-10-08 用户实测踩到 ✓ 两条都要守）----
     //   ① 试听不在播放列表里（`current()` == "" ✓）⇒ 歌词必须去**输出目录**找同名 .lrc ✓
     //      先前直接返回 "" ⇒ 试听中点「词」永远是空的 ✗
-    //   ② 歌词常常**比歌晚到**（后台整首下载：音频先落盘、.lrc 后落盘 ✓）
+    //   ② 歌词常常**比歌晚到**（边下边播也是：音频边下边写、.lrc 后落盘 ✓）
     //      ⇒ 文件一出现就要能**补读** ✓（不换歌、不重启、不重开浮层 ✓）
+    //   ★ 2026-10-09：改走**队列模式** —— 还没下载的那首按"输出目录 + 消毒基名 + .lrc"拼 ✓
+    //     （见 player.lrc_path 的队列分支 ✓；老口径里这条是靠"试听态 + previewName"拼的 ✗ 已退役）
     string tdir2 = dirs.join(_tmpdir(), "leno_lrc_test2")
     dirs.mkdir_p(tdir2)
     Player s3 = new Player()
-    s3.scanDir = tdir2
-    s3.previewing = true
-    s3.previewName = "晚到 - 歌手"
-    check("试听歌词路径：指向输出目录的同名 .lrc ", s3.lrc_path() == dirs.join(tdir2, "晚到 - 歌手.lrc"))
-    check("试听歌词：文件还没到 -> 空歌词（不崩）", s3.lyric_count() == 0)
+    s3.set_queue(["晚到 - 歌手"], [""], ["晚到 - 歌手"], tdir2)
+    s3.index = 0
+    check("队列里没下载的那首：歌词路径 = 输出目录的同名 .lrc ", s3.lrc_path() == dirs.join(tdir2, "晚到 - 歌手.lrc"))
+    check("歌词还没到 -> 空歌词（不崩）", s3.lyric_count() == 0)
     files.write(dirs.join(tdir2, "晚到 - 歌手.lrc"), "[00:00.00]第一句\n[00:05.00]第二句\n")
-    check("试听歌词：**文件晚到也能补读** （不换歌/不重启）", s3.lyric_count() == 2)
-    check("试听歌词：补读后取词正确 ", s3.lyric_text_at(1) == "第二句")
+    check("歌词**晚到也能补读** （不换歌/不重启）", s3.lyric_count() == 2)
+    check("补读后取词正确 ", s3.lyric_text_at(1) == "第二句")
     files.delete(dirs.join(tdir2, "晚到 - 歌手.lrc"))
 
     // ---- ⑫ 歌词折行（2026-10-08 新增 ✓ 纯算术 ⇒ 能离线测 ✓）----
@@ -295,10 +310,48 @@ main() {
     if dirs.exists(dirs.join(dir, "sub")) { dirs.delete(dirs.join(dir, "sub")) }
     if dirs.exists(dir) { dirs.delete(dir) }
 
+    // ==================== ★ 播放队列 + 边下边播（2026-10-09，移植自二创 LenoMusic-main ✓）==========
+    //   这些全是**纯逻辑**（不碰音频设备）⇒ 离线就能压住 ✓
+    //   队列的意义：来源从"扫下载目录"改成"当前界面那张表" —— 没下过的曲子也能进播放列表，
+    //   从而能"边下边播"（老口径里它们根本不在列表里 ✗）
+    var pq = new Player()
+    check("没喂队列 -> has_queue=false（老口径：扫目录的 list ✓）", not pq.has_queue())
+    check("没喂队列 -> count() 跟着 list 走", pq.count() == 0)
+    pq.set_queue(["A - a", "B - b"], ["D:/x/A - a.mp3", ""], ["A - a", "B - b"], "D:/x")
+    check("喂了队列 -> count() = 队列长（三个数组同长 ✓）", pq.count() == 2 and pq.has_queue())
+    check("name_at 取显示名（未消毒那版 ✓）", pq.name_at(1) == "B - b")
+    check("local_at：已下载有路径 / 没下过是空串", pq.local_at(0) == "D:/x/A - a.mp3" and pq.local_at(1) == "")
+    check("index_of 按本地路径命中", pq.index_of("D:/x/A - a.mp3") == 0)
+    check("index_of：没下载的行匹配不上（免得误判成'已经有本地文件' ✗）", pq.index_of("") == -1)
+    check("current()（未下载那首）=> 空串（界面据此知道它在边下边播 ✓）", pq.count() == 2 and pq.local_at(1) == "")
+
+    // 边下边播的进度折算（纯 ✓）：buf_ratio / avail_seconds 是"能拖到哪 / 要不要等缓冲"的判据 ✓
+    pq.streaming = true
+    pq.streamDone = false
+    pq.streamTotal = 1000
+    pq.streamGot = 250
+    check("buf_ratio = 已下 / 总量", pq.buf_ratio() == 0.25)
+    pq.streamTotal = 0
+    check("总量未知 -> buf_ratio 当 1（免得显示成永远 0% ✓）", pq.buf_ratio() == 1.0)
+    pq.streamTotal = 1000
+    pq.streamDone = true
+    check("整首下完 -> buf_ratio = 1（此后可随便拖 ✓）", pq.buf_ratio() == 1.0)
+    check("下完 -> avail_seconds = duration（此处都为 0 ✓ 不崩）", pq.avail_seconds() == pq.duration())
+    check("is_streaming / is_waiting 如实反映状态", pq.is_streaming() and not pq.is_waiting())
+
+    // "播放器求宿主开下"的取走语义（宿主每 120ms 取一次 ✓）
+    pq.wantStream = true
+    pq.wantIndex = 3
+    check("take_stream_request：取走一次有值、再取就是 -1", pq.take_stream_request() == 3 and pq.take_stream_request() == -1)
+
+    // 换队 ⇒ 边下边播状态必须一起收干净（不然新一首会被当成"还在流" ✗）
+    pq.set_queue(["C - c"], [""], ["C - c"], "D:/x")
+    check("换队后流式状态清干净", not pq.is_streaming() and not pq.is_waiting() and pq.buf_ratio() == 1.0 and pq.take_stream_request() == -1)
+
     print("")
     if fails > 0 {
         print($"共 {fails} 项失败")
         _exit(1)
     }
-    print("全部通过（扫目录 / 排序 / 循环三态 / 边界 / 安全失败）")
+    print("全部通过（扫目录 / 排序 / 循环三态 / 边界 / 安全失败 / 队列 + 边下边播纯逻辑 ✓）")
 }

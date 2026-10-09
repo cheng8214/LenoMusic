@@ -153,7 +153,7 @@ export struct PlayerBar {
     float hoverEase = 0.0        // 悬停缓动 0..1（别"啪"一下变粗 ✗ ⇒ 平滑逼近 ✓）
     float clickFx = -1.0         // 点击涟漪起点（比例 0..1；< 0 = 没有 ✓）
     float clickT = 0.0           // 涟漪进度 0..1 ✓
-    float dlPct = -1.0           // 后台"整首下载"进度 0..100（< 0 = 没有在下的 ✓）；显示在歌手行 ✓
+    // （原 `dlPct`：试听期的"整首下载 %" 已随试听退役 ⇒ 边下边播的进度改由 buf_ratio() 现算 ✓）
 
     bool lastPlaying = false     // 上一拍是否在播（用来判"要不要换播放/暂停图标" ✓）
     int lastIdx = -1             // 上一次显示的曲目（变了才同步歌单选中 ✓）
@@ -227,12 +227,10 @@ export struct PlayerBar {
                         } else {
                             hostLbl?.set_text("这次没跳成（这首没读出时长？）")
                         }
-                    } else if q.previewing {
-                        if dlPct >= 0.0 {
-                            hostLbl?.set_text("试听的是前一段（截断文件）-> 等整首下载完（" + _str(_int(dlPct)) + "%）就能拖了")
-                        } else {
-                            hostLbl?.set_text("试听的是前一段（截断文件）-> 整首下载完就能拖进度")
-                        }
+                    } else if q.is_streaming() {
+                        // ★ 2026-10-09：边下边播时也能拖（拖到未下区会自动等缓冲 ✓）—— 这条只是"没拖成"的说明
+                        hostLbl?.set_text("这首还在边下边播（已下 " + _str(_int(q.buf_ratio() * 100.0))
+                                          + "%）-> 拖到还没下到的地方会自动停下等缓冲")
                     } else {
                         hostLbl?.set_text("先播一首再拖进度")
                     }
@@ -261,7 +259,7 @@ export struct PlayerBar {
             var info = SDL3.createVBox({h: 46, padX: 0, padY: 3, spacing: 2})
             songLbl = SDL3.createLabel({text: song_text(q), font_size: 14, truncate: 1, max_w: INFO_W})
             info.add(songLbl, {grow: 0, shrink: 0, align: 3})
-            artistLbl = SDL3.createLabel({text: artist_text(q, dlPct), font_size: 12, truncate: 1, max_w: INFO_W})
+            artistLbl = SDL3.createLabel({text: artist_text(q), font_size: 12, truncate: 1, max_w: INFO_W})
             info.add(artistLbl, {grow: 0, shrink: 0, align: 3})
             row.add(info, {grow: 0, shrink: 0, basis: INFO_W, align: 1})
 
@@ -920,7 +918,7 @@ export struct PlayerBar {
             q.tick()                       // 放完自动下一首（规则在 player.leno ✓）
 
             songLbl.set_text(song_text(q))
-            artistLbl.set_text(artist_text(q, dlPct))
+            artistLbl.set_text(artist_text(q))
             timeLbl.set_text(fmt_time(q.position()) + " / " + fmt_time(q.duration()))
             // 进度条是自绘的（读的是 player 的实时比例 ✓）⇒ 播着的时候得让它重画 ✓（不播就不刷 ✗）
             if q.playing { SDL3.markFrameRedraw() }
@@ -1072,19 +1070,13 @@ export struct PlayerBar {
         }
     }
 
-    // ★ 试听（搜索结果右击「播放试听」用 ✓）：放一段临时文件，独占音频、放完自动收摊 ✓
-    //   为什么由"搜到的直链"先落一小段到临时文件再播：见 `dl_engine.dl_preview` 的注释 ✓
-    func preview(string path, string title) {
-        if p is Player => q { q.preview(path, title) }
-        lastIdx = -1                     // 让 tick 下一拍必然刷一次（名字/状态立刻更新 ✓）
-        SDL3.markFrameRedraw()
-    }
+    // ★ 2026-10-09：`preview` 转发随"试听（拉前一段）"一起退役 ——
+    //   现在右键/双击走 `set_queue`（从那一行起播整表），没下过的由宿主起单任务下载做边下边播 ✓
 
     // 当前播放条上"是哪一首"的标签（试听名 / 曲名去扩展名 ✓）
     //   宿主判"能不能给这首下歌词"要用：搜索结果的行能对上 ⇒ 才拿得到歌曲 ID ✓
     func cur_tag(): string {
         if p is Player => q {
-            if q.previewing { return q.previewName }
             return pl.strip_ext(dirs.basename(q.current_name()))
         }
         return ""
@@ -1102,52 +1094,98 @@ export struct PlayerBar {
         if p is Player => q { q.close() }
     }
 
-    // 后台"整首下载"的进度（宿主每拍从通道里读到就喂进来 ✓；< 0 = 没有在下的 ✓）
-    func set_dl_progress(float pct) {
-        dlPct = pct
-        SDL3.markFrameRedraw()          // 歌手行那句进度要立刻可见 ✓（不播时也得刷 ✓）
-    }
+    // ==================== ★ 边下边播的转发（2026-10-09，移植自二创 LenoMusic-main ✓）====================
+    //   本文件的纪律：**宿主只碰 PlayerBar**（见 shutdown / set_dl_progress ✓）⇒ 播放入队与那条
+    //   "播放器求宿主下载"的回路上，也一律由这里转给 Player ✓
+    //   （宿主每 120ms 走一遍：take_stream_request -> startStreamFor -> pollStreams -> 这里的回灌方法 ✓）
 
-    // ★ 后台"整首下载"完成（宿主收到 `done` 后调 ✓）——
-    //   ① 悄悄重扫（它进播放列表 ✓，但**不**覆盖状态栏：那句"整首已下载"留给宿主说 ✓）
-    //   ② 若正在试听**同一首** ⇒ 切到完整文件、并**接着刚才那一秒**继续播 ✓
-    //      ⇒ 之后 `can_seek()` 为真 ⇒ 进度条可以拖了 ✓（这正是"下完才能快进"的落地 ✓）
-    //   ⚠ 切源会有极短的静音（停掉旧的、加载新文件 ✓）：换来的是"试听听着听着就转成正式播放" ✓
-    //   ⚠ 只有 basename 能对上才切（比如下载到的格式和试听临时文件不同 ⇒ 就放过，不硬切 ✗）
-    func on_downloaded(string path, string tag): bool {
-        bool adopting = false
-        float pos = 0.0
+    // 换一整队并**从 startIdx 起播**；返回"到底播上了没有"（false ⇒ 宿主报错文案 ✓）
+    func set_queue(Array[string] names, Array[string] locals, Array[string] tags, string outdir, int startIdx): bool {
         if p is Player => q {
-            if q.previewing {
-                // ⚠⚠ 别拿"标签**全等**"当唯一判据 ✗✗（2026-10-08 用户实测：就差这一条 ⇒ 永远切不过去）
-                //   标签是 `歌名 - 歌手`（引擎 `songlabel` ✓），而**落盘文件名**是
-                //   `sanitizefilename(歌名 - 歌手) + "." + 扩展名`（`dl_engine:376` ✓）
-                //   ⇒ 扩展名一定不同 ✗、非法字符还会被清掉 ✗ ⇒ 全等比不出来 ✓
-                //   正解：**去掉扩展名后比**（`strip_ext(basename(path))` ✓）—— 两边同源 ⇒ 稳 ✓
-                if q.previewName == tag or pl.strip_ext(dirs.basename(path)) == q.previewName {
-                    pos = q.position()
-                    adopting = true
-                }
-            }
-        }
-        dlPct = -1.0
-        if p is Player => q {
-            q.scan(dir)                 // 内部会先 close ✓ 不用自己再来一遍 ✓
+            q.set_queue(names, locals, tags, outdir)
+            bool ok = q.play_index(startIdx)
             lastIdx = -1
             if popOpen { lb.set_items(list_items(q)); lb.clear_selection() }
-            if adopting {
-                int i = q.index_of(path)
-                if i >= 0 {
-                    if q.play_index(i) {
-                        if pos > 0.5 { q.seek_seconds(pos) }
-                        hostLbl?.set_text("试听的那首已下完 -> 已切到本地完整文件，可拖进度 （" + tag + "）")
-                    }
-                }
-            }
+            SDL3.markFrameRedraw()
+            return ok
         }
-        SDL3.markFrameRedraw()
-        return adopting
+        return false
     }
+
+    // 本地已有路径整批刷新（下完一首后由宿主调 ✓ 队列顺序不动 ✓）
+    func set_locals(Array[string] locals) {
+        if p is Player => q {
+            q.set_locals(locals)
+            SDL3.markFrameRedraw()
+        }
+    }
+
+    // 队列第 i 首的本地路径（"" = 还没下载 ⇒ 宿主据此决定要不要起"边下边播" ✓）
+    func queue_local(int i): string {
+        if p is Player => q { return q.local_at(i) }
+        return ""
+    }
+
+    func queue_name(int i): string {
+        if p is Player => q { return q.name_at(i) }
+        return ""
+    }
+
+    func queue_count(): int {
+        if p is Player => q { return q.count() }
+        return 0
+    }
+
+    func take_stream_request(): int {
+        if p is Player => q { return q.take_stream_request() }
+        return -1
+    }
+
+    func begin_stream(string path) {
+        if p is Player => q { q.begin_stream(path) }
+    }
+
+    func feed_buffer(int got, int total) {
+        if p is Player => q { q.feed_buffer(got, total) }
+    }
+
+    func finish_stream(string path) {
+        if p is Player => q { q.finish_stream(path) }
+    }
+
+    func fail_stream(string why) {
+        if p is Player => q { q.fail_stream(why) }
+    }
+
+    // ★ 改名前后（宿主按顺序调 ✓ 见 musicdl_gui.pollStreams 的 done 分支）：
+    //   Windows 下文件被读着时改不了名 ⇒ 先让播放器松手、改完再用最终文件续播 ✓
+    func stream_pause_for_rename(): float {
+        if p is Player => q { return q.stream_pause_for_rename() }
+        return -1.0
+    }
+
+    func stream_switched(string path, float pos) {
+        if p is Player => q { q.stream_switched(path, pos) }
+    }
+
+    // 界面文案用：在不在边下边播 / 已下比例（0..1 ✓）
+    func is_streaming(): bool {
+        if p is Player => q { return q.is_streaming() }
+        return false
+    }
+
+    func is_waiting(): bool {
+        if p is Player => q { return q.is_waiting() }
+        return false
+    }
+
+    func buf_ratio(): float {
+        if p is Player => q { return q.buf_ratio() }
+        return 1.0
+    }
+
+    // ★ 2026-10-09：`set_dl_progress` 与 `on_downloaded`（服务"试听 + 后台整首下载"那套）**已退役** ——
+    //   现在"下完一首"由宿主 syncLocals 把队列里的本地路径刷一遍（见 musicdl_gui.syncLocals ✓）
 
     // 重新扫目录（下完新歌后不用重启 ✓）
     func rescan() {
@@ -1278,21 +1316,22 @@ export struct PlayerBar {
 //   ⚠ 界面文字里**别放** ✓ / ♪ / → 这类符号：字体没有对应字形就会显示成方框 □ ✗
 //     （这些符号只写在注释里 ✓ —— 注释不参与渲染 ✓）
 func song_text(Player q): string {
-    if q.previewing { return "试听：" + q.preview_name() }     // 试听优先显示（插播 ✓）
-    if q.count() == 0 { return "输出目录里还没有下好的歌" }
+    // ★ 2026-10-09 改（队列来源变成"界面那张表"）：空队列时的提示也跟着换 ✓
+    if q.count() == 0 { return "双击表格里的一首就能听（没下过的会边下边播）" }
     return pl.split_title(q.current_name())
 }
 
-//   ⚠ `dlPct`（后台整首下载进度）**必须当参数传进来**：本函数是**模块级**的（不在 struct 里 ✓）
-//     ⇒ 摸不到 `PlayerBar` 的字段（先前直接写 `dlPct` 就是"未定义变量" ✗ 编译期就报 ✓）
-func artist_text(Player q, float dlPct): string {
-    // 试听期间**同时**在后台整首下载（见宿主 startPreview ✓）⇒ 这里顺手把进度说出来 ✓
-    //   （下完会自动切到本地完整文件并接着放 ✓ 见 on_downloaded ✓）
-    if q.previewing {
-        if dlPct >= 0.0 { return "试听中 · 整首下载 " + _str(_int(dlPct)) + "%（下完可拖进度）" }
-        return "试听中（正在准备整首下载…）"
+//   ⚠ 本函数是**模块级**的（不在 struct 里 ✓）⇒ 只能靠参数拿 Player；原来那个 `dlPct` 参数
+//     随"试听"退役（2026-10-09）—— 边下边播的进度现从 `q.buf_ratio()` 现算 ✓
+func artist_text(Player q): string {
+    // ★ 边下边播（2026-10-09，移植自二创 LenoMusic-main ✓）：把"已经下了多少 / 在不在等缓冲"
+    //   如实说出来 —— 否则"播到一半停住"看着就是**卡死** ✗（用户实测反馈过这个观感 ✓）
+    if q.is_streaming() {
+        int pct = _int(q.buf_ratio() * 100.0)
+        if q.is_waiting() { return "缓冲中 " + _str(pct) + "%（够了自动接着播）" }
+        return "边下边播 " + _str(pct) + "%（下完就能随便拖）"
     }
-    if q.count() == 0 { return "下几首就有得听了（目录见主界面的「输出目录」）" }
+    if q.count() == 0 { return "下几首就有得听了（也可以双击表格里的一首）" }
     string a = pl.split_artist(q.current_name())
     if a == "" { return (if q.playing then "正在播放" else "已暂停") }
     return a

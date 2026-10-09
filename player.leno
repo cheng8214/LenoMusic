@@ -505,7 +505,19 @@ export const LOOP_ALL = 1        // 放完回到第一首
 export const LOOP_ONE = 2        // 单曲循环
 
 export struct Player {
-    Array[string] list               // 播放列表（**文件全路径**，已按文件名排序 ✓）
+    Array[string] list               // 播放列表（**文件全路径**，已按文件名排序 ✓）—— 宿主没喂队列时的老口径
+    // ===== ★ 播放队列（2026-10-09，移植自二创 LenoMusic-main ✓）=====
+    //   来源改成"**当前界面显示的那张表**"（搜索页 / 榜单页都行）：三个数组**同长同序**，宿主一次喂进来 ✓
+    //     `qName`  显示名（"歌名 - 歌手"，与表格 / 右键菜单同一口径 ✓ **未消毒**）
+    //     `qLocal` 本地完整路径（"" = 还没下载 ⇒ 走**边下边播** ✓）
+    //     `qTag`   消毒基名（认领下载落盘与同名 .lrc 用 ✓ 见 dl_engine.base_of）
+    //   ⚠ 为什么非要有队列：老口径是"扫下载目录"⇒ **没下过的曲子根本不在列表里** ✗
+    //     而"边下边播"恰恰要能对"还没下载的行"起播 ✓
+    //   ⚠ 队列为空 ⇒ 下面所有取名字/取路径的方法**退回 `list`**（老路照常能用 ✓ 离线单测也还压得住）
+    Array[string] qName
+    Array[string] qLocal
+    Array[string] qTag
+    string outDir = ""               // 输出目录（按 qTag 拼同名 .lrc 的路径 ✓ 见 lrc_path）
     int index = -1                   // 当前下标（-1 = 没选）
     bool playing = false             // 用户意图：在播（暂停 ⇒ false ✓）
     float volume = 0.8
@@ -516,12 +528,33 @@ export struct Player {
     string err = ""                  // 最近一次失败原因（无声卡 / 文件坏 ⇒ 界面要能说清 ✓）
     int endedCount = 0               // 自检计数：一共自动推进过几次 ✓
 
-    // ---- 试听（"点一下立刻听"，与播放列表**并存的一套最小状态** ✓）----
-    //   媒体文件由调用方先准备好（哪怕只有**前一段** ✓ —— 实测"顺序写 ⇒ 截断文件前缀自洽、能播" ✓）
-    //   试听会**独占音频**：开始试听即停掉列表里那首 ✓；放完自动收摊、不推进列表 ✓
-    bool previewing = false
-    string previewName = ""          // 界面显示用（"试听：xxx" ✓）
-    string previewPath = ""          // 临时文件路径（收摊时可删 ✓）
+    // ★ 2026-10-09：`previewing / previewName / previewPath`（"试听：拉前一段"那套）**已退役** ——
+    //   双击/右键现在是"播放整表 + 边下边播"（见 play_index / set_queue ✓），不再有"插播试听"这种态 ✓
+
+    // ===== ★ 边下边播状态（2026-10-09，移植自二创 LenoMusic-main ✓）=====
+    //   思路：宿主把整首**顺序追加写**到目标文件（我们 dl_engine 本来就是这个口径 ✓），
+    //     播放器直接播这个"边下边长大的文件"：
+    //       · 播到**已下边界**（`isAtEnd()` 但整首还没下完）⇒ 先停下，约每 1 秒探一次；缓冲长了一格
+    //         就重建 Sound（从而读到新追加的数据 ✓）+ 跳回原处续播 ⇒ 界面上"无感" ✓
+    //       · 用户拖到**未下载区** ⇒ 同样先停下等缓冲，够到目标秒再跳过去续播 ✓
+    //   ⚠ 为什么必须"重建"而不是让老 Sound 接着读：Sound 是 createSound 那一刻按文件内容建的，
+    //     后来追加的数据它**看不见** ✗ ⇒ 只能重开一个（miniaudio 读的是当前文件 ✓）
+    //   ⚠ 前提（我们已满足 ✓）：下载是**顺序追加写最终文件** ⇒ 部分文件**前缀自洽**、能 load/能播 ✓
+    bool streaming = false           // 当前这首在边下边播（还没下完 ✓）
+    string streamPath = ""           // 正在播的那个"持续增长的文件"全路径
+    int streamGot = 0                // 已下字节（宿主 progress 消息回灌 ✓）
+    int streamTotal = 0              // 目标总字节（<=0 = 未知 ✓）
+    bool streamDone = false          // 整首下完了吗
+    float streamDur = 0.0            // 声明总时长（秒 ⇒ 进度条分母：停声期间也得留着 ✓）
+    bool wantStream = false          // ★ 求宿主"开始下当前这首"（宿主 take_stream_request 取走 ✓）
+    int wantIndex = -1               // 要下的是队列第几首
+    bool waiting = false             // 缓冲不足，正停下等（界面无感 ✓）
+    float waitPos = 0.0              // 等够之后要跳到的秒数
+    bool waitForSeek = false         // true = 用户拖到未下区；false = 播到了已下边界 ✓
+    int waitTicks = 0                // 重试计时（120ms 一拍 ⇒ 8 拍 ≈ 1 秒 ✓）
+    int lastGot = 0                  // 上次探测时的已下字节（用来判"有没有长" ✓）
+    int openTicks = 0                // 自愈节流：无声时约 1 秒重开一次（见 tick ✓）
+    float shadowPos = 0.0            // 影子位置：声一没（等缓冲 / 重建中）也能显示"听到哪儿了" ✓
 
     // ---- 歌词（2026-10-08 ✓）：**懒加载** —— 换歌才重读一次，其它时候零开销 ✓ ----
     Lrc lrc
@@ -537,7 +570,13 @@ export struct Player {
     // 扫一个目录里的音频文件（按文件名升序 ✓）；返回扫到几个
     //   ⚠ `dirs.listdir` 给的是**名字**（不含路径 ✗）⇒ 自己 join ✓
     func scan(string dir): int {
-        close()
+        stop_all()                        // ★ 只停不销毁（同 set_queue：别把音频引擎也关了 ✗）
+        // ★ 2026-10-09：`scan` 是"扫下载目录"这条**老口径**的入口 ⇒ 顺手把播放队列清掉，
+        //   否则 has_queue() 仍为真 ⇒ 列表/取名字全走队列，而 list 被重扫了却没人用 ✗（界面会"看起来没刷新" ✓）
+        //   即：喂过队列之后又想回到"播目录里的歌"，必须显式走这里 ✓（播放条的「重扫」就是这个意思 ✓）
+        qName = []
+        qLocal = []
+        qTag = []
         scanDir = dir                     // ★ 记下这次的目录（2026-10-08）：试听态取歌词要用 ✓ 见 lrc_path
         list = []
         index = -1
@@ -558,6 +597,9 @@ export struct Player {
     // 是不是音频：按扩展名（**大小写都认** ✓）
     //   ⚠ 写成显式大小写表：这里不去依赖 `strings.lower` 的可用性（少一个踩坑点 ✓）
     func is_audio(string name): bool {
+        // ★ 未下完的半截文件带 `@` 前缀 ⇒ **不是**能播的成品（扫目录时不该列出来 ✓ 对齐二创 ✓）
+        //   ⚠ 与 dl_engine 的 find_local / resolve_locals 同一口径：三处都排 `@` ✓
+        if name.slice(0, 1) == "@" { return false }
         string e = dirs.extname(name)
         for ext_cases() to x {
             if e == x { return true }
@@ -604,28 +646,84 @@ export struct Player {
         return c
     }
 
-    func count(): int { return list.len() }
+    // ==================== 播放队列（宿主喂表 ✓ 纯逻辑可离线测）====================
 
+    // 换一队（宿主在"双击 / 右键播放"时调一次 ✓）：三个数组**同长同序** ✓
+    //   ⚠ 顺带 `close()`：换队 = 换一个播放上下文 ⇒ 正在播的要停掉、边下边播状态也要清 ✓
+    func set_queue(Array[string] names, Array[string] localPaths, Array[string] tags, string outdir) {
+        // ⚠ 用 `stop_all()`（停 + 清流式状态）而不是 `close()`：后者会销毁音频对象 ⇒ 引擎引用归 0
+        //   ⇒ 紧接着的第一次播放要**重新打开音频设备**（几百毫秒的停顿 ✗ 见 swap_sound ✓）
+        stop_all()
+        qName = names
+        qLocal = localPaths
+        qTag = tags
+        outDir = outdir
+        index = -1
+        err = ""
+    }
+
+    // 只刷新"本地已有路径"（下完一首 / 删了文件之后由宿主调 ✓ 队列顺序与其余字段都不动 ✓）
+    func set_locals(Array[string] localPaths) {
+        if localPaths.len() == qName.len() { qLocal = localPaths }
+    }
+
+    // 队列在不在用（空 ⇒ 退回"扫目录"的老口径 ✓）
+    func has_queue(): bool { return qName.len() > 0 }
+
+    // 队列第 i 首的本地路径（"" = 还没下载 ✓）
+    func local_at(int i): string {
+        if i < 0 or i >= qLocal.len() { return "" }
+        return qLocal[i]
+    }
+
+    // 队列第 i 首的消毒基名（拼 .lrc 路径用 ✓）
+    func tag_at(int i): string {
+        if i < 0 or i >= qTag.len() { return "" }
+        return qTag[i]
+    }
+
+    func count(): int {
+        if has_queue() { return qName.len() }
+        return list.len()
+    }
+
+    // 当前这首的**本地文件**（未下载 ⇒ "" ⇒ 界面知道"这首在边下边播" ✓）
     func current(): string {
+        if has_queue() { return local_at(index) }
         if index < 0 or index >= list.len() { return "" }
         return list[index]
     }
 
     func current_name(): string {
+        if has_queue() { return name_at(index) }     // 队列里存的就是显示名（不再折 basename ✓）
         string c = current()
         if c == "" { return "" }
         return dirs.basename(c)
     }
 
-    // 按**下标**取曲名（播放条的歌单要逐行显示 ✓；越界返回 "" ✓ 不崩）
+    // 按**下标**取曲名（播放条的歌单 / 状态栏要逐行显示 ✓；越界返回 "" ✓ 不崩）
     func name_at(int i): string {
+        if has_queue() {
+            if i < 0 or i >= qName.len() { return "" }
+            return qName[i]
+        }
         if i < 0 or i >= list.len() { return "" }
         return dirs.basename(list[i])
     }
 
-    // 按**文件名**找下标（找不到 -1 ✓）—— 整首下完后"切到完整文件接着播"要用 ✓
-    //   只比 basename：下载落盘路径与列表项都是绝对路径，basename 才是"同一首"的判据 ✓
+    // 按路径找下标（找不到 -1 ✓）
+    //   队列模式：比"本地路径"（未下载的行没有路径 ⇒ 永远匹配不上，正是我们要的 ✓）
+    //   老模式：比 basename（下载落盘路径与列表项都是绝对路径 ⇒ basename 才是"同一首"的判据 ✓）
     func index_of(string path): int {
+        if has_queue() {
+            if path == "" { return -1 }
+            int i = 0
+            while i < qLocal.len() {
+                if qLocal[i] == path { return i }
+                i = i + 1
+            }
+            return -1
+        }
         string b = dirs.basename(path)
         if b == "" { return -1 }
         int i = 0
@@ -641,53 +739,96 @@ export struct Player {
     // "这首放完之后，下一首该是谁"：给下标；**-1 = 该停**（列表放完了 ✓）
     //   LOOP_ONE ⇒ 还是自己 ✓ / LOOP_ALL ⇒ 回到 0 ✓ / LOOP_OFF ⇒ 到底 -1 ✓
     func next_index_on_end(): int {
-        if list.len() == 0 { return -1 }
+        int n = count()                        // ★ 队列在用时就是队列长度（见 count ✓）
+        if n == 0 { return -1 }
         if loopMode == LOOP_ONE { return index }
         int nxt = index + 1
-        if nxt < list.len() { return nxt }
+        if nxt < n { return nxt }
         if loopMode == LOOP_ALL { return 0 }
         return -1
     }
 
     // 手动"下一首 / 上一首"：同样受循环模式约束（LOOP_OFF 时到头就是 -1 ✓）
     func next_index(): int {
-        if list.len() == 0 { return -1 }
+        int n = count()
+        if n == 0 { return -1 }
         int nxt = index + 1
-        if nxt >= list.len() { nxt = if loopMode == LOOP_OFF then -1 else 0 }
+        if nxt >= n { nxt = if loopMode == LOOP_OFF then -1 else 0 }
         return nxt
     }
 
     func prev_index(): int {
-        if list.len() == 0 { return -1 }
+        int n = count()
+        if n == 0 { return -1 }
         int p = index - 1
-        if p < 0 { p = if loopMode == LOOP_OFF then -1 else list.len() - 1 }
+        if p < 0 { p = if loopMode == LOOP_OFF then -1 else n - 1 }
         return p
     }
 
     // ==================== 传输控制（要音频设备 ⇒ 离线只测"安全失败" ✓）====================
 
     func play_index(int i): bool {
+        // ★ 队列模式（2026-10-09，移植自二创 LenoMusic-main ✓）：播"当前界面那张表"的第 i 首
+        if has_queue() {
+            if i < 0 or i >= qName.len() { return false }
+            sound?.stop()                      // ★ 只停**不销毁**：销毁会让引擎引用归 0 ⇒ 切歌也要重开设备 ✗
+            reset_stream()                     //   （见 swap_sound 的注释 ✓）
+            index = i
+            err = ""
+            string lp = local_at(i)
+            if lp != "" and files.exists(lp) {
+                return open_local(lp)          // ★ 已下载 ⇒ 直接播本地文件（不必再下 ✓）
+            }
+            // ★ 没下载 ⇒ 边下边播：求宿主把整首**顺序追加写**到目标文件（take_stream_request 取走 ✓）
+            //   此刻还不知道总时长 ⇒ streamDur 先留 0，等 Sound 建起来按文件头补上 ✓（见 try_open_stream）
+            streaming = true
+            streamDone = false
+            streamGot = 0
+            streamTotal = 0
+            streamDur = 0.0
+            streamPath = ""
+            wantStream = true
+            wantIndex = i
+            playing = true                     // 用户意图 = 在播（等首片落盘期间界面显示"正在加载…" ✓）
+            return true
+        }
+        // 老口径：播"扫下载目录"扫出来的第 i 个文件 ✓
         if i < 0 or i >= list.len() { return false }
-        // 一旦播列表里的歌 ⇒ 试听立刻作废（试听是"插播" ✓）
-        previewing = false
-        previewName = ""
-        previewPath = ""
-        close_sound()
+        sound?.stop()                          // ★ 同上：只停不销毁（引擎要一直活着 ✓）
+        reset_stream()
         index = i
-        var s = audio.createSound(list[i])
+        return open_local(list[i])
+    }
+
+    // 直接开一个本地文件发声（已下载的曲子 / 老口径的列表项都走它 ✓）
+    func open_local(string path): bool {
+        var s = audio.createSound(path)
         if not s.isInit() {
-            sound = null
+            // ⚠ 这里**不销毁**旧对象（打开失败时把原来的留着更稳；引擎引用计数也别掉到 0 ✓）
             playing = false
             err = "打不开这首音频（文件坏了？或本机没有可用的音频设备）"
             return false
         }
         s.setVolume(effective_volume())
-        s.play()
         s.setLooping(false)          // 单曲循环由本文件的规则管 ⇒ 不用引擎的 looping ✓
-        sound = s
+        s.play()
+        swap_sound(s)                // ★ 先建好新的，再销毁旧的（见 swap_sound 的注释 ✓）
         playing = true
         err = ""
+        openTicks = 0                            // 开起来了 ⇒ 自愈计时归零 ✓
         return true
+    }
+
+    // ★★ 换音频对象：**先把新的建好、再销毁旧的** —— 让 miniaudio 引擎的引用计数**永不掉到 0** ✓
+    //   为什么这一条是"停顿一下"的根治（2026-10-09 实测反馈 ✓）：
+    //     Music 模块的 `Sound.uninit()` 在**最后一个实例**销毁时会 `ma_dll_engine_uninit()` **关掉引擎**
+    //     ⇒ 引擎一关，下次 `createSound` 就得**重新打开音频设备**（实测几百毫秒）⇒ 每次"停下等缓冲 → 重建"
+    //     都会静音一下 ✗（切歌、边下边播续播都中招 ✓）
+    //   现在：旧对象一直留到新对象建好之后才销毁 ⇒ 引用计数在切换过程中始终 ≥ 1 ⇒ 引擎常驻 ✓
+    func swap_sound(Sound s) {
+        Sound? old = sound
+        sound = s
+        if old != null { old?.uninit() }
     }
 
     // 播放 / 暂停 切换（暂停 = stop，位置保留 ✓；恢复 = play ✓）
@@ -697,12 +838,18 @@ export struct Player {
             playing = false
             return true
         }
+        // ★ 等缓冲中"恢复" ⇒ 只把意图置回在播（等待循环下一拍自动接管 ✓）
+        if waiting {
+            playing = true
+            return true
+        }
         if sound != null {
             sound?.resume()
             playing = true
             return true
         }
-        if index < 0 and list.len() > 0 { return play_index(0) }
+        // 没声又没在等（例如"边下边播还没出第一片"）⇒ 重播当前下标 ✓
+        if index < 0 and count() > 0 { return play_index(0) }
         return play_index(index)
     }
 
@@ -723,11 +870,22 @@ export struct Player {
         playing = false
     }
 
+    // 停止 + 清掉边下边播（界面按"停止"按钮时用 ✓ —— 单 stop() 会留着"还在等缓冲"的分支）
+    func stop_all(): void {
+        stop()
+        reset_stream()
+    }
+
     // 直接跳到第 s 秒（比例版见 seek_ratio ✓）
     //   ⚠ miniaudio 的 seek 之后音频是**停着**的 ⇒ 必须 resume（否则"拖完就静音" ✗ 实测 ✓）
     func seek_seconds(float s): bool {
-        if sound == null { return false }
         if s < 0.0 { s = 0.0 }
+        // ★ 边下边播：拖到**未下载区** ⇒ 先停下等缓冲（约每 1 秒探一次 ✓）；拖到已下区 ⇒ 正常 seek ✓
+        if streaming and not streamDone and s > avail_seconds() - 0.3 {
+            begin_wait(s, true)
+            return true
+        }
+        if sound == null { return false }
         bool ok = sound.seek(s)
         if ok {
             sound?.resume()
@@ -751,7 +909,8 @@ export struct Player {
     //     可播的部分长 ⇒ 拖着拖就跳到并不存在的位置（要么静音、要么直接结束 ✗ 实测 ✓）
     //   · 列表里的歌 = 已经下完的完整文件 ✓ ⇒ 可拖
     func can_seek(): bool {
-        if previewing { return false }
+        // ★ 2026-10-09：边下边播**也可以拖**（拖到未下区会自动等缓冲 ✓ 见 seek_seconds）
+        if streaming { return true }
         return sound != null and index >= 0
     }
 
@@ -769,13 +928,21 @@ export struct Player {
 
     func effective_volume(): float { return if muted then 0.0 else volume }
 
+    // 总时长（秒）——★ 边下边播：优先用**文件头声明的总时长**（进度条分母 ⇒ 停声期间也得留着 ✓）
     func duration(): float {
+        if streaming and streamDur > 0.0 { return streamDur }
         if sound == null { return 0.0 }
         return sound.getDuration()
     }
 
+    // 当前播放位置（秒）——等待缓冲时返回"要跳到的那个位置"（进度条不跳回 0 ✓）
+    //   ★ 声一没（正重建 / 失败）也**不能归零** ✗ —— 用影子位置顶住（见 tick ✓）
     func position(): float {
-        if sound == null { return 0.0 }
+        if waiting { return waitPos }
+        if sound == null {
+            if streaming { return shadowPos }
+            return 0.0
+        }
         return sound.getPosition()
     }
 
@@ -794,16 +961,16 @@ export struct Player {
 
     // 当前这首该配哪个 .lrc（没在播 ⇒ "" ✓）
     func lrc_path(): string {
-        // ⚠⚠ 试听态必须**单独算** ✗✗（2026-10-08 用户实测踩到）：
-        //   试听不在播放列表里 ⇒ `current()` 是 `""` ⇒ 先前这里直接返回 `""`
-        //   ⇒ **试听期间永远没有歌词** ✗（点「词」是空的；下完切成本地文件后才可能有 ✓）
-        //   正解：试听那个临时文件旁边**没有** .lrc ✗，但**同一首在输出目录里**有 ✓
-        //     —— 试听名（`previewName`）就是下载落盘的文件名主体（"歌名 - 歌手" ✓ 见宿主 startPreview ✓）
-        //       而引擎落歌词用的正是同一个基名（`dl_engine:376-378` `<歌名> - <歌手>.lrc` ✓）
-        //     ⇒ 直接去输出目录取同名 .lrc ✓（还没下完 ⇒ 不存在 ⇒ 先"没有歌词" ✓ 一出现就补读 ✓ 见 ensure_lrc）
-        if previewing {
-            if scanDir == "" or previewName == "" { return "" }
-            return dirs.join(scanDir, previewName + ".lrc")
+        // ★ 队列模式（2026-10-09，移植自二创）：
+        //   ① 已下载的 ⇒ 按**本地路径**同名（strip_ext + ".lrc" ✓）
+        //   ② 还没下载的（边下边播中）⇒ 按"输出目录 + 消毒基名 + .lrc"拼 —— 歌词常与音频同时落盘
+        //      ⇒ 先"没有歌词"、一出现就补读 ✓（靠 ensure_lrc 的 mtime/size 判定发现 ✓）
+        if has_queue() {
+            string lp = local_at(index)
+            if lp != "" { return strip_ext(lp) + ".lrc" }
+            string tg = tag_at(index)
+            if outDir == "" or tg == "" { return "" }
+            return dirs.join(outDir, tg + ".lrc")
         }
         string c = current()
         if c == "" { return "" }
@@ -947,56 +1114,262 @@ export struct Player {
         return r
     }
 
-    // ==================== 试听（点一下立刻听 ✓）====================
+    // ==================== 边下边播（★ 2026-10-09，移植自二创 LenoMusic-main ✓）====================
+    // 思路：宿主把整首**顺序追加写**到目标文件；播放器直接播这个"边下边长大的文件" ✓
+    //   · 播到已下边界（`isAtEnd` 但整首没完）⇒ begin_wait 停下、约每 1 秒探一次 ⇒ 缓冲长了一格就
+    //     resume_at 重建 Sound（从而读到新追加的数据 ✓）+ 跳回原处续播（界面无感 ✓）
+    //   · 用户拖到未下区 ⇒ 同样 begin_wait（waitForSeek = true ✓）
+    //   ⚠ 为什么"重建"而不是让老 Sound 接着读：Sound 是 createSound 时按当时文件内容建的，
+    //     后来追加的数据它看不见 ✗ ⇒ 必须重开一个（miniaudio 读的是当前文件 ✓）
 
-    // 试听某个文件（路径由调用方准备好 ✓，可以只是"前一段" ✓）
-    //   返回 false 时 `err` 会写清原因（本机没声卡 / 文件是空的 ✓）
-    func preview(string path, string title): bool {
-        close_sound()                     // 试听独占音频：先把列表那首停掉 ✓
-        previewing = true
-        previewName = title
-        previewPath = path
-        var s = audio.createSound(path)
+    // 宿主每 120ms 取一次"要不要开始下当前这首"（要 ⇒ 返回下标；取走后自动清零 ✓；不要 ⇒ -1 ✓）
+    func take_stream_request(): int {
+        if not wantStream { return -1 }
+        wantStream = false
+        return wantIndex
+    }
+
+    // 宿主告诉播放器"这首开始写了，文件在 path"（首片落盘后调 ✓）
+    func begin_stream(string path) {
+        if not streaming { return }
+        streamPath = path
+        try_open_stream()
+    }
+
+    // 宿主报进度（got = 已下字节；total = 目标总字节，<=0 = 未知 ✓）
+    func feed_buffer(int got, int total) {
+        if not streaming { return }
+        streamGot = got
+        if total > 0 { streamTotal = total }
+        // 还没出声、也没在等待 ⇒ 文件够建 Sound 了就先开（首片到时从这条进来 ✓）
+        if sound == null and not waiting { try_open_stream() }
+    }
+
+    // 整首下完（path = 最终文件全路径 ✓）
+    func finish_stream(string path) {
+        if not streaming { return }
+        streamDone = true
+        if path != "" {
+            streamPath = path
+            if index >= 0 and index < qLocal.len() { qLocal[index] = path }   // 记成本地已有 ✓
+        }
+        streamGot = streamTotal
+        if waiting { resume_at(waitPos) }        // 等待中 ⇒ 缓冲肯定够了 ⇒ 立刻续播 ✓
+    }
+
+    // 下失败（网断了 / 取不到直链 ✓）⇒ 写明原因；★ **不能**把播放状态清空 ✗
+    //   （用户实测的"刚听 3 秒就停住 + 时间 / 时长归零 + 点播放与拖进度全失效"正是这里 ✓）
+    //   已经下到一段（streamGot > 0）⇒ 保住播放状态，把已下的那段当"这首就到这儿" ✓
+    //   一点都没下到（连首片都没有）才回到干净态 —— 那时本来也没东西可播 ✓
+    func fail_stream(string why) {
+        if why != "" { err = why }
+        if streaming and streamGot > 0 {
+            waiting = false
+            streamDone = true                    // ⚠ 置真：否则播到边界会再等 ⇒ 永远等不到新数据 ✗
+            if playing and sound == null and streamPath != "" { resume_at(shadowPos) }
+            return
+        }
+        streaming = false
+        waiting = false
+        playing = false
+        close_sound()
+    }
+
+    // 已下比例 0..1（总长未知 ⇒ 1.0 ✓ 免得显示成"永远 0%"）
+    func buf_ratio(): float {
+        if streamDone { return 1.0 }
+        if streamTotal <= 0 { return 1.0 }
+        float r = _float(streamGot) / _float(streamTotal)
+        if r < 0.0 { r = 0.0 }
+        if r > 1.0 { r = 1.0 }
+        return r
+    }
+
+    // 已下部分折算成"可用秒数"（拖进度 / 等缓冲的判据 ✓）
+    func avail_seconds(): float {
+        float d = duration()
+        if streamDone { return d }
+        return d * buf_ratio()
+    }
+
+    // 在不在边下边播 / 在不在等缓冲（界面文案与进度条要它 ✓）
+    func is_streaming(): bool { return streaming }
+    func is_waiting(): bool { return waiting }
+
+    // 建 Sound 去播 streamPath（刚能播时调 ✓）
+    //   ⚠ 失败（文件还太小 ⇒ miniaudio 打不开）⇒ 继续等下一拍（**不报错** ✓ 首片只有 1MB 时可能失败 ✓）
+    func try_open_stream() {
+        if not streaming { return }
+        if streamPath == "" { return }
+        if sound != null { return }
+        if waiting { return }
+        var s = audio.createSound(streamPath)
         if not s.isInit() {
             sound = null
-            playing = false
-            previewing = false
-            err = "试听打不开这首音频（本机没有可用的音频设备？或试听文件是空的）"
-            return false
+            return                              // 还太短 ⇒ 等下一次 feed_buffer 再试 ✓
         }
+        float d = s.getDuration()
+        if d > 0.0 { streamDur = d }
         s.setVolume(effective_volume())
-        s.play()
         s.setLooping(false)
-        sound = s
+        s.play()
+        swap_sound(s)                            // ★ 先建后销（见 swap_sound ✓）
         playing = true
         err = ""
-        return true
+        openTicks = 0
     }
 
-    func stop_preview() {
-        if not previewing { return }
-        stop()
+    // 进入等待：先停下发声，记住"等够之后要跳到哪"（forSeek = 用户拖的 / false = 播到边界 ✓）
+    //   ★ 2026-10-09：这里**只 stop、不销毁** —— 销毁会让引擎引用计数归 0（见 swap_sound 的注释），
+    //     续播时又得重开音频设备 ⇒ "停顿一下" ✗；反正它已经到末尾 / 被 stop，不会再有声音 ✓
+    func begin_wait(float pos, bool forSeek) {
+        waitPos = pos
+        shadowPos = pos
+        waitForSeek = forSeek
+        waitTicks = 0
+        lastGot = streamGot
+        waiting = true
+        playing = true
+        sound?.stop()                            // 停止发声（进度条位置由 position() 返回 waitPos ✓）
+    }
+
+    // 等待循环：每 2 拍探一次（120ms 一拍 ⇒ 约 240ms ✓ 比原先 8 拍（约 1 秒）灵敏得多，
+    //   用户对"播到边界后停多久"是很敏感的；探测本身只是比两个整数，代价可忽略 ✓）
+    func tick_wait() {
+        if not playing { return }                // 用户暂停了 ⇒ 别自作主张续播 ✓
+        if streamPath == "" { waiting = false; return }
+        if streamDone {
+            waitTicks = waitTicks + 1
+            if waitTicks < 2 { return }
+            waitTicks = 0
+            resume_at(waitPos)
+            return
+        }
+        waitTicks = waitTicks + 1
+        if waitTicks < 2 { return }
+        waitTicks = 0
+        if streamGot <= lastGot { return }       // 这一秒没长 ⇒ 接着等 ✓
+        lastGot = streamGot
+        // 拖到未下区的情形：目标秒要落在**已下范围**里才续播（留 0.5 秒余量 ✓）
+        if waitForSeek and waitPos > avail_seconds() - 0.5 { return }
+        resume_at(waitPos)
+    }
+
+    // 重建 Sound 并跳到 pos 续播（等待结束的统一出口 ✓）
+    func resume_at(float pos) {
         close_sound()
-        previewing = false
-        previewName = ""
-        previewPath = ""
+        waiting = false
+        waitPos = pos                            // ★ 失败退回等待时也用它（不沿用陈旧位置 ✗）
+        shadowPos = pos
+        if streamPath == "" { return }
+        var s = audio.createSound(streamPath)
+        if not s.isInit() {
+            waiting = true                       // 还打不开 ⇒ 回到等待（约 1 秒后再试 ✓）
+            waitTicks = 0
+            return
+        }
+        float d = s.getDuration()
+        if d > 0.0 { streamDur = d }
+        s.setVolume(effective_volume())
+        s.setLooping(false)
+        if pos > 0.0 { s.seek(pos) }
+        s.play()
+        swap_sound(s)                            // ★ 先建后销：引擎在切换中始终活着（见 swap_sound ✓）
+        playing = true
+        err = ""
+        openTicks = 0
     }
 
-    func preview_name(): string { return previewName }
+    // ★ 宿主"去掉 `@` 改名"之前的**先松手**：返回当前播放位置（没在边下边播 ⇒ -1 ✓）
+    //   为什么必须拆出来：Windows 下**文件被 Sound 读着就改不了名** ✗ ⇒ 只能先放掉音频对象再改 ✓
+    //   （顺序由宿主保证：pause_for_rename -> rename -> stream_switched ✓ 见 musicdl_gui.pollStreams）
+    func stream_pause_for_rename(): float {
+        if not streaming { return -1.0 }
+        // 本来就没声、也没在等缓冲 ⇒ 播放器**没占着文件**（改名不会失败）⇒ 报 -1，宿主直接改 ✓
+        if sound == null and not waiting { return -1.0 }
+        float pos = position()
+        close_sound()
+        waiting = false
+        lastGot = streamGot
+        return pos
+    }
+
+    // ★ 宿主改名成功之后：用**最终文件**接着播（path = 去掉 `@` 的那个路径 ✓）
+    func stream_switched(string path, float pos) {
+        // ⚠ 先记账（**即使已经不在流**也要记）：这首下完了就该被当成"本地已有" ✓
+        //   —— 否则用户暂停着、或流已经收摊，会白下完一首还一直被当"没下载" ✗
+        if index >= 0 and index < qLocal.len() { qLocal[index] = path }
+        if not streaming { return }
+        streamPath = path
+        streamDone = true
+        shadowPos = pos
+        waitPos = pos
+        if playing {
+            resume_at(pos)
+            // ★ 保险：万一重开失败，**必须**落进"等待循环"继续重试
+            //   —— 绝不留在"没声又没在等"的僵态（时间显示 0:00 / 0:00，看着像卡死 ✗）
+            if sound == null and not waiting {
+                waiting = true
+                waitTicks = 0
+            }
+        } else {
+            waiting = false                    // 用户暂停着 ⇒ 保持静音（点播放会走"本地文件"那条 ✓）
+        }
+    }
+
+    // 清掉"边下边播 / 等待"的一切状态（换首 / 换队 / 停止时调 ✓）
+    func reset_stream() {
+        streaming = false
+        streamPath = ""
+        streamGot = 0
+        streamTotal = 0
+        streamDone = false
+        streamDur = 0.0
+        wantStream = false
+        wantIndex = -1
+        waiting = false
+        waitPos = 0.0
+        waitForSeek = false
+        waitTicks = 0
+        lastGot = 0
+        openTicks = 0
+        shadowPos = 0.0
+    }
+
+    // ==================== （原"试听"这一段已退役 ✓ 见 previewing 字段处的说明）====================
 
     // ==================== 推进（主循环 120ms 调一次 ✓）====================
 
     // 放完了 ⇒ 按循环模式往下走；该停就停 ✓
+    //   ★ 2026-10-09（移植自二创）：多两条"边下边播"的路 —— ① 等缓冲中走 tick_wait；
+    //     ② 播到"已下边界"变成等缓冲（那**不是**真的放完 ✓）
     func tick() {
-        if not playing or sound == null { return }
+        // ★ 等缓冲中 ⇒ 走等待循环（探测缓冲 ✓），不推进
+        if waiting { tick_wait(); return }
+        if not playing { return }
+        if sound == null {
+            // ★★ 自愈：边下边播里"声没了"绝不能就此僵住 ✗
+            //   （症状就是用户报的：时间 / 时长归零、点播放与拖进度全失效 ✓）
+            //   约每 1 秒按**影子位置**重开一次：文件还在长、以及已经下完两种都能救回来 ✓
+            if streaming and streamPath != "" {
+                openTicks = openTicks + 1
+                if openTicks >= 8 {
+                    openTicks = 0
+                    resume_at(shadowPos)
+                }
+            }
+            return
+        }
+        openTicks = 0
+        shadowPos = sound.getPosition()          // 记位置：声一没也能显示"听到哪儿了" ✓
+        if streamDur <= 0.0 {                    // 流式解码器头几拍可能量不出时长 ⇒ 补记一次 ✓
+            float dd = sound.getDuration()
+            if dd > 0.0 { streamDur = dd }
+        }
         if not sound.isAtEnd() { return }
-        if previewing {
-            // 试听放完（或把"前一段"听完了 ✓）⇒ 收摊，**不**推进播放列表 ✓
-            playing = false
-            previewing = false
-            previewName = ""
-            previewPath = ""
-            close_sound()
+        // ★ 边下边播：播到了"已下边界"但整首还没完 ⇒ 先停下等缓冲（不是真的放完 ✓）
+        if streaming and not streamDone {
+            begin_wait(position(), false)
             return
         }
         int i = next_index_on_end()
@@ -1015,6 +1388,7 @@ export struct Player {
 
     func close() {
         stop()
+        reset_stream()
         close_sound()
     }
 }
