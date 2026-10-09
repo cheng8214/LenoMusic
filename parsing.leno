@@ -45,27 +45,20 @@ export func digits_only(string s): bool {
     return true
 }
 
-// 纯数字 ⇒ 值；不是⇒ dflt（内部用，省一次遍历 ✓）
-//   ⚠ 与 digits_only 的区别：这个**不报失败**，只给兜底值（给"失败也无所谓"的场合用 ✓）
-func uint_or(string s, int dflt): int {
-    if s == null or s == "" { return dflt }
-    Array[int] c = strings.to_codepoints(s)
-    int n = 0
-    int i = 0
-    while i < c.len() {
-        int d = c[i] - 48
-        if d < 0 or d > 9 { return dflt }
-        n = n * 10 + d
-        i = i + 1
-    }
-    return n
-}
-
 // 严格解析非负整数 ⇒ (值, 是否成功)
 //   不要 -1 哨兵的理由见文件头 ✓；`var[int,bool](n, ok) = parse_uint(s)`
+//
+//   ⚠ 为什么不直接用现成的 `_int_or`（2026-10-09 实测对比，它**不是**够用）：
+//        _int_or("abc", -1)   = -1   ✓ 失败给默认（这点正是我们要的）
+//        _int_or("-5",  -1)   = -5      支持负号 / "+7" ⇒ 会放过脏数据（字节数不该为负 ✗）
+//        _int_or(null,   -1)  =  0  ✗ **null 返回 0 而不是默认值**（要判形状得自己先判）
+//        _int_or("99999999999999999999", -1) = -1 ✗ **超过 64 位就失败**，
+//            而 `_int("99999999999999999999")` 给的是**精确值**（Leno 的 int 是任意精度 ✓）
+//            ⇒ 与"int 任意精度"这个前提不一致 ⇒ 这里仍走 digits_only + `_int` ✓
+//   ⇒ 一句话：**先判形状（要严格/要非负），再强转（要任意精度）** ✓
 export func parse_uint(string s): [int, bool] {
     if not digits_only(s) { return 0, false }
-    return uint_or(s, 0), true
+    return _int(s), true
 }
 
 // 严格解析"时间标签"⇒ (秒, 是否认得)
@@ -128,8 +121,10 @@ export func parse_word_span(string tag): [float, float, bool] {
     }
     float d = 0.0
     if parts.len() >= 2 {
-        // ⚠ 认不出（含小数点/空串）⇒ 时长 0，而不是把已读的数字当结果 ✓
-        int m = uint_or(parts[1].trim(), -1)
+        // ⚠ 认不出（含小数点 / 空串 / 负号）⇒ 时长 0，而不是把已读的数字当结果 ✓
+        //   这里用语言自带的 `_int_or` 就够（时长是"毫秒级小整数"，不会碰到它的 64 位上限 ✓
+        //   —— 与上面 parse_uint 刻意不用它的理由不同：**这里不需要任意精度** ✓）
+        int m = _int_or(parts[1].trim(), -1)
         if m >= 0 { d = _float(m) / 1000.0 }
     }
     return t, d, true
@@ -156,6 +151,7 @@ export func at(Array[string] row, int i, string dflt): string {
 //     真要读带符号的数，自己判首字符后调 `_int` ✓
 //   ⚠ 过了 digits_only 之后 `_int` **不会抛**（实测：27 位数字也精确给出 ✓
 //     —— Leno 的 int 是任意精度的，不存在溢出 ⇒ 这一步是安全的强转 ✓）
+//   ⚠ 这里也**不用** `_int_or`（同上：大数会失败、null 会给 0 ⇒ 先判形状再 `_int` 才稳 ✓）
 export func at_int(Array[string] row, int i, int dflt): int {
     string s = at(row, i, "")
     if not digits_only(s) { return dflt }
