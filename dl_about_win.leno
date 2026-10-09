@@ -10,7 +10,7 @@ import dirs
 use SDL3.(Event, Renderer, Scancode)
 
 // 版本号：与 CLI 的 `musicdl.leno` 里那个 `VERSION` **同一口径**（发版时两处一起改 ✓）
-const APP_VERSION = "0.1.1"
+const APP_VERSION = "0.1.2"
 
 // ==================== 文案（写成常量 ⇒ 改字不用翻代码 ✓）====================
 // 致谢：**一行一位，要加人就加一行**（顺序 = 显示顺序 ✓）
