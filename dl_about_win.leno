@@ -58,7 +58,7 @@ struct AboutDialog {
     func build() {
         string title = "关于 Leno 音乐下载器"
         int dw = 560
-        int dh = 452               // **内容高**（标题栏另加 DIALOG_TB_H ✓）
+        int dh = 400             // **内容高**（标题栏另加 DIALOG_TB_H ✓）
         int tbH = SDL3.DIALOG_TB_H
         var dlg = SDL3.createDialogWindow({title: title, w: dw, h: tbH + dh})
         var tb = SDL3.dialogTitleBar(dlg, title)
