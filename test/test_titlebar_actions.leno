@@ -16,7 +16,7 @@ main() {
     Array[Dict] src = []
     src.add({id: "settings", icon: "gear", tip: "设置"})
     src.add({id: "theme", image: "images/moon.png", tip: "主题", enabled: false})
-    src.add({icon: "gear", tip: "没有 id ⇒ 应当被丢掉"})
+    src.add({icon: "gear", tip: "没有 id -> 应当被丢掉"})
     Array[TitleBarAction] acts = tb.parseTitleBarActions(src)
     assert_eq(acts.len(), 2)
     assert_eq(acts[0].id, "settings")

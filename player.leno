@@ -859,7 +859,7 @@ export struct Player {
     func lyric_lines(): Array[string] {
         ensure_lrc()
         if lrc.texts.len() == 0 {
-            return ["（这首没有歌词 —— 下载时勾上「同时下载歌词」就能带上 ✓）"]
+            return ["（这首没有歌词 —— 下载时勾上「同时下载歌词」就能带上）"]
         }
         return lrc.texts
     }

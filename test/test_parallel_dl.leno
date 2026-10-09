@@ -253,7 +253,7 @@ main() {
     // ---------- ① 并行度口径 ----------
     eq("dl_workers：任务少就少开", eng.dl_workers(2, 4), 2)
     eq("dl_workers：上限来自设置", eng.dl_workers(10, 4), 4)
-    eq("dl_workers：上限给了 0 ⇒ 回落出厂默认", eng.dl_workers(10, 0), eng.DL_DEFAULT_WORKERS)
+    eq("dl_workers：上限给了 0 -> 回落出厂默认", eng.dl_workers(10, 0), eng.DL_DEFAULT_WORKERS)
     eq("dl_workers：没任务也给 1（绝不开 0 个线程）", eng.dl_workers(0, 8), 1)
     eq("设置钳位：下限", cfg.clamp_workers(-5), cfg.WORKERS_MIN)
     eq("设置钳位：上限", cfg.clamp_workers(999), cfg.WORKERS_MAX)
@@ -312,10 +312,10 @@ main() {
         }
     }
     eq("切片：k=1..5 不重不漏 + 份间差 ≤ 1 + 确为轮转切法", slicebad, 0)
-    eq("切片：k=0 ⇒ 钳到 1 份", eng.slice_rows(srows, 0).len(), 1)
-    eq("切片：k 超过行数 ⇒ 每行一份", eng.slice_rows(srows, 20).len(), 11)
+    eq("切片：k=0 -> 钳到 1 份", eng.slice_rows(srows, 0).len(), 1)
+    eq("切片：k 超过行数 -> 每行一份", eng.slice_rows(srows, 20).len(), 11)
     Array[Array[string]] norows = []
-    eq("切片：空表 ⇒ 0 份（不崩）", eng.slice_rows(norows, 4).len(), 0)
+    eq("切片：空表 -> 0 份（不崩）", eng.slice_rows(norows, 4).len(), 0)
 
     // ---------- ③ 真并行：4 首同时下（**4 个独立服务端**，每个延迟 200ms）----------
     string outdir = dirs.join(_tmpdir(), "leno_parallel_dl_test")
@@ -337,11 +337,11 @@ main() {
     drain(prog, perIdx, njobs)                 // 收尾再排一次（别丢最后几条 ✓）
     float elapsed = times.ms() - t0
     Array[int] agg = collect(res)
-    eq("4 首都下完（各 worker 汇总 ✓）", agg[0], njobs)
+    eq("4 首都下完（各 worker 汇总）", agg[0], njobs)
     eq("没有被取消的", agg[1], 0)
     int missing = 0
     for njobs to k { if perIdx[k] < 1 { missing = missing + 1 } }
-    eq("每个 idx 都收到了进度消息（共用通道按 idx 归位 ✓）", missing, 0)
+    eq("每个 idx 都收到了进度消息（共用通道按 idx 归位）", missing, 0)
     int sizebad = 0
     for njobs to k {
         string p = dirs.join(outdir, "song" + _str(k) + ".bin")
@@ -385,7 +385,7 @@ main() {
     Array[int] agg2 = collect(res2)
     eq("取消后两个 worker 都停在第 1 首之后（done 合计 2 / 6）", agg2[0], 2)
     eq("两个 worker 都收到了取消（各 1）", agg2[1], 2)
-    ok("取消生效得够快：实测 " + _str(_int(el2)) + "ms < 800ms（漏发一条的话另一个会下到 ≈900ms ✗）", el2 < 800.0)
+    ok("取消生效得够快：实测 " + _str(_int(el2)) + "ms < 800ms（漏发一条的话另一个会下到 ≈900ms）", el2 < 800.0)
     stop_servers(port2, nj2, srvs2)
 
     print("")

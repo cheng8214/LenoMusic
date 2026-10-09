@@ -45,106 +45,106 @@ main() {
 
     Player p = new Player()
     int n = p.scan(dir)
-    check("扫到 3 个音频（.txt 与子目录都不算 ✓）", n == 3)
+    check("扫到 3 个音频（.txt 与子目录都不算）", n == 3)
     bool sorted = p.list.len() == 3
     if sorted {
         sorted = dirs.basename(p.list[0]) == "a.flac"
         if sorted { sorted = dirs.basename(p.list[1]) == "b.mp3" }
         if sorted { sorted = dirs.basename(p.list[2]) == "C.MP3" }
     }
-    check("按文件名排序且**大写扩展名也认**（a.flac, b.mp3, C.MP3 ✓）", sorted)
+    check("按文件名排序且**大写扩展名也认**（a.flac, b.mp3, C.MP3）", sorted)
     check("扫完默认选中第 0 首", p.index == 0)
-    check("current_name 给出文件名（不是全路径 ✓）", p.current_name() == "a.flac")
+    check("current_name 给出文件名（不是全路径）", p.current_name() == "a.flac")
     check("count() 与 list 一致", p.count() == 3)
 
     // ---- ② 循环三态 ----
     p.loopMode = pl.LOOP_ALL
     p.index = 2
-    check("LOOP_ALL：最后一首放完 ⇒ 回到 0 ✓", p.next_index_on_end() == 0)
+    check("LOOP_ALL：最后一首放完 -> 回到 0 ", p.next_index_on_end() == 0)
     p.loopMode = pl.LOOP_OFF
-    check("LOOP_OFF：最后一首放完 ⇒ 该停（-1）✓", p.next_index_on_end() == -1)
+    check("LOOP_OFF：最后一首放完 -> 该停（-1）", p.next_index_on_end() == -1)
     p.index = 0
-    check("LOOP_OFF：第一首放完 ⇒ 就是第二首 ✓", p.next_index_on_end() == 1)
+    check("LOOP_OFF：第一首放完 -> 就是第二首 ", p.next_index_on_end() == 1)
     p.loopMode = pl.LOOP_ONE
     p.index = 1
-    check("LOOP_ONE：放完还是自己 ✓", p.next_index_on_end() == 1)
+    check("LOOP_ONE：放完还是自己 ", p.next_index_on_end() == 1)
 
     Player empty = new Player()
-    check("空列表：三种推进都给 -1（不越界 ✓）",
+    check("空列表：三种推进都给 -1（不越界）",
           empty.next_index_on_end() == -1 and empty.next_index() == -1 and empty.prev_index() == -1)
     check("空列表：current() 给空串", empty.current() == "" and empty.current_name() == "")
 
     // ---- ③ 手动上/下一首 ----
     p.loopMode = pl.LOOP_OFF
     p.index = 0
-    check("LOOP_OFF：第一首按上一首 ⇒ -1（界面该置灰 ✓）", p.prev_index() == -1)
+    check("LOOP_OFF：第一首按上一首 -> -1（界面该置灰）", p.prev_index() == -1)
     p.index = 2
-    check("LOOP_OFF：最后一首按下一首 ⇒ -1 ✓", p.next_index() == -1)
+    check("LOOP_OFF：最后一首按下一首 -> -1 ", p.next_index() == -1)
     p.loopMode = pl.LOOP_ALL
-    check("LOOP_ALL：首尾互绕 ✓", p.next_index() == 0 and p.prev_index() == 1)
+    check("LOOP_ALL：首尾互绕 ", p.next_index() == 0 and p.prev_index() == 1)
 
     // ---- ④ 假文件（1 字节）⇒ 必须安全失败，不能崩 ----
     Player q = new Player()
     q.scan(dir)
     bool okPlay = q.play_index(0)
-    check("假文件：play_index **安全失败**并写清原因 ✓", (not okPlay) and q.err != "")
-    check("失败后状态一致（playing=false、index 仍指向该首 ✓）", (not q.playing) and q.index == 0)
-    check("没在播时 next()/toggle() 不崩 ✓", (not q.playing) or true)
+    check("假文件：play_index **安全失败**并写清原因 ", (not okPlay) and q.err != "")
+    check("失败后状态一致（playing=false、index 仍指向该首）", (not q.playing) and q.index == 0)
+    check("没在播时 next()/toggle() 不崩 ", (not q.playing) or true)
     q.close()
 
     // ---- ⑤ 播放条的纯逻辑（不建控件也能调 ⇒ 宿主/测试都好用 ✓）----
-    check("播放条：没建过 ⇒ playable_count 为 0（不崩 ✓）", pb.playable_count(null) == 0)
+    check("播放条：没建过 -> playable_count 为 0（不崩）", pb.playable_count(null) == 0)
 
     // ---- ⑥ 试听（右击菜单「播放试听」✓）：状态机要能安全失败、不污染播放列表 ✓ ----
-    check("试听：文件不存在 ⇒ 安全失败（返回 false、不崩 ✓）", not p.preview(dir + "/没有这个文件.mp3", "试听测试") == true)
-    check("试听失败后 previewing 归位（不留半截状态 ✓）", not p.previewing)
-    check("试听：失败原因写进 err（界面能说清 ✓）", p.err != "")
+    check("试听：文件不存在 -> 安全失败（返回 false、不崩）", not p.preview(dir + "/没有这个文件.mp3", "试听测试") == true)
+    check("试听失败后 previewing 归位（不留半截状态）", not p.previewing)
+    check("试听：失败原因写进 err（界面能说清）", p.err != "")
     p.stop_preview()
-    check("stop_preview 幂等（没在试听时调用也不崩 ✓）", true)
+    check("stop_preview 幂等（没在试听时调用也不崩）", true)
 
     // ---- ⑦ 文件名拆分（播放条显示"歌名 + 歌手"用 ✓，命名规则见 dl_engine ✓）----
     //   规则 = 下载落盘的命名「**歌名 - 歌手**」（dl_engine:377 + F_NAME=1/F_ARTIST=2 ✓）
-    check("拆名：夜曲 - 周杰伦.mp3 ⇒ 歌名 夜曲", pl.split_title("夜曲 - 周杰伦.mp3") == "夜曲")
-    check("拆名：夜曲 - 周杰伦.mp3 ⇒ 歌手 周杰伦", pl.split_artist("夜曲 - 周杰伦.mp3") == "周杰伦")
-    check("拆名：真实文件样例 后来 - 刘若英.flac ⇒ 歌名/歌手 ✓", pl.split_title("后来 - 刘若英.flac") == "后来" and pl.split_artist("后来 - 刘若英.flac") == "刘若英")
-    check("拆名：没有分隔符 ⇒ 歌手空、整条当歌名 ✓", pl.split_artist("随便一首.mp3") == "" and pl.split_title("随便一首.mp3") == "随便一首")
-    check("拆名：歌名自带 ' - ' ⇒ 按**最后**一处切（歌名=A - B、歌手=C ✓）", pl.split_title("A - B - C.mp3") == "A - B" and pl.split_artist("A - B - C.mp3") == "C")
+    check("拆名：夜曲 - 周杰伦.mp3 -> 歌名 夜曲", pl.split_title("夜曲 - 周杰伦.mp3") == "夜曲")
+    check("拆名：夜曲 - 周杰伦.mp3 -> 歌手 周杰伦", pl.split_artist("夜曲 - 周杰伦.mp3") == "周杰伦")
+    check("拆名：真实文件样例 后来 - 刘若英.flac -> 歌名/歌手 ", pl.split_title("后来 - 刘若英.flac") == "后来" and pl.split_artist("后来 - 刘若英.flac") == "刘若英")
+    check("拆名：没有分隔符 -> 歌手空、整条当歌名 ", pl.split_artist("随便一首.mp3") == "" and pl.split_title("随便一首.mp3") == "随便一首")
+    check("拆名：歌名自带 ' - ' -> 按**最后**一处切（歌名=A - B、歌手=C）", pl.split_title("A - B - C.mp3") == "A - B" and pl.split_artist("A - B - C.mp3") == "C")
     check("去扩展名：只去掉**最后**一个点之后", pl.strip_ext("a.b.mp3") == "a.b")
 
     // ---- ⑧ 拖进度的**闸门** + "整首下完切过去"要用的按名找下标（2026-10-07 新增 ✓）----
     //   为什么要有闸门：试听播的是**前一段的截断文件** ⇒ 拖了会跳到并不存在的位置 ✗
     Player s1 = new Player()
-    check("闸门：什么都没播 ⇒ 不许拖 ✓", not s1.can_seek())
+    check("闸门：什么都没播 -> 不许拖 ", not s1.can_seek())
     s1.list = ["后来 - 刘若英.flac", "夜曲 - 周杰伦.mp3"]
     s1.index = 0
-    check("闸门：选了歌但**声音对象还没建**（离线建不了 ✓）⇒ 不许拖 ✓", not s1.can_seek())
+    check("闸门：选了歌但**声音对象还没建**（离线建不了）-> 不许拖 ", not s1.can_seek())
     s1.previewing = true
-    check("闸门：试听态一律不许拖（截断文件 ✓）", not s1.can_seek())
+    check("闸门：试听态一律不许拖（截断文件）", not s1.can_seek())
     s1.previewing = false
-    check("按名找下标：命中 ⇒ 1 ✓", s1.index_of("夜曲 - 周杰伦.mp3") == 1)
-    check("按名找下标：只比 basename（带目录也认 ✓）", s1.index_of("D:\\music\\夜曲 - 周杰伦.mp3") == 1)
-    check("按名找下标：没有这首 ⇒ -1 ✓", s1.index_of("不存在.mp3") == -1)
-    check("按名找下标：空串 ⇒ -1（不崩 ✓）", s1.index_of("") == -1)
-    check("按秒跳：没有声音对象 ⇒ 安全失败（不崩 ✓）", not s1.seek_seconds(3.0))
+    check("按名找下标：命中 -> 1 ", s1.index_of("夜曲 - 周杰伦.mp3") == 1)
+    check("按名找下标：只比 basename（带目录也认）", s1.index_of("D:\\music\\夜曲 - 周杰伦.mp3") == 1)
+    check("按名找下标：没有这首 -> -1 ", s1.index_of("不存在.mp3") == -1)
+    check("按名找下标：空串 -> -1（不崩）", s1.index_of("") == -1)
+    check("按秒跳：没有声音对象 -> 安全失败（不崩）", not s1.seek_seconds(3.0))
 
     // ---- ⑨ 歌词（.lrc）解析与定位（2026-10-08 ✓ 纯逻辑）----
     //   为什么单测它：真机上"歌词不对"很难分清是**下载的 lrc 有问题**还是**解析写错了** ✗
     var L1 = pl.lrc_from_text("[00:12.34]第一句\n[00:20.00]第二句\n")
-    check("歌词：两条、时间 12.34 / 20.00 ✓", L1.secs.len() == 2 and _int(L1.secs[0] * 100.0) == 1234 and _int(L1.secs[1] * 100.0) == 2000)
-    check("歌词：文本取对（中文按码点走 ⇒ 不乱码 ✓）", L1.texts[0] == "第一句" and L1.texts[1] == "第二句")
+    check("歌词：两条、时间 12.34 / 20.00 ", L1.secs.len() == 2 and _int(L1.secs[0] * 100.0) == 1234 and _int(L1.secs[1] * 100.0) == 2000)
+    check("歌词：文本取对（中文按码点走 -> 不乱码）", L1.texts[0] == "第一句" and L1.texts[1] == "第二句")
     var L2 = pl.lrc_from_text("[ti:歌名]\n[ar:歌手]\n[by:某人]\n[00:01]正文\n")
-    check("歌词：元信息行 [ti:]/[ar:]/[by:] 全跳过 ✓", L2.secs.len() == 1 and L2.texts[0] == "正文")
+    check("歌词：元信息行 [ti:]/[ar:]/[by:] 全跳过 ", L2.secs.len() == 1 and L2.texts[0] == "正文")
     var L3 = pl.lrc_from_text("[00:05][00:09]同一句\n")
-    check("歌词：一行挂多个时间标签 ⇒ 拆成两条 ✓", L3.secs.len() == 2 and L3.texts[0] == "同一句" and L3.texts[1] == "同一句")
+    check("歌词：一行挂多个时间标签 -> 拆成两条 ", L3.secs.len() == 2 and L3.texts[0] == "同一句" and L3.texts[1] == "同一句")
     var L4 = pl.lrc_from_text("[00:30.00]后\n[00:10.00]前\n")
-    check("歌词：输入乱序 ⇒ 按时间排好 ✓", L4.texts[0] == "前" and L4.texts[1] == "后")
+    check("歌词：输入乱序 -> 按时间排好 ", L4.texts[0] == "前" and L4.texts[1] == "后")
     var L5 = pl.lrc_from_text("[00:07.5]半秒一位\n")
-    check("歌词：[mm:ss.x]（一位小数）也认 ✓", L5.secs.len() == 1 and _int(L5.secs[0] * 10.0) == 75)
-    check("歌词：空串 ⇒ 空表（不崩 ✓）", pl.lrc_from_text("").secs.len() == 0)
-    check("歌词：没标签的纯文本行 ⇒ 跳过 ✓", pl.lrc_from_text("就是一行普通文字\n").secs.len() == 0)
-    check("歌词定位：还没到第一句 ⇒ -1 ✓", pl.lrc_index_at(L1.secs, 3.0) == -1)
-    check("歌词定位：12.34~20 之间 ⇒ 第 0 句 ✓", pl.lrc_index_at(L1.secs, 15.0) == 0)
-    check("歌词定位：过了最后一句 ⇒ 最后一句 ✓", pl.lrc_index_at(L1.secs, 99.0) == 1)
+    check("歌词：[mm:ss.x]（一位小数）也认 ", L5.secs.len() == 1 and _int(L5.secs[0] * 10.0) == 75)
+    check("歌词：空串 -> 空表（不崩）", pl.lrc_from_text("").secs.len() == 0)
+    check("歌词：没标签的纯文本行 -> 跳过 ", pl.lrc_from_text("就是一行普通文字\n").secs.len() == 0)
+    check("歌词定位：还没到第一句 -> -1 ", pl.lrc_index_at(L1.secs, 3.0) == -1)
+    check("歌词定位：12.34~20 之间 -> 第 0 句 ", pl.lrc_index_at(L1.secs, 15.0) == 0)
+    check("歌词定位：过了最后一句 -> 最后一句 ", pl.lrc_index_at(L1.secs, 99.0) == 1)
 
     // ---- ⑩ 歌词的"懒加载 + 取值"（2026-10-08 新增 ✓ 画布要按句取词/取时间 ✓）----
     //   真造一个小目录（假 mp3 + 真 lrc）⇒ 把 Player 指过去 ⇒ 验"换歌才读、读得到、越界不崩" ✓
@@ -155,14 +155,14 @@ main() {
     files.write(dirs.join(tdir, tname + ".lrc"), "[ti:测试]\n[00:00.00]第一句\n[00:04.00]第二句\n[00:08.00]第三句\n")
     Player s2 = new Player()
     s2.scan(tdir)
-    check("歌词：扫目录后拿到这首 ✓", s2.count() == 1 and s2.index == 0)
-    check("歌词：句数 = 3（[ti:] 不算 ✓）", s2.lyric_count() == 3)
-    check("歌词：第 2 句文字 ✓", s2.lyric_text_at(1) == "第二句")
-    check("歌词：第 3 句时间 = 8.0 秒 ✓", _int(s2.lyric_time(2) * 10.0) == 80)
-    check("歌词：越界取词 ⇒ 空串（不崩 ✓）", s2.lyric_text_at(99) == "" and s2.lyric_text_at(-1) == "")
-    check("歌词：越界取时间 ⇒ -1 ✓", s2.lyric_time(99) < 0.0)
-    check("歌词：位置 0 秒 ⇒ 停在第 1 句（0:00 那句 ✓）", s2.lyric_index() == 0)
-    check("句内进度：位置 0 ⇒ 0%（起句 ✓）", s2.lyric_progress() == 0.0)
+    check("歌词：扫目录后拿到这首 ", s2.count() == 1 and s2.index == 0)
+    check("歌词：句数 = 3（[ti:] 不算）", s2.lyric_count() == 3)
+    check("歌词：第 2 句文字 ", s2.lyric_text_at(1) == "第二句")
+    check("歌词：第 3 句时间 = 8.0 秒 ", _int(s2.lyric_time(2) * 10.0) == 80)
+    check("歌词：越界取词 -> 空串（不崩）", s2.lyric_text_at(99) == "" and s2.lyric_text_at(-1) == "")
+    check("歌词：越界取时间 -> -1 ", s2.lyric_time(99) < 0.0)
+    check("歌词：位置 0 秒 -> 停在第 1 句（0:00 那句）", s2.lyric_index() == 0)
+    check("句内进度：位置 0 -> 0%（起句）", s2.lyric_progress() == 0.0)
     files.delete(dirs.join(tdir, tname + ".mp3"))
     files.delete(dirs.join(tdir, tname + ".lrc"))
 
@@ -177,47 +177,47 @@ main() {
     s3.scanDir = tdir2
     s3.previewing = true
     s3.previewName = "晚到 - 歌手"
-    check("试听歌词路径：指向输出目录的同名 .lrc ✓", s3.lrc_path() == dirs.join(tdir2, "晚到 - 歌手.lrc"))
-    check("试听歌词：文件还没到 ⇒ 空歌词（不崩 ✓）", s3.lyric_count() == 0)
+    check("试听歌词路径：指向输出目录的同名 .lrc ", s3.lrc_path() == dirs.join(tdir2, "晚到 - 歌手.lrc"))
+    check("试听歌词：文件还没到 -> 空歌词（不崩）", s3.lyric_count() == 0)
     files.write(dirs.join(tdir2, "晚到 - 歌手.lrc"), "[00:00.00]第一句\n[00:05.00]第二句\n")
-    check("试听歌词：**文件晚到也能补读** ✓（不换歌/不重启 ✓）", s3.lyric_count() == 2)
-    check("试听歌词：补读后取词正确 ✓", s3.lyric_text_at(1) == "第二句")
+    check("试听歌词：**文件晚到也能补读** （不换歌/不重启）", s3.lyric_count() == 2)
+    check("试听歌词：补读后取词正确 ", s3.lyric_text_at(1) == "第二句")
     files.delete(dirs.join(tdir2, "晚到 - 歌手.lrc"))
 
     // ---- ⑫ 歌词折行（2026-10-08 新增 ✓ 纯算术 ⇒ 能离线测 ✓）----
     //   为什么要有：一句 30+ 字的歌词在"当前句"17pt 下会**顶到浮层边上** ✗（实测 ✓）
     //   规则：中文/全角 = 2 单元、其余 = 1 单元；放不下就在**字与字之间**断 ✓
     var wp = pl.wrap_units("一二三四五", 6)          // 每字 2 单元 ⇒ 一行 3 字
-    check("折行：五个汉字、限 6 单元 ⇒ 两段（3+2 ✓）", wp.len() == 2 and wp[0] == "一二三" and wp[1] == "四五")
+    check("折行：五个汉字、限 6 单元 -> 两段（3+2）", wp.len() == 2 and wp[0] == "一二三" and wp[1] == "四五")
     var wa = pl.wrap_units("abcdefg", 4)
-    check("折行：ASCII 限 4 ⇒ 两段（4+3 ✓）", wa.len() == 2 and wa[0] == "abcd" and wa[1] == "efg")
+    check("折行：ASCII 限 4 -> 两段（4+3）", wa.len() == 2 and wa[0] == "abcd" and wa[1] == "efg")
     //   ⚠ 上限传 3 是**测不到**的：实现里小于 4 会兜底成 4 ✗（第一版用例就栽在这 ✓）
     var wm = pl.wrap_units("ab你cd", 5)              // a=1 b=2 你=4 c=5 ⇒ 满；d 另起
-    check("折行：混排按单元算（ab你c 占满 5 单元 ✓）", wm.len() == 2 and wm[0] == "ab你c" and wm[1] == "d")
-    check("折行：能放下就**不折** ✓", pl.wrap_units("短句", 20).len() == 1)
-    check("折行：空串 ⇒ 空表（不崩 ✓）", pl.wrap_units("", 10).len() == 0)
-    check("折行：上限过小按 4 兜底（不死循环 ✗）", pl.wrap_units("一二三", 1).len() >= 2)
-    check("判宽：汉字算宽 ✓ / ASCII 算窄 ✓", pl.is_wide_cp(strings.codepoint_at("你", 0)) and not pl.is_wide_cp(strings.codepoint_at("a", 0)))
+    check("折行：混排按单元算（ab你c 占满 5 单元）", wm.len() == 2 and wm[0] == "ab你c" and wm[1] == "d")
+    check("折行：能放下就**不折** ", pl.wrap_units("短句", 20).len() == 1)
+    check("折行：空串 -> 空表（不崩）", pl.wrap_units("", 10).len() == 0)
+    check("折行：上限过小按 4 兜底（不死循环）", pl.wrap_units("一二三", 1).len() >= 2)
+    check("判宽：汉字算宽  / ASCII 算窄 ", pl.is_wide_cp(strings.codepoint_at("你", 0)) and not pl.is_wide_cp(strings.codepoint_at("a", 0)))
 
     // ---- ⑬ 歌词"空档"判定（2026-10-08 ✓ 纯逻辑 ⇒ 能离线测 ✓）----
     //   长前奏/长间奏时给一句"前奏中…/间奏中…"✓；普通句间隔**不该**冒提示 ✗（会一直闪 ✓ 反而烦）
-    check("空档：还没到第一句且还早 ⇒ 前奏(1) ✓", pl.lyric_stage(0.0, 5.0, 9.0, false, true) == 1)
-    check("空档：第一句就在 0:00 ⇒ 不提示（否则一开歌就闪 ✗）", pl.lyric_stage(0.0, 0.0, 4.0, false, true) == 0)
-    check("空档：这句刚唱 ⇒ 不提示（先让它唱 2.5 秒 ✓）", pl.lyric_stage(10.5, 10.0, 20.0, true, true) == 0)
-    check("空档：唱过一阵 + 下一句 >6 秒才来 ⇒ 间奏(2) ✓", pl.lyric_stage(13.0, 10.0, 20.0, true, true) == 2)
-    check("空档：普通句间隔（4 秒）⇒ 不提示 ✓", pl.lyric_stage(12.0, 10.0, 14.0, true, true) == 0)
-    check("空档：最后一句 ⇒ 不猜什么时候结束（0 ✓）", pl.lyric_stage(13.0, 10.0, -1.0, true, false) == 0)
+    check("空档：还没到第一句且还早 -> 前奏(1) ", pl.lyric_stage(0.0, 5.0, 9.0, false, true) == 1)
+    check("空档：第一句就在 0:00 -> 不提示（否则一开歌就闪）", pl.lyric_stage(0.0, 0.0, 4.0, false, true) == 0)
+    check("空档：这句刚唱 -> 不提示（先让它唱 2.5 秒）", pl.lyric_stage(10.5, 10.0, 20.0, true, true) == 0)
+    check("空档：唱过一阵 + 下一句 >6 秒才来 -> 间奏(2) ", pl.lyric_stage(13.0, 10.0, 20.0, true, true) == 2)
+    check("空档：普通句间隔（4 秒）-> 不提示 ", pl.lyric_stage(12.0, 10.0, 14.0, true, true) == 0)
+    check("空档：最后一句 -> 不猜什么时候结束（0）", pl.lyric_stage(13.0, 10.0, -1.0, true, false) == 0)
 
     // ---- ⑭ 逐字歌词："有就用、没有就退回线性"（2026-10-08 ✓ 用户要"歌词和唱歌同步" ✓）----
     //   解析：剥 `<起点,时长>` 标签、收每字的起止、`<0,0>` 译文行并到上一句 ✓
     var e1 = pl.lrc_from_text("[00:10.00]<10000,500>你<10500,500>好<11500,900>呀\n")
-    check("逐字：标签剥掉、文本对 ✓", e1.texts.len() == 1 and e1.texts[0] == "你好呀")
-    check("逐字：收了 3 个字的起止 ✓", e1.wt_line.len() == 3 and _int(e1.wt_sec[0] * 1000.0) == 10000 and _int(e1.wt_end[0] * 1000.0) == 10500)
-    check("逐字：第 3 字结束 = 12.4 秒 ✓", _int(e1.wt_end[2] * 1000.0) == 12400)
+    check("逐字：标签剥掉、文本对 ", e1.texts.len() == 1 and e1.texts[0] == "你好呀")
+    check("逐字：收了 3 个字的起止 ", e1.wt_line.len() == 3 and _int(e1.wt_sec[0] * 1000.0) == 10000 and _int(e1.wt_end[0] * 1000.0) == 10500)
+    check("逐字：第 3 字结束 = 12.4 秒 ", _int(e1.wt_end[2] * 1000.0) == 12400)
     var e2 = pl.lrc_from_text("[00:10.00]你好\n[00:10.00]<0,0>Hello\n")
-    check("逐字：`<0,0>` 译文行**并到上一句**（不加新行 ✓）", e2.texts.len() == 1 and e2.texts[0] == "你好 Hello")
+    check("逐字：`<0,0>` 译文行**并到上一句**（不加新行）", e2.texts.len() == 1 and e2.texts[0] == "你好 Hello")
     var e3 = pl.lrc_from_text("[00:10.00]普通歌词\n")
-    check("逐字：普通 .lrc ⇒ 逐字段为空（⇒ 渲染自动退回线性 ✓）", e3.wt_line.len() == 0)
+    check("逐字：普通 .lrc -> 逐字段为空（-> 渲染自动退回线性）", e3.wt_line.len() == 0)
 
     //   ★ **歌词文件被覆盖后要重读**（2026-10-08 用户实测："重新下过歌词，却一点逐字都没有" ✓）
     //     原因：只按"路径"判缓存 ⇒ 同名文件被换成逐字版也不会重读 ✗
@@ -228,10 +228,10 @@ main() {
     files.write(dirs.join(tdir3, nm3 + ".lrc"), "[00:01.00]普通一句\n")          // 先给"纯 LRC"版
     Player s4 = new Player()
     s4.scan(tdir3)
-    check("覆盖重读：先读到纯 LRC（逐字条 = 0 ✓）", s4.lyric_count() == 1 and s4.lyric_word_count() == 0)
+    check("覆盖重读：先读到纯 LRC（逐字条 = 0）", s4.lyric_count() == 1 and s4.lyric_word_count() == 0)
     //   再把它**覆盖**成逐字版（同名同路径 ✓ 只有内容变）
     files.write(dirs.join(tdir3, nm3 + ".lrc"), "[00:01.00]<1000,200>逐<1300,200>字<1600,200>版\n")
-    check("覆盖重读：文件换了 ⇒ **自动重读**（逐字条 = 3 ✓）", s4.lyric_word_count() == 3 and s4.lyric_text_at(0) == "逐字版")
+    check("覆盖重读：文件换了 -> **自动重读**（逐字条 = 3）", s4.lyric_word_count() == 3 and s4.lyric_text_at(0) == "逐字版")
     files.delete(dirs.join(tdir3, nm3 + ".mp3"))
     files.delete(dirs.join(tdir3, nm3 + ".lrc"))
 
@@ -244,9 +244,9 @@ main() {
     files.write(dirs.join(tdir5, "别的 - 歌手.flac"), "x")
     Array[string] row5 = ["id", "找歌", "歌手", "专辑", "3:00", "mp3", "1"]
     string got5 = eng.find_local(row5, tdir5)
-    check("找本地：按「歌名 - 歌手」前缀找到音频 ✓", got5 != "" and got5.slice(got5.len() - 4, got5.len()) == ".mp3")
-    check("找本地：同名 .lrc **不算**（那是歌词 ✓）", eng.find_local(["id", "没这首", "歌手"], tdir5) == "")
-    check("找本地：目录不存在 ⇒ 空串（不崩 ✓）", eng.find_local(row5, dirs.join(_tmpdir(), "根本没有这个目录")) == "")
+    check("找本地：按「歌名 - 歌手」前缀找到音频 ", got5 != "" and got5.slice(got5.len() - 4, got5.len()) == ".mp3")
+    check("找本地：同名 .lrc **不算**（那是歌词）", eng.find_local(["id", "没这首", "歌手"], tdir5) == "")
+    check("找本地：目录不存在 -> 空串（不崩）", eng.find_local(row5, dirs.join(_tmpdir(), "根本没有这个目录")) == "")
     files.delete(dirs.join(tdir5, "找歌 - 歌手.mp3"))
     files.delete(dirs.join(tdir5, "找歌 - 歌手.lrc"))
     files.delete(dirs.join(tdir5, "别的 - 歌手.flac"))
@@ -254,21 +254,21 @@ main() {
     //   ★ 逐字数据的**校验**（2026-10-08 ✓ 实测酷我这份数据很脏 ⇒ 逐句判、不可信就退回线性 ✓）
     //     为什么必须校验：脏句会让刷色"卡在第一个字"✗（用户实测：第一句都唱完了、逐字还在开头 ✓）
     var v1 = pl.lrc_from_text("[00:10.00]<0,0>a<200,0>b<400,0>c\n[00:11.00]<11000,0>下\n")
-    check("逐字校验：干净数据 ⇒ 采用（第 1 句 3 条 ✓）", pl.word_count_at(v1, 0) == 3)
+    check("逐字校验：干净数据 -> 采用（第 1 句 3 条）", pl.word_count_at(v1, 0) == 3)
     var v2 = pl.lrc_from_text("[00:10.00]<2000,0>a<9000,0>b<20000,0>c\n[00:11.00]<11000,0>下\n")
-    check("逐字校验：首值晚 + 跨度离谱 ⇒ **该句丢掉**（退回线性 ✓）", pl.word_count_at(v2, 0) == 0)
+    check("逐字校验：首值晚 + 跨度离谱 -> **该句丢掉**（退回线性）", pl.word_count_at(v2, 0) == 0)
     var v3 = pl.lrc_from_text("[00:20.00]<20000,0>a<20500,0>b\n[00:21.00]<21000,0>下\n")
-    check("逐字校验：**绝对基准**（≈行起点 ✓）也认，且原样使用 ✓", pl.word_count_at(v3, 0) == 2 and _int(v3.wt_sec[0]) == 20)
+    check("逐字校验：**绝对基准**（≈行起点）也认，且原样使用 ", pl.word_count_at(v3, 0) == 2 and _int(v3.wt_sec[0]) == 20)
     var v4 = pl.lrc_from_text("[00:30.00]<480,0>a<4000,0>b\n[00:40.00]<40000,0>下\n")
-    check("逐字校验：**行内相对** ⇒ 加回行起点 ✓", pl.word_count_at(v4, 0) == 2 and _int(v4.wt_sec[0]) == 30)
+    check("逐字校验：**行内相对** -> 加回行起点 ", pl.word_count_at(v4, 0) == 2 and _int(v4.wt_sec[0]) == 30)
 
     //   定位（纯函数 ✓）：字内按时间推进；**字间空档不推进**（这条就是"真同步" ✓）
-    check("逐字：字内过半 ⇒ 0.5 个字 ✓", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 10.25, 2) * 100.0) == 50)
-    check("逐字：**字间空档不推进**（10.6 秒仍是 1 个字 ✓）", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 10.6, 2) * 100.0) == 100)
-    check("逐字：下一个字到点才接着走 ✓", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 13.5, 2) * 100.0) == 150)
-    check("逐字：全过了 ⇒ 整句唱完（不超字数 ✓）", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 99.0, 2) * 100.0) == 200)
-    check("逐字：时长缺失(-1) ⇒ 退回'到下一个字起点' ✓", _int(pl.word_sung([10.0, 11.0], [-1.0, -1.0], 10.5, 2) * 100.0) == 50)
-    check("逐字：还没到第一个字 ⇒ 0 ✓", _int(pl.word_sung([10.0], [10.5], 9.0, 1) * 100.0) == 0)
+    check("逐字：字内过半 -> 0.5 个字 ", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 10.25, 2) * 100.0) == 50)
+    check("逐字：**字间空档不推进**（10.6 秒仍是 1 个字）", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 10.6, 2) * 100.0) == 100)
+    check("逐字：下一个字到点才接着走 ", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 13.5, 2) * 100.0) == 150)
+    check("逐字：全过了 -> 整句唱完（不超字数）", _int(pl.word_sung([10.0, 13.0], [10.5, 14.0], 99.0, 2) * 100.0) == 200)
+    check("逐字：时长缺失(-1) -> 退回'到下一个字起点' ", _int(pl.word_sung([10.0, 11.0], [-1.0, -1.0], 10.5, 2) * 100.0) == 50)
+    check("逐字：还没到第一个字 -> 0 ", _int(pl.word_sung([10.0], [10.5], 9.0, 1) * 100.0) == 0)
 
     // ---- ⑮ 逐字包的**解码**（2026-10-08 ✓ 合成一份内层包验往返 ✓）----
     //   真包是 zlib( base64+xor(gb18030(...)) ) ✓；zlib 那层测试里不好造 ⇒ 直接测**内层** ✓
@@ -283,8 +283,8 @@ main() {
         zz = zz + 1
     }
     string packed = strings.to_base64(strings.from_bytes(xx))
-    check("逐字解码：base64+异或 **往返一致** ✓", kwo.decode_lrcx_inner(packed) == sample)
-    check("逐字解码：不像歌词 ⇒ 空串（调用方据此退回标准 LRC ✓）", kwo.decode_lrcx_inner(strings.to_base64("这不是歌词也不是时间轴")) == "")
+    check("逐字解码：base64+异或 **往返一致** ", kwo.decode_lrcx_inner(packed) == sample)
+    check("逐字解码：不像歌词 -> 空串（调用方据此退回标准 LRC）", kwo.decode_lrcx_inner(strings.to_base64("这不是歌词也不是时间轴")) == "")
 
     // ---- 清理临时文件（别在用户机器上留垃圾 ✓）----
     var left = dirs.listdir(dir)
@@ -300,5 +300,5 @@ main() {
         print($"共 {fails} 项失败")
         _exit(1)
     }
-    print("全部通过（扫目录 / 排序 / 循环三态 / 边界 / 安全失败 ✓）")
+    print("全部通过（扫目录 / 排序 / 循环三态 / 边界 / 安全失败）")
 }

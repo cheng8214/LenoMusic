@@ -19,10 +19,10 @@ int failed = 0
 func check(string name, bool ok) {
     if ok {
         passed = passed + 1
-        print("  PASS ✓ " + name)
+        print("  PASS  " + name)
     } else {
         failed = failed + 1
-        print("  FAIL ✗ " + name)
+        print("  FAIL  " + name)
     }
 }
 
@@ -61,5 +61,5 @@ main() {
 
     print("")
     print("通过 " + _str(passed) + " 项，失败 " + _str(failed) + " 项")
-    print(if failed == 0 then "=== 全部通过 ===" else "=== 有失败 ✗ ===")
+    print(if failed == 0 then "=== 全部通过 ===" else "=== 有失败  ===")
 }

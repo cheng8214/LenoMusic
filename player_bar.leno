@@ -229,9 +229,9 @@ export struct PlayerBar {
                         }
                     } else if q.previewing {
                         if dlPct >= 0.0 {
-                            hostLbl?.set_text("试听的是前一段（截断文件）⇒ 等整首下载完（" + _str(_int(dlPct)) + "%）就能拖了")
+                            hostLbl?.set_text("试听的是前一段（截断文件）-> 等整首下载完（" + _str(_int(dlPct)) + "%）就能拖了")
                         } else {
-                            hostLbl?.set_text("试听的是前一段（截断文件）⇒ 整首下载完就能拖进度")
+                            hostLbl?.set_text("试听的是前一段（截断文件）-> 整首下载完就能拖进度")
                         }
                     } else {
                         hostLbl?.set_text("先播一首再拖进度")
@@ -904,7 +904,7 @@ export struct PlayerBar {
                         hostLbl?.set_text("跳到第 " + _str(idx + 1) + " 句（" + fmt_time(t) + "）")
                     }
                 } else {
-                    hostLbl?.set_text("整首下完才能点歌词跳（试听放的是前一段 ✓）")
+                    hostLbl?.set_text("整首下完才能点歌词跳（试听放的是前一段）")
                 }
             }
         }
@@ -1140,7 +1140,7 @@ export struct PlayerBar {
                 if i >= 0 {
                     if q.play_index(i) {
                         if pos > 0.5 { q.seek_seconds(pos) }
-                        hostLbl?.set_text("试听的那首已下完 ⇒ 已切到本地完整文件，可拖进度 ✓（" + tag + "）")
+                        hostLbl?.set_text("试听的那首已下完 -> 已切到本地完整文件，可拖进度 （" + tag + "）")
                     }
                 }
             }
