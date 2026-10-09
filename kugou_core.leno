@@ -24,6 +24,13 @@
 //      ★ 同款坑（2026-10-08 又撞上一次）：第三方兜底给的是 `fs.youthandroid2.kugou.com`，
 //        Windows 的 schannel 直接报 `SEC_E_WRONG_PRINCIPAL` ⇒ curl/PS 一律测不通，
 //        而 LenoWeb（libcurl + setSSLVerify(false)）照样 206 拿到真 flac ✓
+//   ⑥ ★ 2026-10-09 加 **Res 母带档**（第四档）：移动端接口只有三档，`ResFileHash` 只在
+//      **Web 搜索接口**（song_search_v2）里 ⇒ 搜索后再发一次 Web 请求、按 **FileHash 对齐**，
+//      把"已判可下"的行的档位升到母带（每页只多 1 次请求 ✓；拿不到就保持三档 ✓）。
+//      实测（免费翻唱曲）：Res 档同样是**免签名 CDN** 取的（`cmd=21`/`appid=1001` 那条，
+//      只是 hash 换成 ResFileHash）⇒ 取链一行都不用改 ✓；实测体积 26.8/34.2/45.5 MB（br≈1346~1642）
+//      ⚠ 判据：**只升级本来就可下的行**（SQ 档免费 ⇒ 母带也免费，实测 3/3 成立 ✓），
+//        且**只在母带更大时**替换（防档位倒挂）—— 付费曲的 Res 照样是 `status=2`（实测 ✓）
 //   ⑤ **三档都不可下（付费曲）时走第三方聚合接口**（见 thirdparty.leno 头部）：
 //      上游实测酷狗 flac 30/29 MB 就是这条路拿的 ⇒ 搜索末尾对这些行**逐首试一次**，
 //      成功就把 ext/体积/直链一起写进行里（第 10 项 = 直链，见 dl_engine.F_URL ✓）
@@ -40,6 +47,12 @@ use net.(Response)
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 const SEARCH_API = "https://mobilecdn.kugou.com/api/v3/search/song?"
 const CDN_API = "https://trackercdn.kugou.com/i/v2/"
+// ★ Web 搜索接口（移动端那条**没有 Res 母带档** ⇒ 第 ⑥ 条就是为它加的）：
+//   GET songsearch.kugou.com/song_search_v2?format=json&keyword=..&platform=WebFilter&page=1&pagesize=N
+//   免签名、免 Referer、免登录（实测 pagesize=30 也照给 ✓）；返回 **大写** hash
+//   ⚠ 它的结果集/排序与移动端**不是同一批**（实测搜"后来"：它前 20 全是付费正版，
+//     移动端前 20 里有 5 首免费翻唱）⇒ 只拿它**按 hash 对齐补 Res 档**，不用它当搜索入口 ✓
+const WEB_SEARCH_API = "https://songsearch.kugou.com/song_search_v2?"
 
 export func useragent(): string { return UA }
 
@@ -140,7 +153,96 @@ export func searchrows(HttpClient client, string keyword, int limit): Array[Arra
         rows.add(row)
     }
 
+    // ★ ⑥ Res 母带档：移动端接口没有它 ⇒ 再发一次 **Web 搜索**（同关键词、同条数），
+    //   按 FileHash 对齐，把已判可下的行升到母带（详见头部 ⑥ ✓）
+    //   ⚠ 失败一律只是"保持三档"（错误在 webresmap 里消化掉 ✓）——Res 绝不该影响主结果 ✓
+    if rows.len() > 0 {
+        mergeweb(rows, webresmap(client, keyword, limit))
+    }
+
     return rows
+}
+
+// 发一次 Web 搜索并把响应解析成 Res 映射；失败 / 接口抽风 ⇒ **空表**（不抛 ✓）
+//   ⚠ 为什么单独一个函数：调用方（searchrows）就不必自己包 try 了，而且这里能用
+//     "赋值型 catch"满足编译器的「空 catch 会静默吞异常」检查 ✓
+export func webresmap(HttpClient client, string keyword, int limit): Dict[string, Array[string]] {
+    Dict[string, Array[string]] out = {}
+    try {
+        string wq = net.buildQuery({"format": "json", "keyword": keyword, "platform": "WebFilter",
+                                    "page": "1", "pagesize": _str(limit)})
+        Response wresp = client.get(WEB_SEARCH_API + wq)
+        if not wresp.ok() { return out }
+        out = parsewebres(wresp.body)
+    } catch e {
+        out = {}      // 有意忽略：Res 只是锦上添花，网络抽风不该把三档结果也带走 ✓
+    }
+    return out
+}
+
+// ==================== ⑥ Res 母带档（2026-10-09）====================
+
+// Web 搜索响应 → { FileHash(大写) : [ResFileHash(大写), ResFileSize, ResBitrate] }
+//   **纯函数** ⇒ 离线金标直接压它（见 test/test_kugou_search.leno ✓）
+//   · 顶层是 `{"data":{"lists":[…]}}`；没有 Res 档（`ResFileHash` 空 / `ResFileSize` 0）的项**不进表** ✓
+//   · key 统一 **大写**：Web 接口给大写、移动端给小写 ⇒ 对齐时统一到一种（见头部 ⑥ ✓）
+export func parsewebres(string body): Dict[string, Array[string]] {
+    Dict[string, Array[string]] out = {}
+    var root = jsons.decode(body) as Dict[string, any]
+    if root == null { return out }
+    var data = root["data"] as Dict[string, any]
+    if data == null { return out }
+    var lists = data["lists"]
+    if not (lists is Array) { return out }
+    for lists to it {
+        var s = it as Dict[string, any]
+        if s == null { continue }
+        string h = jsons.get_str(s, "FileHash", "").to_upper()
+        if h == "" { continue }
+        string rh = jsons.get_str(s, "ResFileHash", "").to_upper()
+        int rs = jsons.get_int(s, "ResFileSize", 0)
+        if rh == "" or rs <= 0 { continue }
+        Array[string] one = []
+        one.add(rh)
+        one.add(_str(rs))
+        one.add(_str(jsons.get_int(s, "ResBitrate", 0)))
+        // ★ 三个档的 hash **都指向同一份 Res 映射**（实测踩到的坑）：
+        //   行里的 id 是"**当前选中档**的 hash"（SQ / 320 / 128 都可能 —— 见 searchrows 的
+        //   档位选择 ✓），而 Web 接口的 `FileHash` 只是 **128 档** ⇒ 只拿它当 key 会对不上，
+        //   表现为"体积没变大"（母带档静默失效 ✗）。⇒ 三档 hash 全建索引 ✓
+        Array[string] keys = []
+        keys.add(h)
+        keys.add(jsons.get_str(s, "HQFileHash", ""))
+        keys.add(jsons.get_str(s, "SQFileHash", ""))
+        for keys to k {
+            string kk = k.to_upper()
+            if kk != "" { out[kk] = one }
+        }
+    }
+    return out
+}
+
+// 把 Res 档合并进移动端搜出来的行（**原地改** ✓）
+//   · 只碰**已判可下**的行（有 ext 且有体积）：没体积的行 = 付费/无权限 ⇒ 不去"升级"它 ✗
+//     （口径与头部 ⑥ 一致：母带的权限跟 SQ 档走 ✓）
+//   · **只在母带更大时**替换（母带一般更大；顺带过滤掉档位倒挂的脏数据 ✓）
+//   · 换档后把第 10 项直链清空（原来那条是 SQ 的链，已经不对了 ⇒ 让下载时现取 ✓）
+export func mergeweb(Array[Array[string]] rows, Dict[string, Array[string]] webmap) {
+    if webmap.len() == 0 { return }
+    for rows to row {
+        if srow.rowext(row) == "" { continue }
+        int cur = srow.rowbytes(row)
+        if cur <= 0 { continue }
+        var one = webmap[srow.rowid(row).to_upper()] as Array[string]
+        if one == null or one.len() < 2 { continue }
+        int rs = _int_or(one[1], 0)
+        if rs <= cur { continue }
+        row[srow.F_ID] = one[0]        // ResFileHash（**大写**，大小写敏感 ⇒ 原样存 ✓）
+        row[srow.F_EXT] = "flac"
+        row[srow.F_SIZETEXT] = fmtsize(rs)
+        row[srow.F_BYTES] = _str(rs)
+        row[srow.F_URL] = ""           // 直链要重取（旧的是 SQ 的链 ✗）
+    }
 }
 
 // 对**一行**补第三方聚合直链（原地改 ext / 体积 / 直链）；拿不到就保持原样 ✓

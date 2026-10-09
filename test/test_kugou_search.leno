@@ -1,0 +1,166 @@
+// test_kugou_search.leno — 酷狗「Res 母带档」的**离线配方回归**（纯逻辑、不需要网络 ✓）
+//
+// 为什么值得单独有它（2026-10-09 加）：Res 母带档**只有 Web 搜索接口给**（移动端那条没有），
+//   所以搜索要多发一次请求、再**按 FileHash 对齐**把已判可下的行升上去。这条链上全是"约定"：
+//   hash 大小写、`data.lists` 的形状、"只升级本来就可下的行"、换档后要清空旧直链 ——
+//   任何一条错位，表现都只是"体积没变大"或"下载时取到错的链"，光看代码发现不了 ✗
+// 样本：2026-10-09 实测真实响应（keyword=晴天 深情版）原样贴回来 ✓
+// 跑：build\leno.exe test\test_kugou_search.leno
+import strings
+import "../kugou_core.leno" as kugou
+import "../songrow.leno" as srow
+
+int passed = 0
+int failed = 0
+
+func check(string name, bool ok) {
+    if ok {
+        passed = passed + 1
+        print("  PASS  " + name)
+    } else {
+        failed = failed + 1
+        print("  FAIL  " + name)
+    }
+}
+
+func checkeq(string name, string got, string want) {
+    bool ok = got == want
+    check(name, ok)
+    if not ok {
+        print("       got  = " + got)
+        print("       want = " + want)
+    }
+}
+
+func checkn(string name, int got, int want) {
+    bool ok = got == want
+    check(name, ok)
+    if not ok {
+        print("       got  = " + _str(got))
+        print("       want = " + _str(want))
+    }
+}
+
+// 真实 Web 搜索响应（3 条：第 1 条没有 Res 档；第 2 条 Res 34.67MB；第 3 条给的是**小写** hash）
+func web_body(): string {
+    string b = "{\"status\":1,\"data\":{\"total\":3,\"lists\":["
+    b = b + "{\"FileHash\":\"D127128A450B602A12A51472BA5C4ED8\",\"FileSize\":2825069,\"SongName\":\"晴天 (深情版)\","
+    b = b + "\"SQFileHash\":\"\",\"SQFileSize\":0,\"ResFileHash\":\"\",\"ResFileSize\":0,\"ResBitrate\":0},"
+    b = b + "{\"FileHash\":\"AB41143D00432376AC8A90EA3DD6A500\",\"FileSize\":5211634,\"SongName\":\"晴天 (深情版)\","
+    b = b + "\"HQFileHash\":\"881A67C52BD1900A380976A14EA3B5E1\",\"HQFileSize\":8243410,"
+    b = b + "\"SQFileHash\":\"81D426F2F5223FEB7EB8CED8C153876B\",\"SQFileSize\":16560066,\"SQBitrate\":642,"
+    b = b + "\"ResFileHash\":\"E59A56FC7874A884DD07ECA356A8DF65\",\"ResFileSize\":34671893,\"ResBitrate\":1346},"
+    b = b + "{\"FileHash\":\"822aede5d9e6d0ce4750284e638621f3\",\"FileSize\":2390770,"
+    b = b + "\"ResFileHash\":\"e2f3168adad4c6b1e56e313eb9000d01\",\"ResFileSize\":4376302,\"ResBitrate\":585}"
+    b = b + "]}}"
+    return b
+}
+
+// 一条"可下"的移动端行（id 是**小写** hash —— 移动端口径 ✓）
+func okrow(): Array[string] {
+    Array[string] r = []
+    r.add("ab41143d00432376ac8a90ea3dd6a500")
+    r.add("晴天 (深情版)")
+    r.add("肖启伦")
+    r.add("专辑")
+    r.add("206")
+    r.add("flac")
+    r.add("15.79 MB")
+    r.add("16560066")
+    r.add("kugou")
+    r.add("http://old-sq-link")     // 旧的 SQ 直链：换档后必须被清掉 ✓
+    return r
+}
+
+main() {
+    print("=== 酷狗 Res 母带档 配方回归 ===")
+
+    // ① Web 响应 → 映射（key 统一大写；没有 Res 档的项不进表）
+    //    ★ 一条曲目会建**三个 key**（FileHash / HQFileHash / SQFileHash 都指向同一份 Res）——
+    //      因为行里的 id 是"当前选中档的 hash"，只索引 128 档会对不上（实测踩到 ✓）
+    Dict[string, Array[string]] map = kugou.parsewebres(web_body())
+    checkn("映射条数（第 2 条 3 档 + 第 3 条 1 档；第 1 条无 Res -> 不进表）", map.len(), 4)
+
+    var a = map["AB41143D00432376AC8A90EA3DD6A500"] as Array[string]
+    check("FileHash(128 档) 命中", a != null)
+    if a != null {
+        checkeq("Res hash", a[0], "E59A56FC7874A884DD07ECA356A8DF65")
+        checkeq("Res 体积", a[1], "34671893")
+        checkeq("Res 码率", a[2], "1346")
+    }
+    // ★ 真实场景：行的 id 是 **SQ 档 hash**（档位选择优先 SQ）⇒ 用 SQFileHash 也必须能查到 ✓
+    var viaSq = map["81D426F2F5223FEB7EB8CED8C153876B"] as Array[string]
+    check("SQ 档 hash 也能查到同一份 Res", viaSq != null)
+    if viaSq != null { checkeq("SQ 档查到的 Res hash 一致", viaSq[0], "E59A56FC7874A884DD07ECA356A8DF65") }
+    var viaHq = map["881A67C52BD1900A380976A14EA3B5E1"] as Array[string]
+    check("HQ 档 hash 也能查到同一份 Res", viaHq != null)
+
+    // ② 输入是**小写** hash 时，key 也要收成大写（否则与移动端的小写 id 对不上 ✗）
+    var c = map["822AEDE5D9E6D0CE4750284E638621F3"] as Array[string]
+    check("小写 FileHash -> key 收成大写", c != null)
+    if c != null { checkeq("小写 ResFileHash -> 也收成大写", c[0], "E2F3168ADAD4C6B1E56E313EB9000D01") }
+
+    // ③ 没有 Res 档的那条**不进表**（不是"给个 0 体积的档" ✗）
+    check("无 Res 档的曲 -> 映射里没有它", (map["D127128A450B602A12A51472BA5C4ED8"] as Array[string]) == null)
+
+    // ④ 脏响应 ⇒ 空字典（不抛 ✓）
+    checkn("空对象", kugou.parsewebres("{}").len(), 0)
+    checkn("非 JSON", kugou.parsewebres("<html>502</html>").len(), 0)
+    checkn("空串", kugou.parsewebres("").len(), 0)
+    checkn("data 里没有 lists", kugou.parsewebres("{\"data\":{\"total\":0}}").len(), 0)
+
+    // ⑤ 合并：可下的行（小写 id）⇒ 升到 Res，且旧直链被清掉
+    Array[Array[string]] rows = []
+    rows.add(okrow())
+    kugou.mergeweb(rows, map)
+    Array[string] r0 = rows[0]
+    checkeq("id 换成 Res hash（原样大写）", srow.rowid(r0), "E59A56FC7874A884DD07ECA356A8DF65")
+    checkeq("ext 仍是 flac", srow.rowext(r0), "flac")
+    checkn("体积换成母带", srow.rowbytes(r0), 34671893)
+    checkeq("体积文本走行契约那份 formatter", srow.rowsizetext(r0), srow.fmtsize(34671893))
+    checkeq("旧直链**被清空**（不然会下到 SQ 那条）", srow.rowurl(r0), "")
+
+    // ⑤b ★ 真实场景：行的 id 是 **SQ 档 hash**（档位选择优先 SQ ✓）—— 也必须能升到母带
+    //     （这就是"实测体积没变大"的那个 bug：只索引 128 档时这里会静默不生效 ✗）
+    Array[string] sqrow = ["81d426f2f5223feb7eb8ced8c153876b", "晴天 (深情版)", "肖启伦", "专辑", "206",
+                           "flac", "15.79 MB", "16560066", "kugou", ""]
+    Array[Array[string]] rowsSq = []
+    rowsSq.add(sqrow)
+    kugou.mergeweb(rowsSq, map)
+    checkeq("SQ 档 id 的行也能升到母带", srow.rowid(rowsSq[0]), "E59A56FC7874A884DD07ECA356A8DF65")
+    checkn("SQL 档行升级后的体积", srow.rowbytes(rowsSq[0]), 34671893)
+
+    // ⑥ 没体积的行（= 付费/无权限）**不动** —— 口径：母带权限跟 SQ 档走 ✓
+    Array[string] paid = ["AB41143D00432376AC8A90EA3DD6A500", "x", "y", "z", "0", "", "", "0", "kugou", ""]
+    Array[Array[string]] rows2 = []
+    rows2.add(paid)
+    kugou.mergeweb(rows2, map)
+    checkeq("付费行 id 不动", srow.rowid(rows2[0]), "AB41143D00432376AC8A90EA3DD6A500")
+    checkeq("付费行 ext 仍空", srow.rowext(rows2[0]), "")
+
+    // ⑦ 母带**更小**时不动（防档位倒挂）
+    Array[string] small = ["822aede5d9e6d0ce4750284e638621f3", "x", "y", "z", "59", "flac", "10.00 MB", "10485760", "kugou", ""]
+    Array[Array[string]] rows3 = []
+    rows3.add(small)
+    kugou.mergeweb(rows3, map)
+    checkeq("母带更小 -> 保持原档", srow.rowid(rows3[0]), "822aede5d9e6d0ce4750284e638621f3")
+    checkn("母带更小 -> 体积不变", srow.rowbytes(rows3[0]), 10485760)
+
+    // ⑧ 映射里没有这一行 ⇒ 不动
+    Array[string] other = ["ffffffffffffffffffffffffffffffff", "x", "y", "z", "100", "flac", "5.00 MB", "5242880", "kugou", ""]
+    Array[Array[string]] rows4 = []
+    rows4.add(other)
+    kugou.mergeweb(rows4, map)
+    checkeq("映射里没有 -> 保持原档", srow.rowid(rows4[0]), "ffffffffffffffffffffffffffffffff")
+
+    // ⑨ 空映射 ⇒ 直接返回（不发神经 ✓）
+    Array[Array[string]] rows5 = []
+    rows5.add(okrow())
+    Dict[string, Array[string]] empty = {}
+    kugou.mergeweb(rows5, empty)
+    checkeq("空映射 -> 行原样", srow.rowid(rows5[0]), "ab41143d00432376ac8a90ea3dd6a500")
+
+    print("")
+    print("通过 " + _str(passed) + " 项，失败 " + _str(failed) + " 项")
+    print(if failed == 0 then "=== 全部通过 ===" else "=== 有失败  ===")
+}
