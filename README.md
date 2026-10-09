@@ -47,8 +47,17 @@
   - 网易云 / 酷狗的榜单菜单**现拉接口**（各自榜单接口，免登录 ✓）
   - 四个源的榜单接口与坑（`rankid ≠ id`、缺 `singername`、URL 结尾多个 `?` 会让首个参数失效…）
     全部记在各自 core 的注释里；离线可测的部分钉在 `test/test_bang_recipe.leno`（38 项 ✓）
-  - ⚠ **榜单行不做「有没有体积」过滤**：榜单接口多数不给体积 ⇒「大小」列天然为空（**不是 bug**），
-    下载时按 `Range` 头算真实总量 ✓
+  - **「格式 / 大小」列会逐首补上**（★ 2026-10-09 修）：榜单接口**确实不给体积**（实测：酷我
+    `kbangserver` 的 `musiclist` 只有 `id/name/artist/album/formats/duration/param…`；官方取直链的
+    `mobi.s` 也只回 `format/bitrate/url`）⇒ 取到行后由 `dl_engine.fill_sizes` 逐首补：
+    ① 有第三方聚合通路的源先走 `proberow`（与搜索同口径）；② 仍没有体积 ⇒ 取**官方直链**
+    再 `HEAD`（探不到就自动退 `Range: bytes=0-0`）探真实字节数，`ext` 按直链后缀回填 ✓
+    切片是**连续段**（不是搜索用的轮转片 ✗）：**榜单排名就是顺序**，轮转会把顺序打乱 ✗
+    ⇒ 8 路并行，实测 100 首约 **5~20 s**（状态栏显示"正在逐首补…"→"已补到格式/大小 N 首" ✓）
+  - ⚠ **榜单行仍不做「有没有体积」过滤**：补不到的行**照样留着**（不按体积筛掉 ✓
+    这是与搜索页有意的差别：搜索页"没体积 = 下不了 ⇒ 不进表"，榜单页"下不了也让你先看见" ✓）；
+    真下的时候按 `Range` 头算真实总量 ✓
+  - 自检：`DBANG=1 DBANGSIZE=1` ⇒ 等补完打印「补到 N/M 首 + 耗时 + 首行有没有变（顺序 ✓）」再退出 ✓
   - **右键菜单与搜索页同一套**（★ 2026-10-09 补）：两张表共用 `buildMenu`/`onMenu`，
     只靠 `menuCtx` 分辨作用在哪张表上（见 `ctx_table/ctx_len/ctx_row/ctx_picked` ✓）⇒
     试听 / 下载这一首 / 只下这一首的歌词 / 复制「歌名-歌手」/ 下载勾选的 N 首 / 只下勾选的歌词 /
@@ -122,7 +131,7 @@
 | `musicdl.leno` | CLI 入口（与 GUI 共用同一套引擎） |
 | `resource.toml` | 单文件打包配置（`onefile` / `images/**` 资源 / `app.ico` 图标） |
 | `test/` | 可直接运行的回归脚本（见第五节） |
-| `images/`、`app.ico` | 播放器与标题栏图标、打包用应用图标 |
+| `images/`、`app.ico` | 播放器/标题栏图标、**右键菜单项图标**（`select_all` / `select_none` / `download_*` / `delete_file` / `open_folder` / `audition` / `search`…）；侧栏两个入口图 `sousuo`/`bangdan` 是**白色蒙版**（描边改白、形状不变 ⇒ 由 `image_tint` 染成任意色，见 `musicdl_gui` 里 `onTabChanged` ✓）；打包用应用图标 `app.ico` |
 | `downloads/` | 默认输出目录（**不入库**） |
 
 ## 四、CLI 用法

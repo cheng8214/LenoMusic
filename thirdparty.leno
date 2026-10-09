@@ -88,7 +88,9 @@ func totalfromrange(string cr): int {
 //     省掉一次 TLS 握手（实测阶段 B 由 ~8.1 s 降到 ~5 s ✓）；探测只发 **HEAD**（不动头表 ✓），
 //     少数 CDN 不支持 HEAD 才退到 `Range`（那一步换**临时客户端** ⇒ 绝不污染调用方的头表 ✗）
 //   ★ 先 HEAD 最省：QQ/网易/酷狗 CDN 实测都回 Content-Length ✓
-func remotelen(HttpClient client, string url): int {
+//   ★ 2026-10-09 起**导出**：`dl_engine.fill_sizes`（榜单页逐首补体积）也走这一份 ✓
+//     —— 别再抄第三份（`dl_engine` 里那份 `totalfromrange` 已经是历史遗留的重复 ✗）
+export func remotelen(HttpClient client, string url): int {
     if not client.isOk() { return 0 }
     int n = 0
     try {

@@ -213,6 +213,7 @@ export struct DlWindow {
         //   全局按钮，"这一首失败了想再下一次"只能整批重来 ✗
         table.on_context_will_open(func(int row) { buildMenu(row) })
         table.on_context_select(func(int row, string id) { onMenu(row, id) })
+        table.get_context_menu().set_image_size(18)      // 菜单项图标尺寸（与主界面同一口径 ✓）
         droot.add(table, {grow: 1, shrink: 1, align: 3})
 
         bar = SDL3.createProgressBar({h: 16, show_text: true, font_size: 12})
@@ -461,6 +462,12 @@ export struct DlWindow {
     //   用户原话："下载里面也没有菜单" ✓ —— 底下那排按钮都是**全局**的（开始/暂停/取消/打开/关闭 ✗）
     //   ⇒ 针对**某一行**什么也做不了：失败了想单独再下一次、想复制文件名都得自己找 ✗
     //   现在给任务表挂上：重试这一首 / 重试全部失败项 / 复制文件名 / 打开下载目录 ✓
+    // 菜单项图标路径（文件名见 images/*.png ✓ 同主界面的 micon ✓）
+    //   ⚠ 键是 `image`（不是 `icon` ✗）；尺寸在表创建处统一 `set_image_size(18)` ✓
+    func wicon(string file): string {
+        return dirs.join(dirs.join(dirs.res_dir(), "images"), file)
+    }
+
     func buildMenu(int row) {
         table.clearContextItems()
         bool failedRow = false
@@ -469,14 +476,15 @@ export struct DlWindow {
             if strings.has(st, "失败") or strings.has(st, "取消") { failedRow = true }
         }
         if row >= 0 {
-            table.addContextItem({label: "重试这一首", id: "retryrow"})
+            // 「重试」用下载箭头图标（语义就是"再下一次" ✓）；「复制文件名」用用户给的 copyname ✓
+            table.addContextItem({label: "重试这一首", id: "retryrow", image: wicon("download_arrow.png")})
             // ⚠ 只能在"上一轮已结束"时重试（见 queueRetry 的注释 ✓）；且"完成"的行没什么好重试的
             table.setContextItemEnabled("retryrow", failedRow and started and finished)
-            table.addContextItem({label: "重试全部失败项", id: "retryfail"})
+            table.addContextItem({label: "重试全部失败项", id: "retryfail", image: wicon("download_arrow.png")})
             table.setContextItemEnabled("retryfail", hasFailed() and started and finished)
             table.addContextSeparator()
-            table.addContextItem({label: "复制文件名", id: "copyrow"})
-            table.addContextItem({label: "打开下载目录", id: "openfolder"})
+            table.addContextItem({label: "复制文件名", id: "copyrow", image: wicon("copyname.png")})
+            table.addContextItem({label: "打开下载目录", id: "openfolder", image: wicon("open_folder.png")})
         }
     }
 

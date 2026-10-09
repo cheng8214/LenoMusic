@@ -52,6 +52,30 @@ export func rowurl(Array[string] row): string { return parsing.at(row, F_URL, ""
 // 字节数的**字符串**形态（行里存的就是字符串 ⇒ 进度消息要原样带走，别转 int 又转回 ✓）
 export func rowbytes_text(Array[string] row): string { return parsing.at(row, F_BYTES, "0") }
 
+// ==================== 字节数 → 显示串（列表「大小」列 / 进度分母都用它 ✓）====================
+//   口径与 kuwo_core / netease_core / kugou_core 里那三份 `fmtsize` **完全一致**（"10.32 MB"：
+//   GB/MB 保留两位小数、KB 取整 ✓）—— 为什么在这里再放一份：那三份是各 core 私有的显示实现，
+//   而"补体积"的地方在**引擎层**（dl_engine.fill_sizes ✓ 榜单页逐首补），不该为了一个格式化函数
+//   去 import 某个 core ✗ ⇒ 落在**行契约**这个唯一事实来源里最合适 ✓
+//   ⚠ 以后统一到这一处时，那三份要一起改（现在四份同口径，改动要一起改 ⚠）
+export func fmtsize(int bytes): string {
+    if bytes <= 0 { return "" }
+    if bytes >= 1073741824 { return fixed2(bytes, 1073741824, " GB") }
+    if bytes >= 1048576 { return fixed2(bytes, 1048576, " MB") }
+    return _str(bytes / 1024) + " KB"
+}
+
+// 保留两位小数（整数运算，不引浮点 ✓）
+func fixed2(int bytes, int unit, string suffix): string {
+    int hundredths = bytes * 100 / unit          // 截断到 0.01
+    return _str(hundredths / 100) + "." + pad2(hundredths % 100) + suffix
+}
+
+func pad2(int v): string {
+    if v < 10 { return "0" + _str(v) }
+    return _str(v)
+}
+
 // 这一行"有没有歌曲大小"—— 没有就不进结果表（三音源口径一致：没有大小 = 下不了 ✓
 //   判据：格式文本为空 **或** 字节数为 0（任一不满足都算"下不了" ✓）
 //   ⚠ 与旧实现的一处**有意差异**：老实现直接 `row[F_SIZETEXT]` 硬索引，

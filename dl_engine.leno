@@ -23,6 +23,7 @@ import "./netease_core.leno" as netease
 import "./netease_lyric.leno" as netlyric
 import "./kugou_core.leno" as kugou
 import "./kugou_lyric.leno" as kugoulyric
+import "./thirdparty.leno" as thirdparty   // 复用它那份"HEAD / Range 探直链真实体积"（remotelen ✓）
 import "./qq_core.leno" as qq
 import "./qq_lyric.leno" as qqlyric
 
@@ -377,6 +378,76 @@ export func probe_rows(Array[Array[string]] rows): Array[Array[string]] {
     }
     client.close()
     return rows
+}
+
+// ★ 2026-10-09 新增：给"官方接口没给体积"的行补上 格式 / 体积 / 直链 —— **榜单页专用**
+//   （搜索页不必用它：那边阶段 B 的 `probe_rows` 已经把能补的都补了 ✓）
+//   为什么需要：榜单接口**确实不给体积**（2026-10-09 实测：酷我 kbangserver 的 musiclist 只有
+//   `id/name/artist/album/formats/duration/param…`；官方取直链的 `mobi.s` 也只回 `format/bitrate/url`）
+//   ⇒ 榜单的「大小」列天然为空 ✗。而光调 `probe_rows` 补不上，有两条断点：
+//     ① 榜单路径压根没跑过阶段 B；
+//     ② 即使跑，`probe_rows` 对**酷我是空过**（没有第三方聚合通路 ✓ 见它的注释）—— 而榜单第一项就是酷我 ✗
+//   做法（逐行两段）：
+//     ① 有第三方通路的源先跑 `proberow`（网易/QQ/酷狗，与搜索**同口径** ✓）
+//     ② 仍没有体积 ⇒ 取**官方直链**（`directurl` = 唯一的取直链入口 ✓）再 `HEAD` 探一次真实字节数
+//        （CDN 不支持 HEAD 时会自动退到 `Range: bytes=0-0` ✓ 见 thirdparty.remotelen ✓）
+//   顺带把直链写回 F_URL ⇒ 之后下载 / 试听不必再解析一次 ✓（与"搜索时已取回的直链"同一用法 ✓）
+//   ⚠ 拿不到就**原样留着**（榜单不做 has_size 过滤 ⇒ 空着也不挡"能下"，下载时按 Range 头算真总量 ✓）
+//   ⚠ 每行 2~4 个请求 ⇒ 必须**并行调**（GUI 按行切片起线程 ✓ 见 musicdl_gui.startBangFill ✓）
+export func fill_sizes(Array[Array[string]] rows): Array[Array[string]] {
+    if rows.len() == 0 { return rows }
+    HttpClient client = net.createClient()
+    if not client.isOk() { return rows }        // 建不出来 ⇒ 原样返回（保持现状 ✓）
+    client.setTimeout(20000)
+    client.setSSLVerify(false, false)
+    string cur = ""
+    int i = 0
+    while i < rows.len() {
+        Array[string] row = rows[i]
+        i = i + 1
+        if has_size(row) { continue }           // 已经有体积（少数行自带 / 前面已补过）⇒ 不动 ✓
+        string src = srcid(row)
+        if src != cur { preparefor(client, src); cur = src }   // 换源 ⇒ UA/头表重置（同阶段 B ✓）
+        row = padrow(row, src)                  // ★ 先补段（见 padrow 的注释：越界赋值会抛 ✗）
+        // ① 第三方聚合（三个源各有通路；酷我在这里是空过 ✓）
+        if src == "netease" {
+            netease.proberow(client, row)
+        } else if src == "qq" {
+            qq.proberow(client, row)
+        } else if src == "kugou" {
+            kugou.proberow(client, row)
+        }
+        if has_size(row) { continue }
+        // ② 官方直链 + 探真实体积（酷我只能走这条 ✓；另三源第三方没给也再试一次 ✓）
+        string link = directurl(client, src, srow.rowid(row))
+        if link == "" { continue }
+        row[srow.F_URL] = link
+        if srow.rowext(row) == "" {             // ext 只在为空时回填（有的源已按 formats 标好 ✓）
+            string ext = kuwo.extfromurl(link)
+            if ext != "" { row[srow.F_EXT] = ext }
+        }
+        int n = thirdparty.remotelen(client, link)
+        if n > 0 {
+            row[srow.F_BYTES] = _str(n)
+            // 用**行契约里那份** formatter（"10.32 MB"，与三个 core 的显示口径一致 ✓）
+            // —— 别用 `strings.fmt_size`：那是"KB/MB 取整、不保留小数"的通用版，列表里会与搜索页不一致 ✗
+            row[srow.F_SIZETEXT] = srow.fmtsize(n)
+        }
+    }
+    client.close()
+    return rows
+}
+
+// 把行补成"10 段齐全"（缺哪补哪；已有值不动 ✓）
+//   ⚠ 为什么必须补：**酷我的行只有 8 段**（走的是 `encode(SongInfo)`；网易/QQ/酷狗是各自 core
+//     直接拼的 10 段行 ✓），而 Leno 的 `row[i] = v` **不会自动扩容** —— 越界直接抛
+//     「数组索引越界: 索引 9, 长度 8」✗（2026-10-09 实测踩到）。
+//   第 8 段写成**该行真实的音源**（不是空串）⇒ 行从此自带来源，与另三源的行走同一套 ✓
+//   （只写"空"的行等价于 kuwo ✓ 见 srcid 的默认口径；空着不写会一直靠默认值兜 ✓）
+func padrow(Array[string] row, string src): Array[string] {
+    while row.len() <= srow.F_URL { row.add("") }
+    if srow.rowsrc(row) == "" { row[srow.F_SRC] = src }
+    return row
 }
 
 // 把行切成 k 份**轮转片**（第 j 份拿 j、j+k、j+2k…）⇒ 交给 k 条线程并行探测 ✓
@@ -755,6 +826,8 @@ export func errmsg(any e): string {
 //   · 歌曲：按 src 分派到各 core（kuwo 走 kbangserver，其余走各自榜单接口 ✓）
 //   ⚠ 榜单行**不做 has_size 过滤**：榜单接口多数不给体积（sizeText 空）⇒ 照 keep_downloadable
 //     的口径会被全部丢掉 ✗ ⇒ 榜单路径直接返回这些行（下载时再按 Range 头算真总量 ✓）
+//   ★ 2026-10-09：这些"没体积"的行由 GUI 拿到后**逐首补**（`fill_sizes` ⇒ 格式/体积/直链 ✓）
+//     ⇒ 界面上「大小」列不再长期空着 ✓；补不到的行照样留着（榜单不按体积过滤 ✓）
 export func bang_menu(string src): Array[Array[string]] {
     if src == "netease" { return netease.toplistmenu() }
     if src == "kugou" { return kugou.toplistmenu() }
