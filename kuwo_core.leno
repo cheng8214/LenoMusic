@@ -358,3 +358,109 @@ export func downloadsong(HttpClient client, SongInfo song, string outdir): int {
 export func savepath(SongInfo song, string outdir): string {
     return outdir + _sep() + song.filename()
 }
+
+// ==================== ④ 酷我榜单（排行榜） ====================
+// 来源：本段移植自二创（LenoMusic-main(1) 的 kuwo_core.leno，2026-10-09 ✓）
+//
+// 接口取舍（实测结论，别换回 www 那套 ✗）：
+//   · 榜单歌曲走**老接口** http://kbangserver.kuwo.cn/ksong.s（免登录、免签名、免加密 ✓）
+//     返回 JSON：{ name, num, musiclist:[{ id, name, artist, album, song_duration, formats, … }] }
+//   · www 那套 /api/www/bang/bang/bangList、/musicList 要 kw_token Cookie + 一个按 Cookie
+//     逆算出来的 `Secret` 头（否则一律 {"success":false,"message":"The request is illegal!"}）
+//     ⇒ 逆算法复杂且随版本漂移，本模块**不趟** ✓
+//
+// 榜单菜单从哪来：官方 H5 榜单页 https://www.kuwo.cn/newh5/bang/index 服务端渲染了全部榜单的
+//   bid + 中文名（`bid=93` / `<h3>酷我飙升榜</h3>` 成对出现 ✓）。bid 多年稳定，菜单规模也就几十项
+//   ⇒ 直接**内置**成常量表（省掉启动时"抓网页 + 解析 HTML"这条易碎的链路 ✓）。
+//   ⚠ 若某天菜单项失效（接口不再返回 musiclist）⇒ 到上面那个 H5 页面对一遍 bid 即可 ✓
+
+// 榜单菜单：一行一项 [bid, 中文名]；顺序=界面下拉框顺序（热歌榜放第一个 ⇒ 默认加载它 ✓）
+export func bangmenu(): Array[Array[string]] {
+    Array[Array[string]] out = []
+    out.add(["16", "酷我热歌榜"])
+    out.add(["93", "酷我飙升榜"])
+    out.add(["17", "酷我新歌榜"])
+    out.add(["158", "抖音热歌榜"])
+    out.add(["145", "会员畅听榜"])
+    out.add(["104", "酷我华语榜"])
+    out.add(["182", "酷我粤语榜"])
+    out.add(["22", "酷我欧美榜"])
+    out.add(["184", "酷我韩语榜"])
+    out.add(["183", "酷我日语榜"])
+    out.add(["242", "酷我电音榜"])
+    out.add(["278", "古风音乐榜"])
+    out.add(["26", "经典怀旧榜"])
+    out.add(["64", "影视金曲榜"])
+    out.add(["204", "现场音乐榜"])
+    out.add(["185", "最强翻唱榜"])
+    out.add(["187", "流行趋势榜"])
+    out.add(["284", "酷我热评榜"])
+    out.add(["264", "Vlog音乐榜"])
+    out.add(["153", "网红新歌榜"])
+    out.add(["176", "DJ嗨歌榜"])
+    out.add(["69", "儿童歌曲榜"])
+    out.add(["344", "儿童故事榜"])
+    out.add(["340", "青少年专属飙升榜"])
+    out.add(["151", "腾讯音乐人原创榜"])
+    out.add(["12", "Billboard榜"])
+    out.add(["13", "英国UK榜"])
+    out.add(["15", "日本公信榜"])
+    out.add(["164", "百大DJ榜"])
+    out.add(["180", "beatport电音榜"])
+    out.add(["246", "YouTube音乐排行榜"])
+    return out
+}
+
+// 榜单歌曲接口 URL：pn=0 从头取，rn=要多少首（榜单最多 300 首）
+export func bangurl(string bid, int limit): string {
+    if limit < 1 { limit = 100 }
+    return "http://kbangserver.kuwo.cn/ksong.s?from=pc&fmt=json&pn=0&rn=" + _str(limit)
+         + "&type=bang&data=content&id=" + bid + "&show_copyright_off=0"
+}
+
+// `formats`（形如 "ZPLY|WMA96|…|MP3H|MP3128|ALFLAC|AAC48|…"）→ 我们实际能拿到的最高档扩展名
+//   与取直链口径对齐：官方 mobi 先要 flac、再退回 mp3 ⇒ 有 ALFLAC 就标 flac，否则 MP3 档标 mp3 ✓
+//   都没有（纯试听的 ZP 档等）⇒ 空串（列表里"格式"显示未知，下载时按接口实际返回定扩展名 ✓）
+export func bangext(string formats): string {
+    if strings.find(formats, "ALFLAC") >= 0 { return "flac" }
+    if strings.find(formats, "MP3") >= 0 { return "mp3" }
+    return ""
+}
+
+// 榜单响应 → SongInfo 列表（单条脏数据只丢那一条，与搜索同款 try 兜底 ✓）
+//   ⚠ 榜单**不带体积**（没有 MINFO 那样的字段）⇒ sizeText / sizeBytes 保持默认 0
+//     ⇒ 界面上「大小」列会是空的，这是正常的（下载时按 Range 头算真总量 ✓）
+//   ⇒ 这里出SongInfo（struct）而不是行数组：**struct 不能跨线程**（语言硬约束 ✓），
+//     由 dl_engine.bang_rows 在**引擎层** encode 成Array[string] 行 ⇒ 与搜索路径同构 ✓
+export func parsebang(string body): Array[SongInfo] {
+    Array[SongInfo] out = []
+    var root = jsons.decode(body) as Dict[string, any]
+    if root == null { return out }
+    var items = root["musiclist"]
+    if not (items is Array) { return out }
+    for items to item {
+        var d = item as Dict[string, any]
+        if d == null { continue }
+        try {
+            SongInfo song = new SongInfo(
+                id = jsons.get_str(d, "id", ""),
+                name = jsons.get_str(d, "name", ""),
+                artist = jsons.get_str(d, "artist", ""),
+                album = jsons.get_str(d, "album", ""),
+                duration = jsons.get_int(d, "song_duration", 0),
+                ext = bangext(jsons.get_str(d, "formats", ""))
+            )
+            if song.valid() { out.add(song) }
+        } catch e {
+            continue
+        }
+    }
+    return out
+}
+
+// 取一个榜单的歌曲（网络/解析失败都返回空列表，不抛异常 ✓）
+export func bang(HttpClient client, string bid, int limit): Array[SongInfo] {
+    Response resp = client.get(bangurl(bid, limit))
+    if not resp.ok() { return [] }
+    return parsebang(resp.body)
+}

@@ -236,3 +236,105 @@ export func getdirecturl(HttpClient client, string songid): string {
     }
     return ""
 }
+
+// ==================== ③ 榜单（排行榜）====================
+// 来源：本段移植自二创（LenoMusic-main(1) 的 netease_core.leno，2026-10-09 ✓）
+//
+// 接口（免 weapi、免登录，带 Referer 即可 ✓ 2026-10-09 实测）：
+//   榜单菜单：GET /api/toplist/detail        ⇒ { code, list:[{ id, name, trackCount, … }] }
+//   榜单歌曲：GET /api/playlist/detail?id=…  ⇒ { result:{ tracks:[{ id, name, artists, album, duration }] } }
+//   ⚠ 榜单曲目**不带体积** ⇒ ext / size 留空（与酷我榜单同口径；下载时再按直链后缀校正 ✓）
+//   ⇒ 取体积另有一路：dl_engine.probe_rows 会逐首问第三方（可选，不做也能下 ✓）
+
+// 榜单菜单：一行一项 [bid, 中文名]
+export func toplistmenu(): Array[Array[string]] {
+    Array[Array[string]] out = []
+    HttpClient client = net.createClient()
+    if not client.isOk() { return out }
+    client.setUserAgent(UA)
+    client.replaceHeaders(headers())
+    client.setTimeout(8000)
+    client.setSSLVerify(false, false)
+    try {
+        Response resp = client.get(BASE + "/api/toplist/detail")
+        if resp.ok() {
+            var root = jsons.decode(resp.body) as Dict[string, any]
+            if root != null {
+                var list = root["list"]
+                if list is Array {
+                    for list to it {
+                        var d = it as Dict[string, any]
+                        if d == null { continue }
+                        string id = _str(jsons.get_int(d, "id", 0))
+                        string name = jsons.get_str(d, "name", "")
+                        if id != "0" and name != "" {
+                            Array[string] one = []
+                            one.add(id)
+                            one.add(name)
+                            out.add(one)
+                        }
+                    }
+                }
+            }
+        }
+    } catch e {
+        out = []   // 网络/解析失败 ⇒ 空菜单（界面显示"暂无榜单" ✓）
+    }
+    client.close()
+    return out
+}
+
+// 榜单歌曲：行结构与搜索行同构（末尾音源标记 "netease"；字段顺序见 songrow.leno ✓）
+export func bangrows(HttpClient client, string bid, int limit): Array[Array[string]] {
+    Array[Array[string]] rows = []
+    if bid == "" { return rows }
+    Response resp = client.get(BASE + "/api/playlist/detail?id=" + bid)
+    if not resp.ok() { return rows }
+    var root = jsons.decode(resp.body) as Dict[string, any]
+    if root == null { return rows }
+    var result = root["result"] as Dict[string, any]
+    if result == null { return rows }
+    var tracks = result["tracks"]
+    if not (tracks is Array) { return rows }
+    for tracks to it {
+        if rows.len() >= limit { continue }        // 够数就不再收（接口一次给整榜）
+        var d = it as Dict[string, any]
+        if d == null { continue }
+        string sid = _str(jsons.get_int(d, "id", 0))
+        if sid == "0" or sid == "" { continue }
+        // 歌手：artists[] 或 ar[]（老/新 schema 都认）
+        string artist = ""
+        var ars = d["artists"]
+        if not (ars is Array) { ars = d["ar"] }
+        if ars is Array {
+            for ars to a {
+                var ad = a as Dict[string, any]
+                if ad == null { continue }
+                if artist != "" { artist = artist + "/" }
+                artist = artist + jsons.get_str(ad, "name", "")
+            }
+        }
+        // 专辑：album{} 或 al{}
+        string album = ""
+        var al = d["album"]
+        if not (al is Dict[string, any]) { al = d["al"] }
+        if al is Dict[string, any] { album = jsons.get_str(al, "name", "") }
+        // 时长：老 duration / 新 dt，都是毫秒
+        int ms = jsons.get_int(d, "duration", 0)
+        if ms == 0 { ms = jsons.get_int(d, "dt", 0) }
+
+        Array[string] row = []
+        row.add(sid)
+        row.add(jsons.get_str(d, "name", ""))
+        row.add(artist)
+        row.add(album)
+        row.add(_str(ms / 1000))
+        row.add("")             // ext：榜单不给体积 ⇒ 留空
+        row.add("")             // sizeText
+        row.add("0")            // sizeBytes
+        row.add("netease")
+        row.add("")             // 直链：下载时现取
+        rows.add(row)
+    }
+    return rows
+}

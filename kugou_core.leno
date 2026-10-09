@@ -192,3 +192,135 @@ export func getdirecturl(HttpClient client, string songid): string {
     }
     return ""
 }
+
+// ==================== ③ 榜单（排行榜）====================
+// 来源：本段移植自二创（LenoMusic-main(1) 的 kugou_core.leno，2026-10-09 ✓）
+//
+// 接口（免签名、免登录 ✓ 2026-10-09 实测）：
+//   榜单菜单：GET mobilecdn.kugou.com/api/v3/rank/list  ⇒ data.info:[{ id, rankname, … }]
+//   榜单歌曲：GET mobilecdn.kugou.com/api/v3/rank/song  ⇒ data.info:[{ hash, sqhash, 320hash, … }]（与搜索同构）
+//   ⚠ rank/song 没有 singername ⇒ 歌手取 authors[0].author_name（回退 filename 的"歌手 - 歌名"）
+//   ⚠ 结尾**不要**带 "?"：`net.buildQuery` 自己会补一个 ⇒ 带了会成 "??" ✗
+//     （rank/song 的第一个参数就是必填的 rankid，被 "?" 污染后服务端回 "参数不合法" ⇒ 空列表 ✗）
+const RANK_LIST_API = "https://mobilecdn.kugou.com/api/v3/rank/list"
+const RANK_SONG_API = "https://mobilecdn.kugou.com/api/v3/rank/song"
+
+// 榜单菜单：一行一项 [bid, 中文名]
+//   ⚠ 这里**自建 client**：菜单要在**子线程**里拉（线程入口必须是本文件函数 ⇒ 只能调模块函数 ✓）
+export func toplistmenu(): Array[Array[string]] {
+    Array[Array[string]] out = []
+    HttpClient client = net.createClient()
+    if not client.isOk() { return out }
+    client.setUserAgent(UA)
+    client.setTimeout(8000)
+    client.setSSLVerify(false, false)
+    try {
+        string q = net.buildQuery({"withsong": "0", "showtype": "2", "plat": "0", "version": "8000",
+                                   "parentid": "0", "page": "1", "pagesize": "100"})
+        Response resp = client.get(RANK_LIST_API + q)
+        if resp.ok() {
+            var root = jsons.decode(resp.body) as Dict[string, any]
+            if root != null {
+                var data = root["data"] as Dict[string, any]
+                if data != null {
+                    var info = data["info"]
+                    if info is Array {
+                        for info to it {
+                            var d = it as Dict[string, any]
+                            if d == null { continue }
+                            // ⚠ 取 **rankid**（不是 id ✓）：两者不同！
+                            //   · id     = 榜单的"菜单/分类 id"（如 TOP500 = 2）
+                            //   · rankid = rank/song 真正要的 id（如 TOP500 = 8888）
+                            //   用错 id ⇒ rank/song 回 total=0（实测 ✓）
+                            int rid = jsons.get_int(d, "rankid", 0)
+                            if rid == 0 { rid = jsons.get_int(d, "id", 0) }   // 兜底：极少数项没 rankid
+                            string id = _str(rid)
+                            string name = jsons.get_str(d, "rankname", "")
+                            if id != "0" and name != "" {
+                                Array[string] one = []
+                                one.add(id)
+                                one.add(name)
+                                out.add(one)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch e {
+        out = []   // 失败 ⇒ 空菜单（界面显示"暂无榜单" ✓）
+    }
+    client.close()
+    return out
+}
+
+// 榜单歌曲：行结构与搜索行同构（末尾音源标记 "kugou"；字段顺序见 songrow.leno ✓）
+export func bangrows(HttpClient client, string bid, int limit): Array[Array[string]] {
+    Array[Array[string]] rows = []
+    if bid == "" { return rows }
+    string q = net.buildQuery({"rankid": bid, "page": "1", "pagesize": _str(limit), "format": "json"})
+    Response resp = client.get(RANK_SONG_API + q)
+    if not resp.ok() { return rows }
+    var root = jsons.decode(resp.body) as Dict[string, any]
+    if root == null { return rows }
+    var data = root["data"] as Dict[string, any]
+    if data == null { return rows }
+    var info = data["info"]
+    if not (info is Array) { return rows }
+    for info to it {
+        var s = it as Dict[string, any]
+        if s == null { continue }
+        string h128 = jsons.get_str(s, "hash", "")
+        if h128 == "" { continue }
+        // 歌手：authors[].author_name（榜单曲目没有 singername 字段）
+        string artist = ""
+        var au = s["authors"]
+        if au is Array {
+            for au to a {
+                var ad = a as Dict[string, any]
+                if ad == null { continue }
+                if artist != "" { artist = artist + "/" }
+                artist = artist + jsons.get_str(ad, "author_name", "")
+            }
+        }
+        if artist == "" {
+            // 回退：filename 形如 "歌手 - 歌名" ⇒ 取 " - " 之前那段
+            string fn = jsons.get_str(s, "filename", "")
+            int dash = strings.find(fn, " - ")
+            if dash > 0 { artist = fn.slice(0, dash) }
+        }
+        // 档位：与搜索同口径（高到低取第一档"可下"的）
+        string id = ""
+        string ext = ""
+        int sizeb = 0
+        if tierok(s, "sqhash", "sqfilesize", "pay_type_sq", "price_sq", "sqprivilege") {
+            id = jsons.get_str(s, "sqhash", "")
+            ext = "flac"
+            sizeb = jsons.get_int(s, "sqfilesize", 0)
+        } else if tierok(s, "320hash", "320filesize", "pay_type_320", "price_320", "320privilege") {
+            id = jsons.get_str(s, "320hash", "")
+            ext = "mp3"
+            sizeb = jsons.get_int(s, "320filesize", 0)
+        } else if tierok(s, "hash", "filesize", "pay_type", "price", "privilege") {
+            id = h128
+            ext = "mp3"
+            sizeb = jsons.get_int(s, "filesize", 0)
+        } else {
+            id = h128        // 三档都不可下 ⇒ 留空（下载时如实报"取直链失败" ✓）
+        }
+
+        Array[string] row = []
+        row.add(id)
+        row.add(jsons.get_str(s, "songname", ""))
+        row.add(artist)
+        row.add(jsons.get_str(s, "album_name", ""))
+        row.add(_str(jsons.get_int(s, "duration", 0)))
+        row.add(ext)
+        row.add(fmtsize(sizeb))
+        row.add(_str(sizeb))
+        row.add("kugou")
+        row.add("")
+        rows.add(row)
+    }
+    return rows
+}

@@ -747,3 +747,47 @@ export func errmsg(any e): string {
     }
     return t.trim()
 }
+
+// ==================== ①.6 榜单（各音源自己的排行榜）====================
+// 来源：本段移植自二创（LenoMusic-main(1) 的 dl_engine.leno，2026-10-09 ✓）
+// 用途：GUI 的「榜单」页 —— 选音源 ⇒ 选该音源的榜单 ⇒ 取榜单歌曲行（与搜索行同构 ✓）
+//   · 菜单：kuwo / qq 内置常量（免网络 ✓）；netease / kugou 现拉一次列表接口
+//   · 歌曲：按 src 分派到各 core（kuwo 走 kbangserver，其余走各自榜单接口 ✓）
+//   ⚠ 榜单行**不做 has_size 过滤**：榜单接口多数不给体积（sizeText 空）⇒ 照 keep_downloadable
+//     的口径会被全部丢掉 ✗ ⇒ 榜单路径直接返回这些行（下载时再按 Range 头算真总量 ✓）
+export func bang_menu(string src): Array[Array[string]] {
+    if src == "netease" { return netease.toplistmenu() }
+    if src == "kugou" { return kugou.toplistmenu() }
+    if src == "qq" { return qq.toplistmenu() }
+    return kuwo.bangmenu()
+}
+
+// 取一个榜单的歌曲行（行结构与搜索行同构 ⇒ GUI 表格 / 下载窗口 / 下载 worker 全都能直接用 ✓）
+//   失败（建不出客户端 / 网络挂 / 解析空）⇒ 返回空数组，调用方按"没取到"处理 ✓
+//   ⚠ 本函数**不起线程**（语言硬约束：线程入口必须与调用方同文件 ✓）⇒ 由 GUI 在自己的 worker 里调 ✓
+//   ⚠ kuwo 分支出SongInfo（struct）⇒ 在这里 encode 成行（**struct 不能跨线程** ✓ 语言硬约束）
+export func bang_rows(string src, string bid, int limit): Array[Array[string]] {
+    Array[Array[string]] rows = []
+    if bid == "" { return rows }
+    HttpClient client = net.createClient()
+    if not client.isOk() { return rows }
+    client.setTimeout(20000)
+    client.setSSLVerify(false, false)
+    if src == "netease" {
+        preparefor(client, "netease")
+        try { rows = netease.bangrows(client, bid, limit) } catch e { rows = [] }
+    } else if src == "kugou" {
+        preparefor(client, "kugou")
+        try { rows = kugou.bangrows(client, bid, limit) } catch e { rows = [] }
+    } else if src == "qq" {
+        preparefor(client, "qq")
+        try { rows = qq.bangrows(client, bid, limit) } catch e { rows = [] }
+    } else {
+        preparefor(client, "kuwo")
+        Array[SongInfo] songs = []
+        try { songs = kuwo.bang(client, bid, limit) } catch e { songs = [] }
+        for songs to s { rows.add(encode(s)) }
+    }
+    client.close()
+    return rows
+}

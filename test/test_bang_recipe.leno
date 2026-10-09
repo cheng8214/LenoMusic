@@ -1,0 +1,159 @@
+// test_bang_recipe.leno — 榜单「配方」金标回归（纯逻辑、离线 ✓ 不需要网络）
+//
+// 为什么必须有：榜单是移植进来的新功能（2026-10-09），而它**静默失败点很多**：
+//   · 榜-single 接口的 URL 参数次序 / 结尾多一个 "?" ⇒ 服务端回"参数不合法"⇒ 空列表（不报错 ✗）
+//   · 酷狗榜单菜单的 `id` 与 `rankid` **不是同一个值**（TOP500：id=2 / rankid=8888）⇒ 用错静默返回 0 首
+//   · 榜单曲目**多数不带体积** ⇒ 「大小」列天然是空的（这是正常口径，不是 bug）
+//   · 各家字段名有老/新两套schema（网易 artists/ar、album/al、duration/dt）
+//   ⇒ 这些都不该靠"打开界面看一眼"来验证 ⇒ 能在离线状态下钉死的部分全部钉死 ✓
+//
+//覆盖：酷我榜单元数据表 / 榜单元数据表 / kugou 榜单元数据表 / 酷我 URL 配方 /
+//      formats→扩展名 / 酷我榜单响应解析（脏数据单条丢弃）/ 免网络的两个菜单分派
+//
+// ⚠ 三个"现拉"的菜单（netease / kugou）与四个 bangrows 都要发网络请求
+//   ⇒ **不在本文件测**（保持离线 ✓）；它们的口径由 test_thirdparty / 各音源自测覆盖。
+//   ⇒ 真正该离线钉的是「URL 配方 + 常量表 + 解析」，就是下面这些 ✓
+//
+// 跑：<发行包>\leno.exe test\test_bang_recipe.leno
+import strings
+import "../kuwo_core.leno" as kuwo
+import "../qq_core.leno" as qq
+import "../dl_engine.leno" as eng
+use kuwo.SongInfo
+
+var fails = 0
+
+func check(string name, bool ok) {
+    if ok {
+        print($"[通过] {name}")
+    } else {
+        fails = fails + 1
+        print($"[失败] {name}")
+    }
+}
+
+func has(string hay, string needle): bool {
+    return strings.has(hay, needle)
+}
+
+// 数组里有没有这个值（用来查 bid / topid 是否重复 ✓）
+func hasarr(Array[string] arr, string v): bool {
+    for arr to x {
+        if x == v { return true }
+    }
+    return false
+}
+
+main() {
+    print("=== 榜单配方金标回归（离线 ✓）===")
+
+    // ==================== ① 酷我榜单元数据表 ====================
+    Array[Array[string]] km = kuwo.bangmenu()
+    check("酷我榜单 31 项", km.len() == 31)
+    bool alltwo = true
+    bool alldigit = true
+    bool needup = true
+    Array[string] seen = []
+    for km to it {
+        if it.len() != 2 { alltwo = false }
+        if it.len() >= 1 {
+            // bid 必须是纯数字（进URL 的 id= 参数）
+            for it[0] to ch {
+                if ch < "0" or ch > "9" { alldigit = false }
+            }
+            if hasarr(seen, it[0]) { needup = false }
+            seen.add(it[0])
+        } else {
+            needup = false
+        }
+    }
+    check("每项都是 [bid, 名字] 两段", alltwo)
+    check("bid 全是数字", alldigit)
+    check("bid 无重复", needup)
+    check("首位是热歌榜（默认加载它✓）", km.len() > 0 and km[0][0] == "16" and km[0][1] == "酷我热歌榜")
+
+    // ==================== ② 酷我榜单 URL 配方 ====================
+    // ⚠ 这条最值钱：URL 形态错了服务端只回"参数不合法" ⇒ 空列表，**不报错** ✗
+    string u = kuwo.bangurl("16", 100)
+    check("榜单 URL 走老接口 kbangserver", has(u, "kbangserver.kuwo.cn/ksong.s"))
+    check("榜单 URL 带 type=bang", has(u, "type=bang"))
+    check("榜单 URL 带 data=content", has(u, "data=content"))
+    check("榜单 URL 带 id=16", has(u, "id=16"))
+    check("榜单 URL 带 fmt=json", has(u, "fmt=json"))
+    check("榜单 URL pn=0（从头取 ✓）", has(u, "pn=0"))
+    check("榜单 URL 带 rn=100", has(u, "rn=100"))
+    check("榜单 URL 不含 show_copyright_off=1", not has(u, "show_copyright_off=1"))
+    string u0 = kuwo.bangurl("16", 0)
+    check("limit<1 ⇒ 回落 100（rn=100 ✓）", has(u0, "rn=100"))
+
+    // ==================== ③ formats →扩展名 ====================
+    check("ALFLAC ⇒ flac", kuwo.bangext("ZPLY|WMA96|ALFLAC|AAC48") == "flac")
+    check("只有 MP3 ⇒ mp3", kuwo.bangext("MP3H|MP3128") == "mp3")
+    check("纯试听档⇒ 空（下载时按接口实际返回定 ✓）", kuwo.bangext("ZPLY|ZP") == "")
+    check("空串 ⇒ 空", kuwo.bangext("") == "")
+
+    // ==================== ④ 酷我榜单响应解析（喂假 JSON）====================
+    // ⚠ 榜单**不带体积** ⇒ sizeText/sizeBytes 保持默认（界面上「大小」列为空是正常口径 ✓）
+    string fake = "{\"name\":\"热歌榜\",\"num\":3,\"musiclist\":["
+        + "{\"id\":\"1001\",\"name\":\"晴天\",\"artist\":\"周杰伦\",\"album\":\"叶惠美\",\"song_duration\":269,\"formats\":\"ALFLAC|MP3128\"},"
+        + "{\"id\":\"1002\",\"name\":\"稻香\",\"artist\":\"周杰伦\",\"album\":\"魔杰座\",\"song_duration\":223,\"formats\":\"MP3128\"},"
+        + "{\"id\":\"1003\",\"name\":\"纯试听\",\"artist\":\"某人\",\"album\":\"杂项\",\"song_duration\":100,\"formats\":\"ZP|ZPLY\"},"
+        + "{\"id\":\"\",\"name\":\"脏数据没id\",\"artist\":\"x\",\"album\":\"y\",\"song_duration\":10,\"formats\":\"MP3\"}]}"
+    Array[SongInfo] songs = kuwo.parsebang(fake)
+    // 脏数据（id 为空）应被 valid() 挡掉⇒ 只剩 3 条
+    check("榜单解析：脏行被跳过、留下 3 首", songs.len() == 3)
+
+    if songs.len() == 3 {
+        check("第1 首 id", songs[0].id == "1001")
+        check("第 1 首歌名", songs[0].name == "晴天")
+        check("第 1 首歌手", songs[0].artist == "周杰伦")
+        check("第 1 首专辑", songs[0].album == "叶惠美")
+        check("第 1 首时长（秒 ✓）", songs[0].duration == 269)
+        check("第 1 首 flac（ALFLAC ✓）", songs[0].ext == "flac")
+        check("第 1 首**无体积** ⇒ sizeText 空（正常口径 ✓）", songs[0].sizeText == "" and songs[0].sizeBytes == 0)
+
+        check("第 2 首 mp3", songs[1].ext == "mp3")
+        check("第 3 首（纯试听档）ext 空", songs[2].ext == "")
+    }
+
+    // 空/坏响应 ⇒ 空列表，不抛 ✓
+    check("空响应 ⇒ 空列表", kuwo.parsebang("").len() == 0)
+    check("非榜单 JSON ⇒ 空列表", kuwo.parsebang("{\"foo\":1}").len() == 0)
+    check("musiclist 非数组 ⇒ 空列表", kuwo.parsebang("{\"musiclist\":5}").len() == 0)
+
+    // ==================== ⑤ QQ 榜单元数据表（内置）====================
+    Array[Array[string]] qm = qq.toplistmenu()
+    check("QQ 榜单 9 项", qm.len() == 9)
+    bool qdigit = true
+    bool qseen = true
+    Array[string] qids = []
+    for qm to it {
+        if it.len() != 2 { qdigit = false }
+        if it.len() >= 1 {
+            for it[0] to ch {
+                if ch < "0" or ch > "9" { qdigit = false }
+            }
+            if hasarr(qids, it[0]) { qseen = false }
+            qids.add(it[0])
+        }
+    }
+    check("QQ topid 全数字", qdigit)
+    check("QQ topid 无重复", qseen)
+    check("QQ 首位是巅峰榜·热歌（topid=26 ✓）", qm.len() > 0 and qm[0][0] == "26")
+
+    // ==================== ⑥ 引擎层分派（只测**免网络**的两个）====================
+    // kugou / netease 的菜单是现拉接口（要发请求）⇒ 不在这里测（保持离线 ✓）
+    Array[Array[string]] dm = eng.bang_menu("kuwo")
+    check("bang_menu(kuwo) 走内置表（免网络 ✓）", dm.len() == 31)
+    Array[Array[string]] dq = eng.bang_menu("qq")
+    check("bang_menu(qq) 走内置表（免网络 ✓）", dq.len() == 9)
+    check("bang_menu(未知音源) 回落 kuwo（不打错 ✓）", eng.bang_menu("migu").len() == 31)
+    check("bang_rows(空 bid) ⇒ 空数组（不发请求 ✓）", eng.bang_rows("kuwo", "", 10).len() == 0)
+
+    print("")
+    if fails == 0 {
+        print("=== 全部通过 ===")
+    } else {
+        print($"=== 有失败：{fails} 项 ✗ ===")
+    }
+}

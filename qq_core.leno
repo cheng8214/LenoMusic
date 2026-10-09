@@ -324,3 +324,109 @@ export func getdirecturl(HttpClient client, string songid): string {
     }
     return ""
 }
+
+// ==================== ③ 榜单（排行榜）====================
+// 来源：本段移植自二创（LenoMusic-main(1) 的 qq_core.leno，2026-10-09 ✓）
+//
+// 接口（老公开端点，免登录 ✓ 2026-10-09 实测给全套档位体积）：
+//   GET c.y.qq.com/v8/fcg-bin/fcg_v8_toplist_cp.fcg?topid=…&song_num=…
+//   ⇒ { topinfo:{ ListName }, songlist:[{ data:{ songmid, songname, singer[], albumname,
+//        interval, sizeflac, sizeape, size320, sizeogg, size128, pay:{ paydownload } } }] }
+//   ⚠ 菜单用**内置常量表**（topid 多年稳定；逐个试错反而要发一串请求 ✗）
+//   ⚠ 榜单曲目的档位是**扁平的** sizeXXX（与搜索的 file{} 不同）⇒ 另用一张映射表
+
+// 榜单菜单：一行一项 [topid, 中文名]（名字取自接口 topinfo.ListName ✓）
+export func toplistmenu(): Array[Array[string]] {
+    Array[Array[string]] out = []
+    out.add(["26", "巅峰榜·热歌"])
+    out.add(["4", "巅峰榜·流行指数"])
+    out.add(["62", "飙升榜"])
+    out.add(["27", "巅峰榜·新歌"])
+    out.add(["5", "巅峰榜·内地"])
+    out.add(["6", "巅峰榜·港台"])
+    out.add(["3", "巅峰榜·欧美"])
+    out.add(["17", "巅峰榜·日本"])
+    out.add(["16", "巅峰榜·韩国"])
+    return out
+}
+
+// 榜单曲目的档位映射：[体积字段, 前缀, 扩展名]，**从高到低** ✓
+//   ⚠ 与搜索路径的 tiers() 分开写：搜索是 file{} 嵌套（sizeflac…），榜单是扁平 sizeXXX ✓
+func flattiers(): Array[Array[string]] {
+    Array[Array[string]] t = []
+    t.add(["sizeflac", "F000", "flac"])
+    t.add(["sizeape", "A000", "ape"])
+    t.add(["size320", "M800", "mp3"])
+    t.add(["sizeogg", "O600", "ogg"])
+    t.add(["size128", "M500", "mp3"])
+    return t
+}
+
+// 榜单歌曲：行结构与搜索行同构（id = songmid#前缀；末尾音源标记 "qq"；字段顺序见 songrow.leno ✓）
+export func bangrows(HttpClient client, string bid, int limit): Array[Array[string]] {
+    Array[Array[string]] rows = []
+    if bid == "" { return rows }
+    string q = net.buildQuery({"topid": bid, "format": "json", "inCharset": "utf8", "outCharset": "utf-8",
+                               "page": "detail", "type": "top", "song_begin": "0", "song_num": _str(limit)})
+    // ⚠ 路径结尾**不要**带 "?"：buildQuery 自己会补 ⇒ "??" 会把第一个参数（topid，必填）污染掉 ✗
+    Response resp = client.get("https://c.y.qq.com/v8/fcg-bin/fcg_v8_toplist_cp.fcg" + q)
+    if not resp.ok() { return rows }
+    var root = jsons.decode(resp.body) as Dict[string, any]
+    if root == null { return rows }
+    var songlist = root["songlist"]
+    if not (songlist is Array) { return rows }
+    for songlist to it {
+        var wrap = it as Dict[string, any]
+        if wrap == null { continue }
+        var d = wrap["data"] as Dict[string, any]
+        if d == null { continue }
+        string mid = jsons.get_str(d, "songmid", "")
+        if mid == "" { continue }
+        // 付费曲（pay.paydownload != 0）⇒ 不给档位 = 下不了（与搜索同口径 ✓）
+        var pay = d["pay"] as Dict[string, any]
+        int paydl = 0
+        if pay != null { paydl = jsons.get_int(pay, "paydownload", 0) }
+
+        string prefix = ""
+        string ext = ""
+        int sizeb = 0
+        if paydl == 0 {
+            Array[Array[string]] ts = flattiers()
+            int ti = 0
+            while ti < ts.len() and sizeb == 0 {
+                int sz = jsons.get_int(d, ts[ti][0], 0)
+                if sz > 0 {
+                    prefix = ts[ti][1]
+                    ext = ts[ti][2]
+                    sizeb = sz
+                }
+                ti = ti + 1
+            }
+        }
+        // 歌手：singer[].name 用 "/" 连起来
+        string artist = ""
+        var singers = d["singer"]
+        if singers is Array {
+            for singers to a {
+                var ad = a as Dict[string, any]
+                if ad == null { continue }
+                if artist != "" { artist = artist + "/" }
+                artist = artist + jsons.get_str(ad, "name", "")
+            }
+        }
+
+        Array[string] row = []
+        row.add(mid + "#" + prefix)
+        row.add(jsons.get_str(d, "songname", ""))
+        row.add(artist)
+        row.add(jsons.get_str(d, "albumname", ""))
+        row.add(_str(jsons.get_int(d, "interval", 0)))
+        row.add(ext)
+        row.add(strings.fmt_size(sizeb))
+        row.add(_str(sizeb))
+        row.add("qq")
+        row.add("")            // 直链：下载时现取
+        rows.add(row)
+    }
+    return rows
+}
