@@ -409,7 +409,12 @@ struct MusicDlApp {
         string want = fmt_want()
         if want != "" { extra = "｜只要 " + want + "：符合 " + _str(match) + " 首" }
         countLbl.set_text("已选 " + _str(checked.len()) + " / " + _str(songs.len()) + " 首 · 合计约 " + strings.fmt_size(bytes) + extra)
-        dlCheckedBtn.set_enabled(match > 0)     // 过滤后一首都不符 ⇒ 按钮灰着更清楚 ✓（点不动 ≠ 坏了 ✓）
+        // ★ 2026-10-10 改（用户口径）：**不再按"勾了几首"灰着** —— 没勾 / 全被格式滤掉也让它可点，
+        //   点了就开（空的）下载窗口 ⇒ 与标题栏那个「下载」图标**同一口径** ✓
+        //   为什么：它同样是个"进下载窗口"的入口，用户想先看看任务表 / 「历史」页签时，
+        //   不该被一个灰按钮挡在外面 ✗（"点不动"确实不等于"点了没反应"，但这里压根不需要拦 ✓）
+        //   ⚠ 「下载选中行」保持原样（它只认表格选中行、没有"打开窗口"的含义 ✓）
+        dlCheckedBtn.set_enabled(true)
     }
 
     // ==================== 搜索 ====================
@@ -1220,7 +1225,7 @@ struct MusicDlApp {
     //   ★ 2026-10-09 改（用户口径）：**一首都没勾也照开窗** —— 原先弹"还没有要下载的歌"把人拦在门外 ✗，
     //     而"打开窗口看看（任务表 / 历史页签）"本身就是合理需求 ✓
     //     空任务由窗口自己表达（见 startDownload 与 dl_window.build 的注释 ✓）
-    //     ⚠ 工具栏「下载勾选」那个按钮仍保持"没勾就灰"（点不动 ≠ 点了没反应 ✓ 见 updateCount）
+    //     ★ 2026-10-10：工具栏「下载勾选」**也**改成了随时可点（同一口径 ✓ 见 updateCount）
     func onDownloadAction() {
         if reuseDlIfOpen() { return }
         startDownload(pickchecked(), downloadflags())
@@ -1755,9 +1760,10 @@ struct MusicDlApp {
         // ---- 操作行 ----
         var row3 = SDL3.createHBox({h: 32, padX: 0, padY: 0, spacing: 8})
         dlCheckedBtn = SDL3.createButton({w: 140, h: 30, text: "下载勾选", type: "success", font_size: 13})
-        dlCheckedBtn.set_tip("下载列表里勾选的歌曲（默认全勾）")
+        dlCheckedBtn.set_tip("下载列表里勾选的歌曲（默认全勾）；一首都没勾也能点 —— 会打开（空的）下载窗口，可看「历史」")
         dlCheckedBtn.on_click(func() { onDownloadChecked() })
-        dlCheckedBtn.set_enabled(false)
+        // ★ 2026-10-10（用户口径）：开局就**可点**（不必等搜索结果）—— 空任务照样把窗口开出来 ✓
+        dlCheckedBtn.set_enabled(true)
         row3.add(dlCheckedBtn, {grow: 0, shrink: 0, basis: 140, align: 3})
         dlSelBtn = SDL3.createButton({w: 120, h: 30, text: "下载选中行", font_size: 13})
         dlSelBtn.set_tip("下载表格里当前选中的行（Ctrl/Shift 可多选）")

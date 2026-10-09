@@ -1040,16 +1040,23 @@ export struct PlayerBar {
             lastPlaying = q.playing
             btnPlay.set_image(icon_path(if q.playing then "pause" else "play"))
         }
+        // ★ 2026-10-09 修正（用户口径："跟同款背景色" ✓）：原先这两个色**给反了** ✗
+        //   · 所有图标按钮平时都是 `#F0F0F5`（= 页面同色 ⇒ 看着"没有底" ✓ 见 icon_btn）
+        //   · 循环**开**（列表/单曲）当时也写 `#F0F0F5` ⇒ 开着跟没开一样、毫无痕迹 ✗
+        //   · 循环**关** 反给 `#E4E6EA`（比页面深一档）⇒ 明明没开，看着却"像被选中" ✗✗
+        //   ⇒ 现在换回来：**关 = 页面同款底色**（普通按钮 ✓）、**开 = 深一档**（一眼看出开着 ✓）
+        //   ⚠ 两个"开"的图标本就不同（loop_one / loop_all ✓），而"关"复用 loop_all ⇒
+        //     若不给激活态底色，ALL 与 OFF 会长得完全一样、分不出循环状态 ✗（所以这个底色不能省 ✓）
         if q.loopMode == pl.LOOP_ONE {
             btnLoop.set_image(icon_path("loop_one"))
-            btnLoop.set_bg_color(#F0F0F5FF)
+            btnLoop.set_bg_color(#E4E6EAFF)          // 激活态：比页面深一档 ✓
         } eif q.loopMode == pl.LOOP_ALL {
             btnLoop.set_image(icon_path("loop_all"))
-            btnLoop.set_bg_color(#F0F0F5FF)
+            btnLoop.set_bg_color(#E4E6EAFF)          // 同上 ✓
         } else {
-            // "循环：关"复用列表循环图标 + **浅灰底** ⇒ 一眼看出"当前不循环" ✓（不另出一张图 ✓）
+            // "循环：关" = 跟其它图标按钮/页面**同款背景色** ⇒ 看着就是"普通按钮、没开循环" ✓
             btnLoop.set_image(icon_path("loop_all"))
-            btnLoop.set_bg_color(#E4E6EAFF)
+            btnLoop.set_bg_color(#F0F0F5FF)
         }
     }
 
