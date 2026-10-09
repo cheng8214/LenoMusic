@@ -45,6 +45,7 @@ import strings
 import threads
 import times
 import "./dl_engine.leno" as eng
+import "./songrow.leno" as srow             // 行字段的**具名存取**（歌名/歌手…；唯一事实来源 ✓ 见其文件头）
 import "./dl_window.leno" as dlw
 import "./dl_settings.leno" as dlset        // 设置：读/写/钳位（纯逻辑 ⇒ 能被 test/ 单测 ✓）
 import "./dl_settings_win.leno" as dlswin    // "设置"弹窗（SDL3）—— 标题栏右侧 ⚙ 打开 ✓
@@ -202,6 +203,14 @@ struct MusicDlApp {
     Label bangLbl
     Array[string] bangIds = []        // 与 bangBox 选项平行：第 i 项对应哪个榜单 id
     Array[Array[string]] bangSongs = []   // 榜单歌曲行（与搜索行同构 ⇒ 下载/试听都能直接用 ✓）
+
+    // ===== 右键菜单的"作用对象"（2026-10-09 ✓ 让搜索表/榜单表共用同一套菜单）=====
+    //   两张表的菜单项与处理**完全一样**，只是数据源不同 ⇒ 只记"这次菜单落在哪张表上"，
+    //   由 ctx_* 访问器统一取"当前表/当前行"（见 buildMenu 那里的注释 ✓）
+    int menuCtx = 0                   // 0 = 搜索表（songs）/ 1 = 榜单表（bangSongs）
+    // 自检用：buildMenu 最近一次收到的"作用对象"（见文件末的 DCTX 钩子 ✓）
+    int gCtxSeen = -1                 // 期望 1（榜单表）
+    int gCtxRowSeen = -9              // 期望 0（右击的那一行）
     Thread? bangThread = null         // 取榜单歌曲的那条线程（⚠ 入口必须是本文件函数 ⇒ 见文件头 ✓）
     Thread? bangMenuThread = null // 取榜单**菜单**的那条线程（kuwo/qq 是内置常量、瞬时 ✓；另两个要发请求）
     bool bangLoading = false
@@ -585,6 +594,63 @@ struct MusicDlApp {
                           + "再点当前行 ⇒ 下标 " + _str(b.cur_index()) + "（期望 0）\n")
                     SDL3.requestExit()
                 }
+            }
+        }
+        // 右键菜单自检（见 gCtxStep 注释 ✓）：注入**真实右键** ⇒ 断言菜单建在正确的数据源上
+        if gCtxStep > 0 {
+            int st = gCtxStep
+            gCtxStep = gCtxStep + 1
+            if st == 1 {
+                int wid = win.getID()
+                if gCtxTarget == 2 {
+                    // 目标 2 = **搜索表空白处**（row<0）：不必联网、不必先搜 ⇒ 专测"搜索页那条线还通着"
+                    float bx = table.get_x() + 200.0
+                    float by = table.get_y() + 200.0
+                    SDL3.testMoveAt(wid, bx, by)
+                    bool ok = SDL3.testRightClickAt(wid, bx, by)
+                    print("[dctx] 注入右键到搜索表空白处 ok=" + _str(ok) + "\n")
+                } else if gCtxTarget == 3 {
+                    // 目标 3 = **只测动作**（不点鼠标）：榜单第 0 行 ⇒ 「搜索这首歌（跳到搜索页）」
+                    //   ⚠ 要配 DBANG=1 跑：否则当前页已经是搜索页，set_active(0) 不会触发切页回调 ✗
+                    if bangSongs.len() == 0 {
+                        gCtxStep = 1        // 等榜单行（联网）✓
+                    } else {
+                        menuCtx = 1
+                        onMenu(0, "searchthis")
+                        print("[dctx] 目标 3：已调用菜单动作 searchthis ✓\n")
+                    }
+                } else if bangSongs.len() == 0 {
+                    gCtxStep = 1            // 榜单行还没拉回来（联网）⇒ 下一拍再试 ✓
+                } else {
+                    // 目标 1 = 榜单表第 0 行：y = 表头 30 + 行高中点 13（row_h=26 ✓ 见 createTable）
+                    float bx = bangTable.get_x() + 120.0
+                    float by = bangTable.get_y() + 30.0 + 13.0
+                    SDL3.testMoveAt(wid, bx, by)
+                    bool ok = SDL3.testRightClickAt(wid, bx, by)
+                    print("[dctx] 注入右键到榜单表第 0 行 ok=" + _str(ok)
+                          + "  位置=" + _str(_int(bx)) + "," + _str(_int(by)) + "\n")
+                }
+            } eif st == 3 {
+                // 期望：榜单表 ⇒ menuCtx=1 / row=0（那一行）；搜索表空白 ⇒ menuCtx=0 / row<0 ✓
+                bool pass = false
+                if gCtxTarget == 2 {
+                    pass = gCtxSeen == 0 and gCtxRowSeen < 0
+                    print("[dctx] " + (if pass then "通过" else "**不通过**")
+                          + "：目标=2 ⇒ buildMenu(menuCtx=" + _str(gCtxSeen) + ", row=" + _str(gCtxRowSeen) + ")\n")
+                } else if gCtxTarget == 3 {
+                    // 期望：切到搜索页（curPage=0）+ 关键词填成"歌名 歌手" + 真的起了搜索 ✓
+                    pass = curPage == 0 and keywordEdit.get_text().trim() != "" and searching
+                    print("[dctx] " + (if pass then "通过" else "**不通过**")
+                          + "：目标=3 ⇒ 切页后 curPage=" + _str(curPage)
+                          + "  关键词=\"" + keywordEdit.get_text() + "\""
+                          + "  搜索中=" + _str(searching) + "\n")
+                } else {
+                    pass = gCtxSeen == 1 and gCtxRowSeen == 0
+                    print("[dctx] " + (if pass then "通过" else "**不通过**")
+                          + "：目标=1 ⇒ buildMenu(menuCtx=" + _str(gCtxSeen) + ", row=" + _str(gCtxRowSeen) + ")\n")
+                }
+                // ⚠ 开着 DSHOT 时**别抢着退**：让截图钩子先截到"菜单正开着"的样子 ✓（与 DHOVER 同一套 ✓）
+                if dlShot == "" { SDL3.requestExit() }
             }
         }
         if gExitTicks > 0 {
@@ -994,87 +1060,160 @@ struct MusicDlApp {
     }
 
     // ==================== 右键菜单 ====================
+    //   ★ 2026-10-09：搜索表与榜单表**共用同一套菜单**（榜单表原先压根没接右键 ⇒ 切到榜单页
+    //     只能双击一首一首下、想"选中一批再下"没法做 ✗）。做法：只记"这次菜单落在**哪张表**上"，
+    //     下面三个访问器把"当前表 / 当前行数 / 当前第 i 行（那一首）"统一取出来
+    //     ⇒ 菜单项与处理逻辑**零分支**，两个页面永远一致 ✓
+    //   ⚠ 别想着"把行数组存成字段去引用另一张表"：那要靠数组的引用语义跨赋值，不好保证 ✗
+    func ctx_table(): Table {
+        if menuCtx == 1 { return bangTable }
+        return table
+    }
+    func ctx_len(): int {
+        if menuCtx == 1 { return bangSongs.len() }
+        return songs.len()
+    }
+    func ctx_row(int i): Array[string] {
+        if menuCtx == 1 { return bangSongs[i] }
+        return songs[i]
+    }
+    // 当前表里**勾选**的行（搜索页仍走 pickchecked 的格式过滤口径 ✓；榜单页没有格式选择器 ⇒ 不过滤 ✓）
+    func ctx_picked(): Array[Array[string]] {
+        Array[Array[string]] out = []
+        Array[int] chk = ctx_table().get_checked_rows()
+        for chk to i {
+            if i >= 0 and i < ctx_len() { out.add(ctx_row(i)) }
+        }
+        return out
+    }
+
+    // 用这一行去别处搜：关键词 = "歌名 歌手"（歌手为空就只搜歌名 ✓）
+    //   ⚠ 榜单接口**常缺 `singername`**（见各 core 的注释 ✓）⇒ 不能拼成 " - " 或空歌手时留个空格 ✗
+    func searchkw(Array[string] row): string {
+        string n = srow.rowname(row).trim()
+        string a = srow.rowartist(row).trim()
+        if a == "" { return n }
+        if n == "" { return a }
+        return n + " " + a
+    }
 
     func buildMenu(int row) {
-        table.clearContextItems()
-        Array[int] checked = table.get_checked_rows()
+        Table t = ctx_table()
+        gCtxSeen = menuCtx              // 自检留痕（DCTX 钩子读它 ✓）
+        gCtxRowSeen = row
+        t.clearContextItems()
+        Array[int] checked = t.get_checked_rows()
         if row >= 0 {
-            table.addContextItem({label: "试听（同时后台下载整首）", id: "playrow"})
-            table.addContextItem({label: "下载这一首", id: "dlrow"})
-            table.addContextItem({label: "只下这一首的歌词", id: "lyricrow"})
-            table.addContextItem({label: "复制「歌名 - 歌手」", id: "copy"})
+            t.addContextItem({label: "试听（同时后台下载整首）", id: "playrow"})
+            t.addContextItem({label: "下载这一首", id: "dlrow"})
+            t.addContextItem({label: "只下这一首的歌词", id: "lyricrow"})
+            t.addContextItem({label: "复制「歌名 - 歌手」", id: "copy"})
+            // ★ 2026-10-09：拿这一首去**搜索页**搜（榜单页专用）
+            //   为什么只在榜单页给：榜单行只带**一个站点**（即"这首在酷我榜上"）⇒ 想看看别的站
+            //   有没有、比对音质，就得换个关键词再搜一遍 ✓；而搜索页本来就在搜、这个词就是你刚输入的 ⇒
+            //   再给一项只会是重复 ✗
+            if menuCtx == 1 { t.addContextItem({label: "搜索这首歌（跳到搜索页）", id: "searchthis"}) }
         }
         if checked.len() > 0 {
             // ★ 菜单上写清"实际会下几首"：格式过滤开着时，勾选数与下载数会不一样 ✗
             //   （否则菜单说"下载勾选的 5 首"、实际只下 3 首 ⇒ 看着像漏了 ✓）
-            string want = fmt_want()
+            //   ⚠ 格式过滤是**搜索页**的东西（榜单页没有那个下拉 ✓）⇒ 只在搜索页算它 ✓
+            string want = ""
+            if menuCtx == 0 { want = fmt_want() }
             string head = "下载勾选的 " + _str(checked.len()) + " 首"
             if want != "" {
                 int m = 0
                 for checked to i {
-                    if i >= 0 and i < songs.len() and fmt_ok(songs[i]) { m = m + 1 }
+                    if i >= 0 and i < ctx_len() and fmt_ok(ctx_row(i)) { m = m + 1 }
                 }
                 head = "下载勾选的 " + _str(m) + " / " + _str(checked.len()) + " 首（只要 " + want + "）"
             }
-            table.addContextItem({label: head, id: "dlchecked"})
-            table.addContextItem({label: "只下勾选的 " + _str(checked.len()) + " 首歌词", id: "lyricchecked"})
+            t.addContextItem({label: head, id: "dlchecked"})
+            t.addContextItem({label: "只下勾选的 " + _str(checked.len()) + " 首歌词", id: "lyricchecked"})
         }
-        table.addContextSeparator()
-        table.addContextItem({label: "全选", id: "all"})
-        table.addContextItem({label: "全不选", id: "none"})
-        table.addContextSeparator()
-        table.addContextItem({label: "在资源管理器里定位", id: "reveal"})      // ★★★ 2026-10-08：定位/删除本地文件
-        table.addContextItem({label: "删除本地文件…", id: "delfile"})
-        table.addContextItem({label: "打开下载目录", id: "open"})
+        t.addContextSeparator()
+        t.addContextItem({label: "全选", id: "all"})
+        t.addContextItem({label: "全不选", id: "none"})
+        t.addContextSeparator()
+        t.addContextItem({label: "在资源管理器里定位", id: "reveal"})      // ★★★ 2026-10-08：定位/删除本地文件
+        t.addContextItem({label: "删除本地文件…", id: "delfile"})
+        t.addContextItem({label: "打开下载目录", id: "open"})
     }
 
     func onMenu(int row, string id) {
+        bool hasRow = row >= 0 and row < ctx_len()
         if id == "playrow" {
-            if row >= 0 and row < songs.len() { startPreview(songs[row]) }
+            if hasRow { startPreview(ctx_row(row)) }
             return
         }
         if id == "dlrow" {
-            if row >= 0 and row < songs.len() { startDownload([songs[row]], downloadflags()) }
+            if hasRow { startDownload([ctx_row(row)], downloadflags()) }
             return
         }
         if id == "dlchecked" {
-            onDownloadChecked()
+            // 搜索页走原口径（含格式过滤 + 勾选按钮联动 ✓）；榜单页没有那些控件 ⇒ 直接下勾选的 ✓
+            if menuCtx == 0 { onDownloadChecked() } else { startDownload(ctx_picked(), downloadflags()) }
             return
         }
         if id == "lyricrow" {
-            if row >= 0 and row < songs.len() { onDownloadLyricOnly([songs[row]]) }
+            if hasRow { onDownloadLyricOnly([ctx_row(row)]) }
             return
         }
         if id == "lyricchecked" {
-            onDownloadLyricOnly(pickchecked())
+            Array[Array[string]] jobs = pickchecked()
+            if menuCtx == 1 { jobs = ctx_picked() }
+            onDownloadLyricOnly(jobs)
             return
         }
         if id == "copy" {
-            if row >= 0 and row < songs.len() {
-                SDL3.setClipboardText(eng.songlabel(songs[row]))
-                stateLbl.set_text("已复制：" + eng.songlabel(songs[row]))
+            if hasRow {
+                SDL3.setClipboardText(eng.songlabel(ctx_row(row)))
+                stateLbl.set_text("已复制：" + eng.songlabel(ctx_row(row)))
+            }
+            return
+        }
+        // ★ 2026-10-09：拿这一首去搜索页搜（榜单页专用，见 buildMenu 的注释 ✓）
+        //   顺序要紧：**先填关键词再切页再发起搜索** —— `onSearch` 读的正是输入框里的词 ✓
+        if id == "searchthis" {
+            if hasRow {
+                string kw = searchkw(ctx_row(row))
+                if kw == "" {
+                    stateLbl.set_text("这一行没有歌名/歌手，没法去搜（榜单接口少数行会缺 ✓）")
+                } else {
+                    keywordEdit.set_text(kw)
+                    tab.set_active(0)        // 跳到搜索页（会触发 tab.on_change ⇒ onTabChanged ✓）
+                    if searching {
+                        // ⚠ `onSearch` 开头就有"已在搜就返回"的守卫（见它 ✓）⇒ 这条**不能**假装搜过了 ✗
+                        stateLbl.set_text("关键词已填好：" + kw + " —— 上一次搜索还在跑，等它完再回车 ✓")
+                    } else {
+                        onSearch()               // 状态栏由它自己写"正在搜索「…」"（别在这里覆盖 ✗）
+                    }
+                }
+                SDL3.markFrameRedraw()
             }
             return
         }
         if id == "all" {
-            table.check_all()
-            updateCount()
+            Table t = ctx_table()
+            t.check_all()
+            if menuCtx == 0 { updateCount() }     // "已选 N / M 首"那行只有搜索页有 ✓
             SDL3.markFrameRedraw()
             return
         }
         if id == "none" {
-            table.uncheck_all()
-            updateCount()
+            Table t = ctx_table()
+            t.uncheck_all()
+            if menuCtx == 0 { updateCount() }
             SDL3.markFrameRedraw()
             return
         }
         // ★★★ 2026-10-08：在资源管理器里**定位**（选中）这一首的本地文件
         //   ⚠ 走的必须是 `explorer /select,` ✗ 不能拿"打开目录"那套 —— 后者对文件会用默认程序打开它 ✗（用户实测点名 ✓）
         if id == "reveal" {
-            if row >= 0 and row < songs.len() {
-                string p = eng.find_local(songs[row], outdir)
+            if hasRow {
+                string p = eng.find_local(ctx_row(row), outdir)
                 if p == "" {
-                    stateLbl.set_text("本地还没有这首（" + eng.songlabel(songs[row]) + "）⇒ 先下载它 ✓")
+                    stateLbl.set_text("本地还没有这首（" + eng.songlabel(ctx_row(row)) + "）⇒ 先下载它 ✓")
                 } else if dlw.reveal(p) {
                     stateLbl.set_text("已在资源管理器里定位：" + p)
                 } else {
@@ -1086,15 +1225,15 @@ struct MusicDlApp {
         }
         // 删除本地文件（**先确认** ✓ 弹模态框；不删歌词 .lrc、也不进回收站 ✓ 会在框里说清 ✓）
         if id == "delfile" {
-            if row >= 0 and row < songs.len() {
-                string p = eng.find_local(songs[row], outdir)
+            if hasRow {
+                string p = eng.find_local(ctx_row(row), outdir)
                 if p == "" {
-                    stateLbl.set_text("本地还没有这首，没东西可删（" + eng.songlabel(songs[row]) + "）")
+                    stateLbl.set_text("本地还没有这首，没东西可删（" + eng.songlabel(ctx_row(row)) + "）")
                 } else {
                     // ⚠ 回调式（框架明说**不要**写成 `if msgBox(...)` ✗ —— 主循环已经在跑 ✓）
                     SDL3.msgBox("删除本地文件", [
                         "要删掉这一首的本地文件吗？",
-                        eng.songlabel(songs[row]),
+                        eng.songlabel(ctx_row(row)),
                         p,
                         "（只删音频，不动同名 .lrc 歌词；不进回收站，删了就没了）"
                     ], "删除", "取消", true, func() {
@@ -1389,8 +1528,10 @@ struct MusicDlApp {
         table.on_dbl_click(func(int row, int col) {
             if row >= 0 and row < songs.len() { startDownload([songs[row]], downloadflags()) }
         })
-        table.on_context_will_open(func(int row) { buildMenu(row) })
-        table.on_context_select(func(int row, string id) { onMenu(row, id) })
+        //   ★ 右键菜单：先钉住"菜单作用在搜索表上"（menuCtx=0）再建菜单 ✓
+        //     （榜单表接的是同一套函数，只是 menuCtx=1 ⇒ 见 buildMenu 的 ctx_* 访问器 ✓）
+        table.on_context_will_open(func(int row) { menuCtx = 0; buildMenu(row) })
+        table.on_context_select(func(int row, string id) { menuCtx = 0; onMenu(row, id) })
         page0.add(table, {grow: 1, shrink: 1, align: 3})
 
         // ---- 忙指示 + 状态栏（属搜索页 ⇒ 挂 page0 ✓）----
@@ -1668,6 +1809,12 @@ struct MusicDlApp {
         bangTable.on_dbl_click(func(int row, int col) {
             if row >= 0 and row < bangSongs.len() { startDownload([bangSongs[row]], downloadflags()) }
         })
+        //   ★ 右键菜单（2026-10-09 补 ✓ 用户反馈"榜单没有右击菜单、下不了"）：
+        //     与搜索表**共用同一套**菜单与处理（试听 / 下载这一首 / 只下歌词 / 复制 /
+        //     下载勾选的 N 首 / 全选 / 全不选 / 定位 / 删除本地文件 / 打开目录 ✓）
+        //     先设 menuCtx=1 ⇒ ctx_* 访问器都落在**榜单表 + bangSongs** 上 ✓
+        bangTable.on_context_will_open(func(int row) { menuCtx = 1; buildMenu(row) })
+        bangTable.on_context_select(func(int row, string id) { menuCtx = 1; onMenu(row, id) })
         page1.add(bangTable, {grow: 1, shrink: 1, align: 3})
 
         // ---- 状态行 ----
@@ -1865,6 +2012,18 @@ int gHoverTick = 0
 string gAutoSearch = ""
 int gAutoSearchTick = 0
 
+// 右键菜单自检（注入**真实右键** ⇒ 断言菜单建在正确的数据源上 ✓）
+//   为什么值得有：2026-10-09 用户反馈"榜单没有右击菜单"就是这么漏的 —— 搜索表接了
+//   `on_context_will_open`/`on_context_select`，榜单表只接了双击 ✗；光看代码/编译都发现不了，
+//   所以这里用**注入真实右键**走一遍框架的完整链路（命中行 → 回调 → buildMenu）⇒ 再漏就当场报错 ✓
+//   三种目标：
+//     `DBANG=1 DCTX=1` ⇒ 榜单表第 0 行（要先切到榜单页并等行加载 ✓）期望 menuCtx=1 / row=0
+//     `DCTX=2`         ⇒ 搜索表**空白处**（不必联网 ⇒ 专测"搜索页那条线还通着" ✓）期望 menuCtx=0 / row<0
+//     `DBANG=1 DCTX=3` ⇒ 直接调「搜索这首歌（跳到搜索页）」这个动作（不点鼠标，专测跳页+填词+起搜 ✓）
+//   （同一套"注入真事件"的惯例见 gClickStep / DHOVER ✓；配合 DSHOT 可截到"菜单正开着"✓）
+int gCtxStep = 0
+int gCtxTarget = 1
+
 main() {
     var ex = _env("DEXIT")
     if ex != null { gExitTicks = _int(_str(ex)) }
@@ -1880,6 +2039,11 @@ main() {
     if dh != null { gHoverTick = 2 }
     var sq = _env("DSEARCH")
     if sq != null { gAutoSearch = _str(sq) }
+    var cx = _env("DCTX")
+    if cx != null {
+        int cxn = _int(_str(cx))
+        if cxn > 0 { gCtxStep = 1; gCtxTarget = cxn }   // 1 = 榜单表 / 2 = 搜索表空白处 ✓
+    }
     MusicDlApp app = new MusicDlApp()
     app.run()
 }
