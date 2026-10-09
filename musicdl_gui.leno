@@ -902,6 +902,41 @@ struct MusicDlApp {
                 pbCtx.ctxWantPath = ""
                 if act == "open" {
                     if not dlw.openfolder(outdir) { stateLbl.set_text("打开目录失败：" + outdir) }
+                } eif act == "delall" {
+                    // ★ 「删除全部本地文件…」（2026-10-09，用户要求）：删**播放列表里已下载的**那些
+                    //   ⚠ 只删"列表里有的"（下载目录里其它文件一律不碰 ✓）；不可撤销 ⇒ 先弹确认框 ✓
+                    Array[string] delfs = []
+                    if pbar is PlayerBar => b2 {
+                        int q2 = 0
+                        while q2 < b2.queue_count() {
+                            string lp2 = b2.queue_local(q2)
+                            if lp2 != "" and files.exists(lp2) { delfs.add(lp2) }
+                            q2 = q2 + 1
+                        }
+                    }
+                    if delfs.len() == 0 {
+                        stateLbl.set_text("列表里没有已下载的文件")
+                        SDL3.markFrameRedraw()
+                    } else {
+                        int cnt = delfs.len()
+                        SDL3.msgBox("删除全部本地文件", [
+                            "会删掉列表里 " + _str(cnt) + " 个已下载的文件（不可撤销）。",
+                            "下载目录里**不在这个列表**的文件不受影响；历史记录也会保留。"
+                        ], "删除", "取消", true, func() {
+                            int dn = 0
+                            for delfs to f2 {
+                                try {
+                                    files.delete(_str(f2))
+                                    dn = dn + 1
+                                } catch e {
+                                    dn = dn + 0        // 删不掉（被占用等）⇒ 跳过，最后报个数 ✓
+                                }
+                            }
+                            syncLocals()           // 删完刷"本地已有"（列表里那些回到"没下载" ✓）
+                            stateLbl.set_text("已删除 " + _str(dn) + " 个本地文件（列表与历史保留）")
+                            SDL3.markFrameRedraw()
+                        })
+                    }
                 } eif pth != "" {
                     if act == "reveal" {
                         if dlw.reveal(pth) {

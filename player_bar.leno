@@ -97,6 +97,11 @@ export struct PlayerBar {
     Button btnLrc                // 「词」按钮（右组，列表左边 ✓）
 
     // ===== 状态 =====
+    // ★ 歌单"双击才播"用的拍号（2026-10-09 ✓ 用户要求）：
+    //   `tickSeq` 每拍 +1（120ms ✓）；单击只记下"哪一行、第几拍"，两拍内再点同一行才算双击 ✓
+    int tickSeq = 0
+    int lastClickTick = -9999
+    int lastClickRow = -1
     bool wantPop = false         // 用户**想要**浮层吗（点列表图标/点外面置它 ✓）
     bool popOpen = false         // **实际**挂上去了没有（由 tick 里的 apply_pop 落地 ✓）
     bool wantLrc = false         // 歌词浮层（同款意图/落地两段式 ✓ 与歌单**互斥** ✓）
@@ -362,7 +367,11 @@ export struct PlayerBar {
             lb = SDL3.createListBox({
                 w: LIST_W, h: LIST_H, item_h: LIST_ROW, font_size: 13, mode: 0,
                 items: list_items(q),
-                tip: "点一首就播它；右键有菜单"      // ⚠ ListBox 没有 set_tip，只能在 opts 里给 ✓
+                // ★ 每行的小音符（2026-10-09 ✓ 用户要求）：ListBox 现在**自带行图标**了 ——
+                //   选项名与 Table 保持一致（image_path / image_size / image_gap / image_pad ✓ 见 sdl_listbox）
+                image_path: icon_path("music"),
+                image_size: 14, image_gap: 6, image_pad: 8,
+                tip: "双击一首播它（单击只选中）；右键有菜单"   // ⚠ ListBox 没有 set_tip，只能在 opts 里给 ✓
             })
             // ★ 2026-10-08：歌单的**右击菜单**（框架的 ListBox 现在支持了 ✓ 见 sdl_listbox ✓）
             //   为什么要有：先前在歌单上右击一事无成 ✗，用户实测原话："右击没出现菜单，是播放音乐" ✗
@@ -532,10 +541,20 @@ export struct PlayerBar {
                 //   为什么不能靠 `lb.on_change`：单选模式下点**已选中行**控件不回调 ✗（见上面 lb 那段注释 ✓）
                 int r = lb.index_at(mx, my)
                 if r >= 0 {
-                    if p is Player => w {
-                        if r < w.count() {
-                            w.play_index(r)
-                            lastIdx = -1    // 让 tick 下一拍必然刷一次状态栏 ⇒ 点了立刻有反馈 ✓
+                    // ★★ 2026-10-09（用户要求）：歌单里**双击才播**，单击只选中 ✓
+                    //   为什么改：歌单是"翻着看"的地方，单击就换歌太灵敏（手滑一下歌就断了 ✗）；
+                    //   与结果表/榜单表的口径也统一了（那两张表都是"双击播放" ✓）
+                    //   ⚠ 计时**不引 times**：本文件每 120ms 有一拍 tick ⇒ 用拍号差当窗口最省事 ✓
+                    //     （3 拍 ≈ 360ms，与框架 Table 的 400ms 双击阈值同一量级 ✓）
+                    bool dbl = (r == lastClickRow) and (tickSeq - lastClickTick <= 3)
+                    lastClickRow = r
+                    lastClickTick = tickSeq
+                    if dbl {
+                        if p is Player => w {
+                            if r < w.count() {
+                                w.play_index(r)
+                                lastIdx = -1    // 让 tick 下一拍必然刷一次状态栏 ⇒ 点了立刻有反馈 ✓
+                            }
                         }
                     }
                 }
@@ -572,6 +591,23 @@ export struct PlayerBar {
             lb.addContextSeparator()
         }
         lb.addContextItem({label: "打开下载目录", id: "open"})
+        // ★ 2026-10-09（用户要求）：**列表级**的两个动作（任何位置右击都能看到 ✓）
+        //   · 「清空列表」= 清掉播放列表本身（**不动文件** ✓ 与下载窗口的"清空任务列表"同一口径）
+        //   · 「删除全部本地文件…」= 删列表里**已下载**的那些（不可撤销 ⇒ 弹确认框，由宿主做 ✓）
+        //     只删"列表里有的"，不碰下载目录里的其它文件 ✓（没下载的项本来就没文件 ✓）
+        int localcnt = 0
+        if p is Player => ql {
+            int k2 = 0
+            while k2 < ql.count() {
+                if ql.local_at(k2) != "" { localcnt = localcnt + 1 }
+                k2 = k2 + 1
+            }
+        }
+        lb.addContextSeparator()
+        lb.addContextItem({label: "清空列表（不动文件）", id: "clearall"})
+        lb.addContextItem({label: "删除全部本地文件…", id: "delall"})
+        lb.setContextItemEnabled("clearall", n > 0)          // 列表本来就空 ⇒ 置灰 ✓
+        lb.setContextItemEnabled("delall", localcnt > 0)     // 一个都没下载 ⇒ 置灰 ✓
         // 右击的正好是**正在播**的那首 ⇒ "播放这首"没意义 ⇒ 置灰 ✓（`ListBox.setContextItemEnabled` ✓）
         if p is Player => qc {
             if row == qc.index { lb.setContextItemEnabled("play", false) }
@@ -606,7 +642,24 @@ export struct PlayerBar {
             SDL3.markFrameRedraw()
             return
         }
-        // 其余（定位 / 删除 / 打开目录）要动文件系统、要弹系统框 ⇒ 交给宿主 ✓（同 wantLyricFetch 范式 ✓）
+        // ★ 「清空列表」（2026-10-09）：只清**播放列表**，不动任何文件 —— 本文件就能做 ✓
+        //   ⚠ 连 `list` 一起清掉：不然 `has_queue()` 会变假 ⇒ 立刻退回"扫目录"口径 ⇒ 列表马上又被填满 ✗
+        if id == "clearall" {
+            if p is Player => q2 {
+                q2.set_queue([], [], [], dir)      // 内部会 stop_all（停播 + 清边下边播状态 ✓）
+                q2.list = []                       // 清掉"扫目录"那一份 ⇒ 空列表就真是空的 ✓
+            }
+            lastIdx = -1
+            if p is Player => q3 {
+                lb.set_items(list_items(q3))
+                lb.clear_selection()
+            }
+            hostLbl?.set_text("播放列表已清空（文件没动；想重新载入下载目录就点「重扫」）")
+            SDL3.markFrameRedraw()
+            return
+        }
+        // 其余（定位 / 删除这一首 / 删除全部 / 打开目录）要动文件系统、要弹系统框 ⇒ 交给宿主 ✓
+        //（同 wantLyricFetch 范式 ✓；"删除全部"不带 path —— 宿主自己去遍历播放队列 ✓）
         ctxWantPath = rowPath
         ctxWant = id
         SDL3.markFrameRedraw()
@@ -915,6 +968,7 @@ export struct PlayerBar {
         apply_pop()
 
         if p is Player => q {
+            tickSeq = tickSeq + 1          // ★ 歌单"双击判定"的拍号（见字段处 ✓ 约 120ms 一拍）
             q.tick()                       // 放完自动下一首（规则在 player.leno ✓）
 
             songLbl.set_text(song_text(q))
