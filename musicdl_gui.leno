@@ -208,9 +208,18 @@ struct MusicDlApp {
     ComboBox bangSrcBox               // 榜单页的音源下拉（决定"哪个站的榜"）
     ComboBox bangBox                  // 榜单下拉（选项随音源动态生成 ✓）
     Button bangReloadBtn
+    CheckBox bangOnlyDl               // ★「只看有大小」（2026-10-09）：勾上 ⇒ 列表只剩**已探到文件大小**的行
     Table bangTable
     Label bangLbl
     Array[string] bangIds = []        // 与 bangBox 选项平行：第 i 项对应哪个榜单 id
+    // 榜单歌曲行存**两份**（★ 2026-10-09 加"只看有大小"时拆的）：
+    //   `bangRawSongs` = 拉回来的**全量**行（逐首补格式/大小的目标，过滤不碰它 ✓）
+    //   `bangSongs`    = 当前**展示**的行（= 全量，或按勾选过滤后的子集）
+    //   ⚠ 表格行必须与 bangSongs **一一对应**（右键 / 双击 / 下载全按行号取 songs[i]）
+    //     ⇒ 过滤不是"隐藏行"✗ 而是**重建数组**（同搜索页对 has_size 的口径 ✓ 见 dl_engine.has_size）
+    //   ⚠ 过滤**只在补格式/大小结束后**套上：补的期间结果要按**原下标**写回（见 finishBangFill ✓）
+    //     这正是用户要的"必须等补格式后生效" ✓
+    Array[Array[string]] bangRawSongs = []
     Array[Array[string]] bangSongs = []   // 榜单歌曲行（与搜索行同构 ⇒ 下载/试听都能直接用 ✓）
 
     // ===== 右键菜单的"作用对象"（2026-10-09 ✓ 让搜索表/榜单表共用同一套菜单）=====
@@ -1798,6 +1807,45 @@ struct MusicDlApp {
         bangTable.check_all()
     }
 
+    // 按「只看有大小」把**展示行**重算一遍（表格行与 bangSongs 一一对应 ✓ 见字段声明）
+    func applyBangFilter() {
+        Array[Array[string]] keep = []
+        if bangOnlyDl.is_checked() {
+            for bangRawSongs to r {
+                if eng.has_size(r) { keep.add(r) }      // 判据与搜索页同一份：ext 非空 **且** 字节数 > 0 ✓
+            }
+        } else {
+            for bangRawSongs to r { keep.add(r) }
+        }
+        bangSongs = keep
+        fillBangTable()
+    }
+
+    // 勾选框的 on_change（★ 用户口径：**必须等补格式/大小之后**才生效 ✓）
+    //   为什么补的期间不生效：那批线程的结果要按**原下标**写回全量行，而且"哪些有大小"此刻还没定
+    //   ⇒ 只提示、不改表；意图由补完时的 applyBangFilter 兑现 ✓（注释见 finishBangFill ✓）
+    func onBangOnlyChanged(bool v) {
+        if bangFilling {
+            bangLbl.set_text("正在补格式/大小 ⇒ " + (if v then "勾选" else "取消勾选")
+                             + "会在补完后自动生效（有文件大小 = 基本可以下载 ✓）")
+        } else if bangRawSongs.len() == 0 {
+            bangLbl.set_text("列表还是空的 ⇒ 先等这个榜取到歌（勾选会在有数据后生效 ✓）")
+        } else {
+            applyBangFilter()
+            int have = 0
+            for bangRawSongs to r { if eng.has_size(r) { have = have + 1 } }
+            if v {
+                bangLbl.set_text("只看有大小：共 " + _str(bangRawSongs.len()) + " 首 ⇒ 列表里留 "
+                                 + _str(bangSongs.len()) + " 首（有大小 = 基本可以下载；其余的是没探到大小，"
+                                 + "取消勾选即可看到 ✓）")
+            } else {
+                bangLbl.set_text("已显示全部 " + _str(bangSongs.len()) + " 首（其中探到文件大小的有 "
+                                 + _str(have) + " 首）")
+            }
+        }
+        SDL3.markFrameRedraw()
+    }
+
     // ---- 切页：第一次进榜单页才拉菜单（懒加载 ⇒ 不拖慢启动 ✓）----
     func onTabChanged(int idx) {
             curPage = idx
@@ -1872,6 +1920,7 @@ struct MusicDlApp {
     func onBangSrcChanged(int idx) {
         bangLoadedFor = -1        // 强制重拉菜单（换站了 ✓）
         bangIds = []
+        bangRawSongs = []
         bangSongs = []
         bangTable.set_rows([])
         loadBangMenu()
@@ -1902,7 +1951,11 @@ struct MusicDlApp {
         bangReloadBtn.set_enabled(true)
         Array[Array[string]] rows = []
         if got != null { rows = got }
-        bangSongs = rows
+        // ★ 先按**全量**显示：此刻一格大小都没有（榜单接口不给体积 ✓）⇒ 套「只看有大小」只会得到空表 ✗
+        //   ⇒ 勾选态不在这里兑现，留给补完后的 finishBangFill（= 用户要的"必须等补格式后生效" ✓）
+        bangRawSongs = rows
+        bangSongs = []
+        for rows to r { bangSongs.add(r) }
         fillBangTable()
         if rows.len() == 0 {
             bangLbl.set_text(srcname(bangCurSrc) + "：「" + bangBox.get_selected_text() + "」没取到歌（接口可能变了或网络不通）")
@@ -1924,9 +1977,11 @@ struct MusicDlApp {
     //     连续段还有个好处：按序 join 拼回去**天然就是原序** ✓ 不用记下标映射 ✓
     //   ⚠ 补的期间禁用「重新加载」+ 挡住切榜（见 loadBangRows 的守卫 ✓）
     func startBangFill() {
-        int n = bangSongs.len()
+        // ★ 补的目标是**全量行**（bangRawSongs），不是"当前展示"的那份：
+        //   勾了「只看有大小」时 bangSongs 已经是（或即将是）过滤后的子集 ⇒ 拿它当目标会**漏补** ✗
+        int n = bangRawSongs.len()
         if n == 0 { return }
-        bangFillFirst = srow.rowname(bangSongs[0])       // 自检用：验补完顺序没变 ✓
+        bangFillFirst = srow.rowname(bangRawSongs[0])    // 自检用：验补完顺序没变 ✓
         int k = PROBE_THREADS
         if k > n { k = n }
         int per = (n + k - 1) / k                        // 向上取整 ⇒ 段数 ≤ k ✓
@@ -1936,7 +1991,7 @@ struct MusicDlApp {
             Array[Array[string]] part = []
             int j = i
             while j < n and j < i + per {
-                part.add(bangSongs[j]); j = j + 1
+                part.add(bangRawSongs[j]); j = j + 1
             }
             bangFillParts.add(part)
             i = i + per
@@ -1976,20 +2031,37 @@ struct MusicDlApp {
         bangFilling = false
         bangReloadBtn.set_enabled(true)
         // 段数拼回来的行数与原榜一致才替换（防"补的过程中榜被换掉"写串 ✓）
-        if rows.len() == bangSongs.len() { bangSongs = rows }
-        fillBangTable()
+        if rows.len() == bangRawSongs.len() { bangRawSongs = rows }
+        // ★ 补完这一刻才套「只看有大小」（勾过的 / 没勾的都在这条路上统一兑现 ⇒ 用户口径 ✓）
+        applyBangFilter()
         int have = 0
-        for bangSongs to r { if eng.has_size(r) { have = have + 1 } }
-        bangLbl.set_text(srcname(bangCurSrc) + "：「" + bangBox.get_selected_text() + "」共 " + _str(bangSongs.len())
-                         + " 首　·　已补到格式/大小 " + _str(have) + " 首　·　双击某行 = 试听（后台同时下整首）")
+        for bangRawSongs to r { if eng.has_size(r) { have = have + 1 } }
+        string only = ""
+        if bangOnlyDl.is_checked() {
+            only = "　·　只看有大小 ⇒ 列表里 " + _str(bangSongs.len()) + " 首"
+        }
+        bangLbl.set_text(srcname(bangCurSrc) + "：「" + bangBox.get_selected_text() + "」共 " + _str(bangRawSongs.len())
+                         + " 首　·　已补到格式/大小 " + _str(have) + " 首" + only + "　·　双击某行 = 试听（后台同时下整首）")
         // 自检（见 gBangSizeCheck 注释 ✓）：报耗时 / 补到几首 / 首行有没有变（顺序 ✓）
         if gBangSizeCheck {
+            // 开了「只看有大小」自检 ⇒ 就在**补完这一刻**勾上（验证"必须等补格式后生效" ✓）
+            if gBangOnlyCheck {
+                bangOnlyDl.set_checked(true)
+                onBangOnlyChanged(true)
+            }
             int dt = _int(times.ms()) - bangFillT0
             string first = ""
-            if bangSongs.len() > 0 { first = srow.rowname(bangSongs[0]) }
-            print("[dbangsize] 补到 " + _str(have) + " / " + _str(bangSongs.len()) + " 首　耗时 " + _str(dt) + " ms　"
+            if bangRawSongs.len() > 0 { first = srow.rowname(bangRawSongs[0]) }
+            print("[dbangsize] 补到 " + _str(have) + " / " + _str(bangRawSongs.len()) + " 首　耗时 " + _str(dt) + " ms　"
                   + "首行=" + first + "（补前 " + bangFillFirst + "，顺序"
                   + (if first == bangFillFirst then "未变 ✓" else "**变了 ✗**") + "）\n")
+            if gBangOnlyCheck {
+                bool each = true
+                for bangSongs to r { if not eng.has_size(r) { each = false } }
+                print("[dbangonly] 勾上「只看有大小」⇒ 列表 " + _str(bangSongs.len()) + " 首 / 有大小 "
+                      + _str(have) + " 首　每行都有大小：" + (if each then "是 ✓" else "**否 ✗**") + "\n")
+                gBangOnlyCheck = false
+            }
             gBangSizeCheck = false
             // ⚠ 开着 DSHOT 时**别抢着退**：把截图帧推到"补完之后"（此刻表格才是最终样子 ✓），
             //   由截图钩子负责退出 ✓（与 DCTX / DHOVER 同一套做法 ✓）
@@ -2044,6 +2116,15 @@ struct MusicDlApp {
         bangReloadBtn.on_click(func() { loadBangRows() })
         bangReloadBtn.set_enabled(false)
         brow.add(bangReloadBtn, {grow: 0, shrink: 0, basis: 96, align: 3})
+        // ★「只看有大小」+ 一句口径提示（2026-10-09 ✓ 用户要的）：
+        //   榜单接口**不给体积** ⇒ 一行"有文件大小"意味着"直链取到了、真实字节数也探到了"
+        //   = 基本可下载 ✓（探不到的**照样留着** —— 榜单页与搜索页有意的差别：先让你看见，
+        //   真下的时候按 Range 头报真话 ✓）。所以过滤是**用户可选的**，不是默认行为 ✓
+        bangOnlyDl = SDL3.createCheckBox({text: "只看有大小", checked: false, font_size: 13,
+            tip: "勾上 ⇒ 列表里只留**已探到文件大小**的曲目（有大小 = 基本可下载 ✓）；正在补格式/大小时要等补完才生效"})
+        bangOnlyDl.on_change(func(bool v) { onBangOnlyChanged(v) })
+        brow.add(bangOnlyDl, {grow: 0, shrink: 0, align: 1})
+        brow.add(SDL3.createLabel({text: "（有文件大小出现 = 基本可以下载）", font_size: 12}), {grow: 0, shrink: 0, align: 1})
         brow.add(SDL3.createLabel({text: ""}), {grow: 1, shrink: 0, align: 1})
         page1.add(brow, {grow: 0, shrink: 0, align: 3})
 
@@ -2287,6 +2368,11 @@ int gCtxTarget = 1
 //   （补的是真体积：酷我不给体积，只能 HEAD 探 ⇒ 这条自检同时也是"探体积链路"的回归 ✓）
 bool gBangSizeCheck = false
 
+// 「只看有大小」自检（`DBANG=1 DBANGSIZE=1 DBANGONLY=1`）：
+//   等那批"补格式/大小"收尾后**自动勾上**那个勾选框 ⇒ 断言"列表行数 == 有大小的行数"且"每行都有大小"
+//   （= 过滤确实在**补完之后**生效 ✓ —— 这就是用户要的时序：补之前套过滤只会得到空表 ✗）
+bool gBangOnlyCheck = false
+
 // 双击=试听 自检（`DDBL=1|2` ⇒ 等第 0 行出现后注入**真双击**，断言"起的是试听、没开下载窗口" ✓）
 //   为什么要它：2026-10-09 把双击从"下载这一首"改成"试听"（见 previewRow ✓）—— 这是**改语义**，
 //   而框架那边的 dbl 判定（400ms / 10px 阈值）在 `mouseDown` 里、还要过表头 / 列重排 / 复选框列
@@ -2326,6 +2412,8 @@ main() {
     }
     var bs = _env("DBANGSIZE")
     if bs != null { gBangSizeCheck = true }
+    var bo = _env("DBANGONLY")
+    if bo != null { if _int(_str(bo)) > 0 { gBangOnlyCheck = true } }
     var db = _env("DDBL")
     if db != null {
         int dbn = _int(_str(db))

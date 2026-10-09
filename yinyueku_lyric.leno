@@ -1,0 +1,76 @@
+// yinyueku_lyric.leno — 音乐库（yinyueku.cn）歌词
+//
+// 接口：POST http://yinyueku.cn/api.php
+//       types=lyric&id=<lyric_id>&source=<source>&song=<id>&sign=<sign>
+//   ⇒ { "lyric": "…标准 LRC…", "tlyric": "…译文（可能为空）…" }
+//
+// ★ 与另三个源的异同：
+//   ① 形态与**网易**一样：译文**单独一份**给（tlyric），不是混在原文里
+//      ⇒ 落盘前按时间戳并把译文并回原文（**复用 netease_lyric.mergetranslation** ✓
+//        同一套口径 ⇒ 播放器的歌词浮层不用为它再加一条分支 ✓）
+//   ② 返回文本**不带 BOM** ⇒ 落盘统一补 BOM + CRLF（与另三源一致：Windows 播放器靠 BOM 判 UTF-8 ✓）
+//   ③ 参数要**复合 id 里的四段**（source / id / sign / lyric_id）⇒ 入口收整行 id（同酷狗的"整行"口径 ✓）
+//      见 yinyueku_core 头部 ②
+import jsons
+import files
+import "web_net" as net
+import "./yinyueku_core.leno" as yyk
+import "./netease_lyric.leno" as netlyric   // 复用"按时间戳并译文"（同一形态 ⇒ 不再抄一份 ✓）
+
+use net.(HttpClient)
+use net.(Response)
+
+const BOM = "\uFEFF"
+
+// 取歌词文本（已并译文、已补 BOM；失败 / 无歌词 ⇒ ""）
+export func fetchlyric(string songid): string {
+    Array[string] parts = yyk.parseid(songid)
+    string usrc = parts[0]
+    string sid = parts[1]
+    string sign = parts[2]
+    string lyricid = parts[3]
+    if lyricid == "" { lyricid = sid }
+    if usrc == "" or lyricid == "" { return "" }
+
+    HttpClient client = net.createClient()
+    if not client.isOk() { return "" }
+    client.setUserAgent(yyk.useragent())
+    client.replaceHeaders(yyk.headers())
+    client.setTimeout(20000)
+    client.setSSLVerify(false, false)
+    string out = ""
+    try {
+        string body = net.formEncode({"types": "lyric", "id": lyricid, "source": usrc, "song": sid, "sign": sign})
+        Response resp = client.post(yyk.apiurl(), body)
+        if resp.ok() {
+            // ⚠ 歌词里的中文同样是 `\uXXXX` 转义（PHP `json_encode` 默认口径）⇒ 由 jsons.decode 自己吃
+            //   （语言侧 2026-10-09 修；旧版本解出来是空串 ✗ 见 yinyueku_core 头部 / assert/test_json.leno ✓）
+            var root = jsons.decode(resp.body) as Dict[string, any]
+            if root != null {
+                string lrc = jsons.get_str(root, "lyric", "")
+                string tly = jsons.get_str(root, "tlyric", "")
+                if lrc != "" {
+                    // 原文按 \n 切开重排（统一成 CRLF）；并译文；补 BOM（与 netease_lyric 同款 ✓）
+                    lrc = lrc.replace("\r\n", "\n")
+                    out = BOM + netlyric.mergetranslation(lrc, tly.replace("\r\n", "\n"))
+                }
+            }
+        }
+    } catch e {
+        out = ""
+    }
+    client.close()
+    return out
+}
+
+// 取歌词并写到 targetpath（返回写入字节数；0 = 没有歌词/取失败/写不进去）
+export func savelyric(string songid, string targetpath): int {
+    string text = fetchlyric(songid)
+    if text == "" { return 0 }
+    try {
+        files.write(targetpath, text)
+    } catch e {
+        return 0
+    }
+    return text.byte_len()
+}

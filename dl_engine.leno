@@ -26,6 +26,8 @@ import "./kugou_lyric.leno" as kugoulyric
 import "./thirdparty.leno" as thirdparty   // 复用它那份"HEAD / Range 探直链真实体积"（remotelen ✓）
 import "./qq_core.leno" as qq
 import "./qq_lyric.leno" as qqlyric
+import "./yinyueku_core.leno" as yyk
+import "./yinyueku_lyric.leno" as yyklyric
 
 use net.(Response, HttpClient)
 use kuwo.SongInfo
@@ -110,6 +112,7 @@ export func sources(): Array[Array[string]] {
     out.add(["kugou", "酷狗", "1", "移动端搜索 + CDN 取链（免签名）；免费曲能给 flac，付费曲无直链"])
     out.add(["qq", "QQ音乐", "1", "官方 musicu.fcg（需设备指纹 QIMEI36）；免费曲能给 flac，付费曲无直链"])
     out.add(["migu", "咪咕", "0", "待移植"])
+    out.add(["yinyueku", "音乐库", "1", "聚合站 api.php（免登录免签名）；代价：列表体积要逐首取直链探出来"])
     return out
 }
 
@@ -170,6 +173,9 @@ export func preparefor(HttpClient client, string src) {
     } else if src == "qq" {
         client.setUserAgent(qq.useragent())
         client.replaceHeaders(qq.headers())
+    } else if src == "yinyueku" {
+        client.setUserAgent(yyk.useragent())
+        client.replaceHeaders(yyk.headers())
     } else {
         client.setUserAgent(kuwo.useragent())
         client.replaceHeaders(kuwo.headers())
@@ -181,6 +187,7 @@ export func directurl(HttpClient client, string src, string songid): string {
     if src == "netease" { return netease.getdirecturl(client, songid) }
     if src == "kugou" { return kugou.getdirecturl(client, songid) }
     if src == "qq" { return qq.getdirecturl(client, songid) }
+    if src == "yinyueku" { return yyk.getdirecturl(client, songid) }
     return kuwo.getdirecturl(client, songid)
 }
 
@@ -339,6 +346,20 @@ export func search_source(string src, string keyword, int limit, any ch): Array[
             rows.add(r)
         }
         sendmsg(ch, ["search", src, _str(qrows.len()), "0", ""])
+    } else if src == "yinyueku" {
+        // 音乐库：聚合站 api.php（免登录免签名）⇒ 搜索响应**不给体积/档位**，
+        //   格式与大小靠阶段 B 逐首取直链 + HEAD 探出来（见 yinyueku_core 头部 ① ✓）
+        preparefor(client, "yinyueku")
+        Array[Array[string]] yrows = []
+        try {
+            yrows = yyk.searchrows(client, keyword, limit)
+        } catch e {
+            sendmsg(ch, ["serror", src, "", "", errmsg(e)])
+        }
+        for yrows to r {
+            rows.add(r)
+        }
+        sendmsg(ch, ["search", src, _str(yrows.len()), "0", ""])
     }
     client.close()
     return rows
@@ -360,7 +381,7 @@ export func probe_rows(Array[Array[string]] rows): Array[Array[string]] {
         string src = srcid(row)
         // 同一片里的行往往同源 ⇒ 只在**换源**时重置头表（重置是整表替换，不必每行都来一遍 ✓）
         if src != cur {
-            if src == "netease" or src == "qq" or src == "kugou" {
+            if src == "netease" or src == "qq" or src == "kugou" or src == "yinyueku" {
                 preparefor(client, src)
                 cur = src
             } else {
@@ -373,6 +394,8 @@ export func probe_rows(Array[Array[string]] rows): Array[Array[string]] {
             qq.proberow(client, row)
         } else if src == "kugou" {
             kugou.proberow(client, row)
+        } else if src == "yinyueku" {
+            yyk.proberow(client, row)
         }
         i = i + 1
     }
@@ -410,12 +433,15 @@ export func fill_sizes(Array[Array[string]] rows): Array[Array[string]] {
         if src != cur { preparefor(client, src); cur = src }   // 换源 ⇒ UA/头表重置（同阶段 B ✓）
         row = padrow(row, src)                  // ★ 先补段（见 padrow 的注释：越界赋值会抛 ✗）
         // ① 第三方聚合（三个源各有通路；酷我在这里是空过 ✓）
+        //   ★ 音乐库不找"第三方"：它**自己**就是聚合站 ⇒ 拿它自己的取链接口补（同形状 ✓）
         if src == "netease" {
             netease.proberow(client, row)
         } else if src == "qq" {
             qq.proberow(client, row)
         } else if src == "kugou" {
             kugou.proberow(client, row)
+        } else if src == "yinyueku" {
+            yyk.proberow(client, row)
         }
         if has_size(row) { continue }
         // ② 官方直链 + 探真实体积（酷我只能走这条 ✓；另三源第三方没给也再试一次 ✓）
@@ -759,6 +785,8 @@ func savelyricsafe(Array[string] job, string lrcout, string src): int {
             n = netlyric.savelyric(job[0], lrcout)
         } else if src == "qq" {
             n = qqlyric.savelyric(job[0], lrcout)
+        } else if src == "yinyueku" {
+            n = yyklyric.savelyric(job[0], lrcout)
         } else {
             n = lyric.savelyric(job[0], lrcout)
         }

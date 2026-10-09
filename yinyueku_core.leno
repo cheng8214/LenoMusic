@@ -1,0 +1,211 @@
+// yinyueku_core.leno — 音乐库（yinyueku.cn）核心（搜索 / 取直链）
+//
+// 站点 http://yinyueku.cn/ 是 MKOnlinePlayer 搭的**聚合播放器**，后端 `api.php` 自己就是
+// "聚合多家音源"的接口：搜索结果里带 `source` 字段（实测 netease / tencent / kugou…）。
+// ⇒ 这一个源能覆盖好几家的曲子，代价是**它按自己的口径给数据**（下面 ① 就是代价之一 ✓）。
+//
+// 接口（POST form，免登录、免签名、免设备指纹 ✓ 2026-10-09 实测）：
+//   搜索  POST api.php  types=search&count=<N>&pages=1&name=<关键词>
+//         ⇒ [{ id, name, artist:[…], album, pic_id, url_id, lyric_id, source, sign }, …]
+//   取链  POST api.php  types=url&id=<id>&source=<source>&sign=<sign>
+//         ⇒ { "url": "https://…mp3?vuutv=…" }（空串 / 非 http ⇒ 拿不到）
+//   歌词  POST api.php  types=lyric&id=<lyric_id>&source=<source>&song=<id>&sign=<sign>
+//         ⇒ { "lyric": "…标准 LRC…", "tlyric": "…译文单独一份…" }（见 yinyueku_lyric ✓）
+//
+// ★ 实测要点（2026-10-09 逐条真跑过）：
+//   ① 搜索响应**不给时长、不给体积、不给档位** —— 只有 歌名/歌手/专辑/封面/歌词 id/sign
+//      ⇒ 列表里的「格式 / 大小」只能**取一次直链 + HEAD 探真实字节数**补出来
+//      （引擎搜索的阶段 B `probe_rows` 会逐首并行调本文件的 `proberow` ✓ 见 dl_engine）
+//      ⇒ 勾上本源的搜索耗时 = 别人 1 次搜索 + **每首 2 个请求**（这是"聚合站"的固有代价 ✓）
+//   ② 取直链要**三样缺一不可**：id + source + sign ⇒ 而引擎只把 F_ID 原样传回来
+//      ⇒ id 做成复合串 `<source>#<id>#<sign>#<lyric_id>`（与 qq_core 的 `mid#档` 同一手法 ✓）
+//      · 三段值里都不会出现 `#`：source 是固定词、id 是数字、sign 是 base64 形态 ✓
+//      · 复合串**不带 `/` `\` `:` 等非法字符** ⇒ 拿它当"试听临时文件名"也是安全的 ✓
+//         （GUI 的试听文件就是 `leno_preview_<F_ID>.mp3`，见 musicdl_gui.previewRow ✓）
+//      · 末尾那段 lyric_id 通常是 id 的副本，但**接口分两栏给了** ⇒ 就照样带着（不猜 ✓）
+//   ③ sign **必须原样**用（相当于服务端签的令牌；改一个字符就取不到链 ✓）
+//   ④ 直链是**音乐平台自己的 CDN 链**（实测网易给的是 `m801.music.126.net/…mp3?vuutv=…`
+//      带的签名）⇒ 有**时效性**：别把它当长期资产（下载/试听时现取才稳 ✓ 与另几个源同口径）
+//   ⑤ 站点是 **http**（不是 https）—— 实测 https 连不上 ⇒ API 常量别改成 https ✗
+//   ⑥ 取链失败**不抛异常**、只回空串 ⇒ 引擎按"取直链失败"如实报（与另三源同口径 ✓）
+//   ⑦ 响应里的中文是 `\uXXXX` **转义形态**（PHP `json_encode` 的默认口径）—— 由 `jsons.decode` 自己解。
+//      ★ 这条是本源的"副产品"：接它的时候发现语言的 `jsons.decode` **只写 ASCII 码点**（中文被静默丢掉 ✗）
+//      ⇒ 2026-10-09 已在语言侧修好（`src/module/jsons/jsons.c`，含代理对；回归 `assert/test_json.leno` 测试9 ✓）
+//      ⚠ 本源**不再自带**转义还原（曾有个 `unescapeu` 兜底，语言侧修好后**已删** ⇒ 同一件事只留一份 ✓）
+//      ⚠ 因此本源要求 **2026-10-09 之后**的 LenoLang 运行时（旧运行时上歌名/歌手会是空 ✗）
+import strings
+import jsons
+import "web_net" as net
+import "./songrow.leno" as srow
+import "./thirdparty.leno" as thirdparty   // 复用它的"HEAD / Range 探直链真实体积"（remotelen ✓）
+
+use net.(HttpClient)
+use net.(Response)
+
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+
+// ⚠ **http**（见头部 ⑤）：https 实测连不上，别改 ✗
+const API = "http://yinyueku.cn/api.php"
+
+// 复合 id 的分隔符（三段值里都不会出现它 ⇒ 拆得开 ✓ 见头部 ②）
+const SEP = "#"
+
+export func useragent(): string { return UA }
+
+// api.php 是 **form 表单**接口 ⇒ Content-Type 必须带上（换源时整表替换 ⇒ 见 dl_engine.preparefor ✓）
+export func headers(): Array[string] {
+    Array[string] out = []
+    out.add("Content-Type: application/x-www-form-urlencoded")
+    return out
+}
+
+export func prepare(HttpClient client) {
+    client.setTimeout(20000)
+}
+
+// 取链/歌词请求的地址（**导出**：歌词模块不再抄一份常量 ✓）
+export func apiurl(): string { return API }
+
+// ==================== 复合 id ====================
+
+// 复合 id：`<source>#<id>#<sign>#<lyric_id>`（**导出** ⇒ 离线金标能直接压它 ✓ 见 test/test_yinyueku.leno）
+export func makeid(string usrc, string sid, string sign, string lyricid): string {
+    return usrc + SEP + sid + SEP + sign + SEP + lyricid
+}
+
+// 复合 id → [source, id, sign, lyric_id]
+//   段数不足 ⇒ 缺的补空串（调用方判空 ⇒ **安全失败**，不抛 ✓ 与 parsing.at 同一口径）
+export func parseid(string songid): Array[string] {
+    Array[string] out = []
+    string rest = songid
+    int n = 0
+    while n < 3 {
+        int p = strings.find(rest, SEP)
+        if p < 0 { break }
+        out.add(rest.slice(0, p))
+        rest = rest.slice(p + 1, rest.len())
+        n = n + 1
+    }
+    out.add(rest)
+    while out.len() < 4 { out.add("") }
+    return out
+}
+
+// ==================== 小工具 ====================
+
+// 从直链后缀取真实扩展名（接口不给档位时唯一可信的来源 ✓）
+//   ⚠ 与 kuwo_core.extfromurl **同口径**（两份；改动要一起改 ⚠）
+export func extfromurl(string link): string {
+    string low = link.to_lower()
+    int query = strings.find(low, "?")
+    if query >= 0 { low = low.slice(0, query) }
+    if low.ends_with(".flac") { return "flac" }
+    if low.ends_with(".mp3") { return "mp3" }
+    if low.ends_with(".m4a") { return "m4a" }
+    if low.ends_with(".ogg") { return "ogg" }
+    if low.ends_with(".wav") { return "wav" }
+    if low.ends_with(".ape") { return "ape" }
+    return ""
+}
+
+// ==================== ① 搜索 ====================
+//   返回的行**没有体积**（见头部 ①）⇒ 交给引擎的阶段 B 逐首补（proberow ✓）
+export func searchrows(HttpClient client, string keyword, int limit): Array[Array[string]] {
+    Response resp = client.post(API, net.formEncode({"types": "search", "count": _str(limit), "pages": "1", "name": keyword}))
+    if not resp.ok() { return [] }
+    return parsesearch(resp.body)
+}
+
+// 搜索响应 → 歌曲行（**纯函数** ⇒ 离线金标直接压它 ✓ 见 test/test_yinyueku.leno）
+export func parsesearch(string body): Array[Array[string]] {
+    Array[Array[string]] rows = []
+    // ⚠ 顶层就是**数组**（不是 {"data":[…]} 那种壳）⇒ 直接按 Array 判/遍历 ✓
+    // ⚠ 这里的中文是 `\uXXXX` 转义（PHP `json_encode` 默认口径）—— 交给 `jsons.decode` 自己吃：
+    //   语言侧 2026-10-09 已修（旧实现只写 ASCII 码点 ⇒ 中文被静默丢掉 ✗ 见 assert/test_json.leno 测试9 ✓）
+    var arr = jsons.decode(body)
+    if not (arr is Array) { return rows }
+
+    for arr to it {
+        var s = it as Dict[string, any]
+        if s == null { continue }
+        string sid = jsons.get_str(s, "id", "")
+        string usrc = jsons.get_str(s, "source", "")
+        if sid == "" or usrc == "" { continue }
+        string sign = jsons.get_str(s, "sign", "")
+        string lyricid = jsons.get_str(s, "lyric_id", "")
+        if lyricid == "" { lyricid = sid }
+
+        // 歌手是**数组** ⇒ 拼成 "/" 分隔的一串（与酷狗 / QQ 的行口径一致 ✓）
+        string artist = ""
+        var ar = s["artist"]
+        if ar is Array {
+            for ar to a {
+                string one = _str(a)
+                if one == "" { continue }
+                if artist != "" { artist = artist + "/" }
+                artist = artist + one
+            }
+        }
+
+        Array[string] row = []
+        row.add(makeid(usrc, sid, sign, lyricid))
+        row.add(jsons.get_str(s, "name", ""))
+        row.add(artist)
+        row.add(jsons.get_str(s, "album", ""))
+        row.add("0")        // 时长：接口**不给**（见头部 ①）⇒ 留 0，不编一个假的 ✓
+        row.add("")         // 格式：proberow 取到直链后回填 ✓
+        row.add("")         // 大小文本：同上
+        row.add("0")        // 字节数：同上
+        row.add("yinyueku")
+        row.add("")         // 直链（第 10 项）：proberow 补 —— 见 dl_engine.F_URL
+        rows.add(row)
+    }
+    return rows
+}
+
+// 对**一行**补 直链 / 格式 / 体积（原地改；拿不到就保持原样 ⇒ 该行不进结果表 ✓）
+//   为什么从 searchrows 里拧出来：每首 2 个请求（取链 + HEAD）⇒ 交给 dl_engine.probe_rows 并行 ✓
+export func proberow(HttpClient client, Array[string] row) {
+    if srow.rowext(row) != "" { return }        // 已经有格式 ⇒ 前面已补过，不重复发请求 ✓
+    string link = getdirecturl(client, srow.rowid(row))
+    if link == "" { return }
+    row[srow.F_URL] = link
+    string ext = extfromurl(link)
+    if ext != "" { row[srow.F_EXT] = ext }
+    int n = thirdparty.remotelen(client, link)
+    if n > 0 {
+        row[srow.F_BYTES] = _str(n)
+        row[srow.F_SIZETEXT] = srow.fmtsize(n)
+    }
+}
+
+// ==================== ② 取直链 ====================
+// songid = 复合 id（`source#id#sign#lyric_id`，见头部 ②）
+// 返回空串 = 拿不到（付费 / 版权 / 签名过期 / 服务端抽风）⇒ 引擎报"取直链失败" ✓
+export func getdirecturl(HttpClient client, string songid): string {
+    if songid == "" { return "" }
+    Array[string] parts = parseid(songid)
+    string usrc = parts[0]
+    string sid = parts[1]
+    string sign = parts[2]
+    if usrc == "" or sid == "" { return "" }
+    Response resp = client.post(API, net.formEncode({"types": "url", "id": sid, "source": usrc, "sign": sign}))
+    if not resp.ok() { return "" }
+    return parseurl(resp.body)
+}
+
+// 取链响应 → 直链（**纯函数** ⇒ 离线金标可测 ✓）
+export func parseurl(string body): string {
+    string text = body
+    var root = jsons.decode(text) as Dict[string, any]
+    if root == null {
+        // 极少数情况响应就是**裸链接**（不带 JSON 壳）⇒ 也认（同为 http 判据 ✓）
+        string raw = text.trim()
+        if raw.starts_with("http") { return raw }
+        return ""
+    }
+    string link = jsons.get_str(root, "url", "").trim()
+    // ⚠ 判据是**真的 http 链**（接口失败时可能回 ""、也可能是 `"None"` 这种占位串 ⇒ 一并挡掉 ✓）
+    if not link.starts_with("http") { return "" }
+    return link
+}

@@ -1,0 +1,172 @@
+// test_yinyueku.leno — 音乐库（yinyueku.cn）配方的**离线回归**（纯逻辑、不需要网络 ✓）
+//
+// 为什么值得单独有它：本源的"取直链"要三样东西（source + id + sign），而引擎只把 F_ID 原样
+//   传回来 ⇒ 那三样只能**拼进 id**（`source#id#sign#lyric_id`，见 yinyueku_core 头部 ②）。
+//   拼/拆一旦错位，表现是"取直链失败"（服务端只会回空），排查起来与网络故障长得一样 ✗
+//   ⇒ 拼拆公式、响应解析、扩展名判定全部钉在这里 ✓
+// 样本：2026-10-09 实测的真实响应**原样**贴回来（搜索 2 条 / 取链 1 条 ✓）
+// 跑：build\leno.exe test\test_yinyueku.leno
+import strings
+import "../yinyueku_core.leno" as yyk
+import "../songrow.leno" as srow
+
+int passed = 0
+int failed = 0
+
+func check(string name, bool ok) {
+    if ok {
+        passed = passed + 1
+        print("  PASS ✓ " + name)
+    } else {
+        failed = failed + 1
+        print("  FAIL ✗ " + name)
+    }
+}
+
+func checkeq(string name, string got, string want) {
+    bool ok = got == want
+    check(name, ok)
+    if not ok {
+        print("       got  = " + got)
+        print("       want = " + want)
+    }
+}
+
+func checkn(string name, int got, int want) {
+    bool ok = got == want
+    check(name, ok)
+    if not ok {
+        print("       got  = " + _str(got))
+        print("       want = " + _str(want))
+    }
+}
+
+// id 会被拿去做**试听临时文件名**（`leno_preview_<F_ID>.<ext>` ✓ 见 musicdl_gui.previewRow）
+//   ⇒ 里面一个 Windows 非法字符都不能有（否则试听静默失败 ✗）
+func has_illegal(string s): bool {
+    Array[string] bad = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|", " "]
+    for bad to c {
+        if strings.find(s, c) >= 0 { return true }
+    }
+    return false
+}
+
+// 真实搜索响应（2 条：第一条 3 个歌手、第二条 3 个歌手；lyric_id 与 id 同值）
+func search_body(): string {
+    string b = "[{\"id\":509781655,\"name\":\"想你就写信 (Live)\",\"artist\":[\"周杰伦\",\"李硕\",\"张鑫\"],"
+    b = b + "\"album\":\"中国新歌声第二季 第13期\",\"pic_id\":\"109951163038292176\",\"url_id\":509781655,"
+    b = b + "\"lyric_id\":509781655,\"source\":\"netease\",\"sign\":\"50.lE0OubB4Io\"},"
+    b = b + "{\"id\":5257138,\"name\":\"屋顶\",\"artist\":[\"周杰伦\",\"温岚\",\"吴宗宪\"],"
+    b = b + "\"album\":\"男女情歌对唱冠军全记录\",\"pic_id\":\"109951165671182684\",\"url_id\":5257138,"
+    b = b + "\"lyric_id\":5257138,\"source\":\"netease\",\"sign\":\"86iypIrrjErTo\"}]"
+    return b
+}
+
+// 真实取链响应（网易 CDN 的 mp3，带 `vuutv` 签名 ⇒ 里面就有 `/` 与 `+` ✓）
+func url_body(): string {
+    string b = "{\"url\":\"https://m801.music.126.net/20261009191651/2db185af10c54cf562bee62c8cfb674f/"
+    b = b + "jdymusic/obj/wo3DlMOGwrbDjj7DisKw/9444693488/94b2/45cb/21d6/9e34cbd9902ee8a917e6d0781557b94e.mp3"
+    b = b + "?vuutv=AqgoBtBo130PJIh2mzRzCcLn/GSFbudg5gmzKPz7lAuUVZn0Sjo8i9kHpNQRgvgNpn7T72JX+12iDgPN7hzlcYWNT/dRPrxbMCIX5vCLzLM=\"}"
+    return b
+}
+
+main() {
+    print("=== 音乐库（yinyueku.cn）配方回归 ===")
+
+    // ① 复合 id 的**拼**（取直链全靠它 ⇒ 拼错整个源就废了 ✗）
+    checkeq("makeid 整串", yyk.makeid("netease", "5257138", "86iypIrrjErTo", "5257138"),
+        "netease#5257138#86iypIrrjErTo#5257138")
+    string cid = yyk.makeid("netease", "509781655", "50.lE0OubB4Io", "509781655")
+    check("复合 id 不含 Windows 非法字符 / 空格", not has_illegal(cid))
+
+    // ② 复合 id 的**拆**（四段原样回来 ✓）
+    Array[string] p = yyk.parseid("netease#5257138#86iypIrrjErTo#5257138")
+    checkn("parseid 段数", p.len(), 4)
+    checkeq("parseid source", p[0], "netease")
+    checkeq("parseid id", p[1], "5257138")
+    checkeq("parseid sign", p[2], "86iypIrrjErTo")
+    checkeq("parseid lyric_id", p[3], "5257138")
+
+    // ③ 脏输入 ⇒ **安全失败**（给足四段、缺的补空串；不抛异常 ✗ 别让下载线程进 error 态）
+    Array[string] p2 = yyk.parseid("netease#5257138")
+    checkn("段数不足仍给四段", p2.len(), 4)
+    checkeq("段数不足 ⇒ sign 空", p2[2], "")
+    checkeq("段数不足 ⇒ lyric_id 空", p2[3], "")
+    Array[string] p3 = yyk.parseid("")
+    checkn("空 id 也给四段", p3.len(), 4)
+    checkeq("空 id ⇒ source 空", p3[0], "")
+    Array[string] p4 = yyk.parseid("netease#")
+    checkeq("尾段为空 ⇒ id 空", p4[1], "")
+
+    // ④ 搜索响应 → 行（顶层是**数组**，不是 {"data":[…]} 那种壳 ✓）
+    Array[Array[string]] rows = yyk.parsesearch(search_body())
+    checkn("解析出 2 行", rows.len(), 2)
+    if rows.len() == 2 {
+        Array[string] r0 = rows[0]
+        checkn("行段数 = 10（字段契约 ✓）", r0.len(), 10)
+        checkeq("第 0 行 id（复合）", srow.rowid(r0), "netease#509781655#50.lE0OubB4Io#509781655")
+        checkeq("第 0 行 歌名", srow.rowname(r0), "想你就写信 (Live)")
+        checkeq("第 0 行 歌手（数组拼成 / ）", srow.rowartist(r0), "周杰伦/李硕/张鑫")
+        checkeq("第 0 行 专辑", srow.rowalbum(r0), "中国新歌声第二季 第13期")
+        checkeq("第 0 行 时长（接口不给 ⇒ 0）", srow.rowduration(r0), "0")
+        checkeq("第 0 行 格式（留给 proberow 补）", srow.rowext(r0), "")
+        checkeq("第 0 行 字节数（同上）", srow.rowbytes_text(r0), "0")
+        checkeq("第 0 行 音源标记", srow.rowsrc(r0), "yinyueku")
+        checkeq("第 0 行 直链（同上）", srow.rowurl(r0), "")
+        check("第 0 行此时**不算**有体积（= 下不了 ⇒ 等阶段 B 补 ✓）", not srow.rowhas_size(r0))
+        checkeq("第 1 行 id（复合）", srow.rowid(rows[1]), "netease#5257138#86iypIrrjErTo#5257138")
+    }
+
+    // ⑤ 缺 lyric_id ⇒ 回落成 id 本身（接口分两栏给，但值通常相同 ⇒ 缺了也别整行丢掉 ✓）
+    string no_lyricid = "[{\"id\":7,\"name\":\"x\",\"artist\":[\"a\"],\"album\":\"b\",\"source\":\"kugou\",\"sign\":\"s\"}]"
+    Array[Array[string]] rows2 = yyk.parsesearch(no_lyricid)
+    checkn("缺 lyric_id 仍成行", rows2.len(), 1)
+    if rows2.len() == 1 {
+        checkeq("缺 lyric_id ⇒ 用 id 兜底", srow.rowid(rows2[0]), "kugou#7#s#7")
+    }
+
+    // ⑥ 缺 source 的项**丢掉**（拼不出复合 id ⇒ 取链必然失败 ✗ 不如别进列表）
+    string no_source = "[{\"id\":7,\"name\":\"x\",\"sign\":\"s\"},{\"id\":9,\"name\":\"y\",\"source\":\"netease\",\"sign\":\"t\"}]"
+    Array[Array[string]] rows3 = yyk.parsesearch(no_source)
+    checkn("缺 source 的项被丢掉", rows3.len(), 1)
+
+    // ⑦ 脏响应一律空数组（不抛 ✓）
+    checkn("空数组响应", yyk.parsesearch("[]").len(), 0)
+    checkn("对象响应（不是数组）", yyk.parsesearch("{}").len(), 0)
+    checkn("非 JSON 响应", yyk.parsesearch("<html>502</html>").len(), 0)
+
+    // ⑧ 取链响应 → 直链
+    checkeq("parseurl 真实响应", yyk.parseurl(url_body()),
+        "https://m801.music.126.net/20261009191651/2db185af10c54cf562bee62c8cfb674f/jdymusic/obj/wo3DlMOGwrbDjj7DisKw/9444693488/94b2/45cb/21d6/9e34cbd9902ee8a917e6d0781557b94e.mp3"
+        + "?vuutv=AqgoBtBo130PJIh2mzRzCcLn/GSFbudg5gmzKPz7lAuUVZn0Sjo8i9kHpNQRgvgNpn7T72JX+12iDgPN7hzlcYWNT/dRPrxbMCIX5vCLzLM=")
+    checkeq("空 url ⇒ 空串", yyk.parseurl("{\"url\":\"\"}"), "")
+    checkeq("url = None（字符串占位）⇒ 空串", yyk.parseurl("{\"url\":\"None\"}"), "")
+    checkeq("没有 url 栏 ⇒ 空串", yyk.parseurl("{\"code\":1}"), "")
+    checkeq("非 JSON ⇒ 空串", yyk.parseurl("<html>403</html>"), "")
+    checkeq("裸链接（不带壳）也认", yyk.parseurl("http://a.com/x.mp3"), "http://a.com/x.mp3")
+
+    // ⑨ 真实响应是**转义形态**（PHP `json_encode` 的默认口径 ✓）⇒ 走一遍完整链路
+    //   ⚠ 这条同时钉住**语言侧**：`jsons.decode` 必须支持 `\uXXXX`（2026-10-09 修；
+    //     旧实现只写 ASCII 码点 ⇒ 中文被静默丢掉 ⇒ 这 4 项会红 ✗ 见 assert/test_json.leno 测试9 ✓）
+    string esc = "[{\"id\":5257138,\"name\":\"\\u5c4b\\u9876\",\"artist\":[\"\\u5468\\u6770\\u4f26\",\"\\u6e29\\u5c9a\"],"
+    esc = esc + "\"album\":\"\\u7537\\u5973\\u60c5\\u6b4c\",\"lyric_id\":5257138,"
+    esc = esc + "\"source\":\"netease\",\"sign\":\"86iypIrrjErTo\"}]"
+    Array[Array[string]] re = yyk.parsesearch(esc)
+    checkn("转义响应也成行", re.len(), 1)
+    if re.len() == 1 {
+        checkeq("转义 ⇒ 歌名", srow.rowname(re[0]), "屋顶")
+        checkeq("转义 ⇒ 歌手（/ 拼接）", srow.rowartist(re[0]), "周杰伦/温岚")
+        checkeq("转义 ⇒ 专辑", srow.rowalbum(re[0]), "男女情歌")
+        checkeq("转义 ⇒ id 里的 source/sign 原样", srow.rowid(re[0]), "netease#5257138#86iypIrrjErTo#5257138")
+    }
+
+    // ⑪ 直链 → 扩展名（接口不给档位 ⇒ 这是唯一可信来源 ✓）
+    checkeq("mp3（带 query）", yyk.extfromurl("https://x/y.mp3?vuutv=abc"), "mp3")
+    checkeq("flac", yyk.extfromurl("https://x/y.FLAC"), "flac")
+    checkeq("m4a", yyk.extfromurl("http://x/a/b.m4a"), "m4a")
+    checkeq("认不出 ⇒ 空串", yyk.extfromurl("https://x/noext"), "")
+
+    print("")
+    print("通过 " + _str(passed) + " 项，失败 " + _str(failed) + " 项")
+    print(if failed == 0 then "=== 全部通过 ===" else "=== 有失败 ✗ ===")
+}
