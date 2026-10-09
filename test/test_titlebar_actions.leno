@@ -32,6 +32,8 @@ main() {
     assert_eq(tb.is_builtin_icon("settings"), true)
     assert_eq(tb.is_builtin_icon("menu"), true)
     assert_eq(tb.is_builtin_icon("sun"), true)
+    // "download"（2026-10-09 框架新增）：本应用标题栏的下载入口就靠它 ⇒ 钉住不让它退化 ✓
+    assert_eq(tb.is_builtin_icon("download"), true)
     assert_eq(tb.is_builtin_icon("images/x.png"), false)
     assert_eq(tb.is_builtin_icon(""), false)
 

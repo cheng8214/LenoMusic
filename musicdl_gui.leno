@@ -179,7 +179,7 @@ struct MusicDlApp {
     // ===== 设置（dl_settings.leno 纯逻辑 + dl_settings_win.leno 弹窗 ✓）=====
     //   `workers` = 并行下载线程数（**多首歌同时下**）；启动时读一次，改设置后立刻重读 ✓
     //   入口是**标题栏右侧**的两个动作按钮：`download`（下载窗口）与 `settings`（设置）✓
-    //   图标用应用自带的 images/download.png、images/setting.png（路径见 setupUI ✓）
+    //   图标用**框架内置矢量名** "download" / "settings"（吃 `icon_color` ⇒ 明暗标题栏都看得见 ✓）
     DlSettings cfg
 
     // ===== 页签（2026-10-09 新增 ✓ 参考 leno_gui/应用/数据看板/dashboard.leno 的做法）=====
@@ -1191,8 +1191,10 @@ struct MusicDlApp {
 
     func setupUI() {
         // 标题栏右侧按钮组：**下载窗口入口** + **设置**（与最小化/最大化/关闭同一排 ✓）
-        // ★ 2026-10-07：改用应用自带图标 `images/download.png` / `images/setting.png`
-        //   ⚠ 三条都要记牢（前两条都是踩/文档里写着的）：
+        // ★ 2026-10-09：这两个按钮改用**框架内置矢量名**（`"download"` / `"settings"`）
+        //   —— 原先用应用自带 PNG（`images/download.png` / `setting.png`，是**给深色标题栏配的
+        //   纯白 glyph**）⇒ 标题栏改成浅色后它们直接"消失" ✗；矢量图标吃 `icon_color` ⇒ 永不白 ✓
+        // ★ 标题栏的 `title_icon`（应用 logo）与表格行图标**仍是 PNG**，所以下面三条仍要记牢：
         //     ① 路径必须是**绝对**的：标题栏把字符串**原样**交给 SDL_image ⇒ 相对路径跟着
         //        **进程 cwd** 走，换个工作目录启动就加载失败（画成一个小点 ✗）
         //     ② 读**随包资源**要用 `dirs.res_dir()`，**不能**用 `script_dir()` ✗ ——
@@ -1200,13 +1202,11 @@ struct MusicDlApp {
         //        （未打包时两者**完全一致** ⇒ 开发态照常 ✓ 见 docs/单文件打包使用指南.md §7）
         //     ③ 资源清单在本应用目录的 `resource.toml`（`[pack] resources = ["images/**"]` ✓）
         string imgDir = dirs.join(dirs.res_dir(), "images")
-        string iconDl = dirs.join(imgDir, "download.png")
-        string iconSet = dirs.join(imgDir, "setting.png")
         string iconApp = dirs.join(imgDir, "index.png")
         // 搜索结果每行"歌名前"的那个小音符（表格 `image_col` 用 ✓ 见 createTable / fillTable ✓）
         rowIcon = dirs.join(imgDir, "music.png")
         // 资源缺失时标题栏只会画个**小点、不报错** ⇒ 这里补一句明确警告（打包漏声明资源最常见 ✗）
-        if not files.exists(iconDl) or not files.exists(iconSet) or not files.exists(iconApp) {
+        if not files.exists(iconApp) or not files.exists(rowIcon) {
             print("[musicdl] 图标资源缺失：" + imgDir + "（打包请声明 resource.toml 的 [pack] resources ✓）\n")
         }
         if dlShot != "" { print("[musicdl] 图标目录（自检）：" + imgDir + "\n") }
@@ -1215,9 +1215,26 @@ struct MusicDlApp {
             // ★ 标题前的应用图标（2026-10-07 新增）：只有文字时标题前面空一块、观感差 ✗
             //   与文字**整体**居中/左对齐，尺寸比窗口按钮图标略大一点（18 vs 16 ✓）
             title_icon: iconApp, title_icon_size: 18,
+            // ★ 浅灰标题栏（2026-10-09 改 ✓）：标题栏**默认配色是深色**（#262830），
+            //   而本应用整体是浅色（页面 #F0F0F5 / 页签 #F5F6F8，`setTheme(lightTheme())` ✓）
+            //   ⇒ 头顶压着一整块黑、割裂感强 ✗ ⇒ 改成浅灰工具条 + 深字/深图标 + 底部发丝线 ✓
+            //   ⚠ 用浅灰（#E8E8EE，浅色主题的 bgAlt）而不是纯白：白条**比页面还亮**，反而"浮"起来 ✗；
+            //     浅灰正好比页面(#F0F0F5)深一档 ⇒ 一条明确的"工具条"，也是 Win11/macOS 的做法 ✓
+            //   ⚠ 各键都是**框架现成的入口**（见 sdl_titlebar 的 _opts_keys ✓）
+            bg_color: #E8E8EEFF,
+            text_color: #1E1E28FF,          // 浅色主题的主文字色（与页面同源 ✓）
+            //   ⚠ `icon_color` **只管矢量图标**（窗口三键 + 内置矢量动作）——图片图标是按原色画的 ✗
+            //     （实测：download.png/setting.png 是**纯白** glyph，放浅色栏上直接"消失" ✗）
+            //     ⇒ 两个动作按钮改用**内置矢量名**（"download"/"settings"）⇒ 跟着这个色走、永不会白 ✓
+            icon_color: #3C414BFF,          // 深灰而不纯黑，浅底上更耐看 ✓
+            separator_color: #D5D8DFFF,     // 发丝分隔线（比底色深一档 ⇒ 与页面分开 ✓）
+            hover_color: #D9DBE3FF,         // 悬停：再深一档灰 ✓
+            //   关闭键悬停：用**浅红**而不是深红 —— 图标色是深的，压在深红上会糊成一片 ✗
+            //   （框架的关闭图标不随悬停换色 ⇒ 浅红底 + 深 ✕ 才看得清 ✓）
+            close_hover_color: #FDE7E9FF,
             actions: [
-                {id: "download", icon: iconDl, tip: "下载勾选的歌（打开下载窗口；已开着就切到前台）"},
-                {id: "settings", icon: iconSet, tip: "设置：并行下载线程数、默认是否带歌词"}
+                {id: "download", icon: "download", tip: "下载勾选的歌（打开下载窗口；已开着就切到前台）"},
+                {id: "settings", icon: "settings", tip: "设置：并行下载线程数、默认是否带歌词"}
             ]
         })
         titleBar.on_action(func(string id) {
@@ -1233,7 +1250,9 @@ struct MusicDlApp {
         // ---- 搜索页（页 0）的内容容器 ----
         //   ★ 2026-10-09：整页交给一个 VBox + `tab.setPageLayout(0, page0)`⇒ **页内也布局驱动**
         //     （窗口缩放时页里跟着重排 ✓ 不用一行绝对坐标；做法照数据看板 dashboard.leno ✓）
-        var page0 = SDL3.createVBox({padX: 0, padY: 0, spacing: 0})
+        //   ⚠ `spacing` 别给 0：三行控件行的高（34/30/32）里控件自己就占了 32/30/32 ⇒ 行间只剩
+        //     2~4px、"操作行 → 表格"更是**只有 1px**（实测 ✓ 表格像贴在按钮上 ✗）⇒ 统一给 6 ✓
+        var page0 = SDL3.createVBox({padX: 0, padY: 0, spacing: 6})
 
         // ---- 搜索行 ----
         var row1 = SDL3.createHBox({h: 34, padX: 0, padY: 0, spacing: 8})
@@ -1319,7 +1338,11 @@ struct MusicDlApp {
         // 分组间隔：本来想用一条竖向 Separator，但**实测 Separator 放进 HBox 里不渲染**
         //   （thickness/color/alpha/basis/align 各组合都试过，仍不可见 ⇒ 疑似布局没给它非零高度）
         //   ⇒ 改用"嵌套 HBox + 左内边距"制造视觉间隔，效果等价且可靠 ✓
-        var selGroup = SDL3.createHBox({h: 32, padX: 14, padY: 0, spacing: 8})
+        //   ★ **嵌套容器必须显式给 w**（2026-10-09 ✓ 实测踩到）：父容器 `add()` 抓的是子的
+        //     `get_w()`，而 HBox 的 `w` 默认 **300**（不是内容宽 ✗）⇒ 不给就白占 300-176=124px，
+        //     把它后面的「已选 N / M 首」顶到**行中间**（左侧本该 8px，实测 148px ✗）
+        //     （176 = padX14 + 全选70 + spacing8 + 全不选70 + padX14 ✓）
+        var selGroup = SDL3.createHBox({w: 176, h: 32, padX: 14, padY: 0, spacing: 8})
         selAllBtn = SDL3.createButton({w: 70, h: 30, text: "全选", font_size: 13})
         selAllBtn.on_click(func() { table.check_all(); updateCount(); SDL3.markFrameRedraw() })
         selGroup.add(selAllBtn, {grow: 0, shrink: 0, basis: 70, align: 3})
@@ -1327,17 +1350,25 @@ struct MusicDlApp {
         selNoneBtn.on_click(func() { table.uncheck_all(); updateCount(); SDL3.markFrameRedraw() })
         selGroup.add(selNoneBtn, {grow: 0, shrink: 0, basis: 70, align: 3})
         row3.add(selGroup, {grow: 0, shrink: 0, align: 3})
+        //   ⚠ 这个统计标签**别给 grow:1**（2026-10-09）：grow:1 让它的盒子吃掉整行剩余宽度，
+        //     而 Label 的 `align` 是**锚点**语义（`drawX = x`，右对齐会画到盒子左边界去 ✗
+        //     见 sdl_label 的"普通绘制"分支）⇒ 盒子一大，文字就**浮在行中间**（实测 x=793，
+        //     行尾白留 180px ✗）。改成紧跟「全不选」当一句**说明**：定长时 75px、变长时往右长
+        //     （右边本来就是空的 ✓）⇒ 既不浮，也绝不会被裁 ✓
         countLbl = SDL3.createLabel({text: "已选 0 / 0 首", font_size: 13})
-        row3.add(countLbl, {grow: 1, shrink: 1, align: 2})
+        row3.add(countLbl, {grow: 0, shrink: 1, align: 2})
         page0.add(row3, {grow: 0, shrink: 0, align: 3})
 
         // ---- 结果表格 ----
         // 第 0 列是复选框列（表头可全选/全不选）；其余 6 列与 dl_engine 的歌曲行字段对应
         table = SDL3.createTable({
             // ★ 2026-10-08：末尾加「来源」（多音源搜索结果里，同一首歌会有多行 ⇒ 靠它分辨是哪家 ✓）
-            //   宽度：总 986px（窗口 1060）⇒ 加 90px 后把「专辑」从 200 压到 160，正好装下 ✓
+            //   ⚠ 列宽**必须按"表格真正拿到的宽度"算**（2026-10-09 校正）：窗口 1060 − 根容器 24 −
+            //     侧栏 104 = **931**（实测表格区就是 117..1047 ✓）。旧账写「总 986」是**超预算 55px**
+            //     的（侧栏 80 那会儿也超 30）⇒ 表现是**最右边「来源」被裁掉半截** ✗（加宽侧栏后更明显）
+            //     现在合计 **928 ≤ 931** ⇒ 8 列全可见 ✓（改列宽时请照这个预算来 ✓）
             headers: ["", "歌名", "歌手", "专辑", "时长", "格式", "大小", "来源"],
-            col_widths: [40.0, 300.0, 150.0, 160.0, 70.0, 66.0, 110.0, 90.0],
+            col_widths: [40.0, 280.0, 140.0, 140.0, 66.0, 66.0, 106.0, 90.0],
             aligns: [1, 0, 0, 0, 1, 1, 2, 1],
             header_aligns: [1, 0, 0, 0, 1, 1, 2, 1],
             check_col: 0,
@@ -1380,25 +1411,48 @@ struct MusicDlApp {
                //   ⚠ bg_color 必须显式给：Tab 内容区用自己的 _bgColor 打底（默认取主题色 ⇒ 与页面浅灰
               //     不一致，会看到一条明显色带 ✗）
                 // ---- 左侧导航 + 页签内容 ----
-                        //   ⚠ **侧栏必须窄（68px）**：搜索页表格 986px 正好等于窗口 1060 扣掉边距后的宽度
-                        //     ⇒ 侧栏每宽 1px 都从表格那里扣（dashboard 那种 190px 文字侧栏会让表格
-                        //     出横向滚动条 ✗ —— 这里的横向预算和仪表盘完全不同）
-                        var side = SDL3.createVBox({padX: 0, padY: 16, spacing: 6})
-                        navSearch = SDL3.createButton({w: 68, h: 40, text: "搜索", font_size: 13,
-  // ⚠ `background` 是**开关**（true/false），颜色要另外给 `bg_color` ⇒ 传颜色给它会被警告并按 true 处理 ✗
-         background: true, bg_color: #F2D33CFF, text_color: #1F1F1FFF,
-    image_path: dirs.join(imgDir, "music.png"), image_size: 18, image_gap: 2, image_tint: #1F1F1FFF})
-                        navSearch.set_tip("搜索页：关键词 → 勾选 → 下载")
-                        navSearch.on_click(func() { tab.set_active(0) })
-                        side.add(navSearch, {grow: 0, shrink: 0, basis: 68, align: 1})
-                        navBang = SDL3.createButton({w: 68, h: 40, text: "榜单", font_size: 13,
-                               background: true, bg_color: #FFFFFFFF, text_color: #5A5A5AFF,
-                           image_path: dirs.join(imgDir, "list.png"), image_size: 18, image_gap: 2, image_tint: #5A5A5AFF})
-                        navBang.set_tip("榜单页：各站排行榜")
-                        navBang.on_click(func() { tab.set_active(1) })
-                   side.add(navBang, {grow: 0, shrink: 0, basis: 68, align: 1})
-                        // 弹性空隙放最后 ⇒ 两个按钮被顶到**上面**（下面留白给以后加"下载队列 / 设置"入口 ✓）
-                        side.add(SDL3.createLabel({text: ""}), {grow: 1, shrink: 0, align: 1})
+                        //   ⚠ **侧栏要窄**：搜索页表格自然宽 986px 已经超过窗口 1060 能给的宽度
+                        //     ⇒ 侧栏每宽 1px 都从表格那里扣（dashboard 那种 190px 文字侧栏更不行 ✗
+                        //     —— 这里的横向预算和仪表盘完全不同）
+                        //   ★ 侧栏 = **按钮宽 + 12**，不是按钮宽本身（2026-10-09 修「两个入口看着没居中」✓）：
+                        //     根容器有 padX=12 ⇒ 按钮左边天然有 12px 空白；侧栏若只给按钮宽，按钮**右**
+                        //     边就是 0（紧贴页签）⇒ 左 12 / 右 0 看着整组偏左 ✗（用户截图指的就是它 ✓）
+                        //     现在侧栏做 12 + 按钮 + 12（左侧那 12 由根容器给 ⇒ 这里只补右侧 12 ✓）：
+                        //     按钮 92 ⇒ 侧栏 104。按钮在侧栏里 **align:0 左贴**（居中反而会变成左 18 / 右 6 ✗
+                        //     见 sdl_layout 的 VBox `align:1` 是"在侧栏内居中"，不是"相对窗口居中" ✓）
+                        //     ⇒ 按钮左右各 12px 空白，视觉居中 ✓（代价：页签窄，无妨 ✓）
+                        //   ⚠ Button 的两个坑（都实测踩过）：
+                            //     ① `background` 是**开关**（true/false），颜色要另外给 `bg_color`
+                                //        —— 传颜色给它会打 `[ui] 警告` 并按 true 处理（按钮停在默认 primary 蓝 ✗）
+                                //     ② Button 的**默认底色就是 primary 蓝** ⇒ 启动必须主动同步一次选中态
+                              //        （`tab.on_change` 只在切页时回调，不主动调一次开局就是两个蓝按钮 ✗）
+                        //   ★ 尺寸（2026-10-09 调大 ✓ 原先又扁又小）：**92 × 36**、图标 18、字号 14
+                        //     ⚠ 两处旧坑一起修掉了：
+                        //       ① `h:28` 被 `add(..., basis:24)` **改写成 24**（布局用 basis 当主轴尺寸 ✓）
+                        //          ⇒ 按钮其实只有 24 高、比看上去还扁 ✗ ⇒ 现在 h 与 basis **同写 36** ✓
+                        //       ② 框架里图标尺寸被 `h - 2*pad`（pad=6）**钳位** ⇒ h=24 时图标只能是 12px
+                        //          （给了 image_size:18 也没用 ✗）⇒ h=36 时 36-12=24 > 18 ⇒ 图标真的是 18 ✓
+                        //     ⚠ **变宽就必须同时修框架的"整块居中"**（2026-10-09 ✓ 已修 sdl_button）：
+                        //       框架原先只把**文字**在"图标右边的剩余区"里居中 ⇒ 96 宽时左 6 / 右 30 ✗，
+                        //       越宽越偏左（所以"变长"直接卡在这，不是单纯把 w 写大就完事 ✗）
+                        //       框架改成 [图标 + 间距 + 文字] 整块居中后，本处只要写 w 即可 ✓
+                        var side = SDL3.createVBox({padX: 0, padY: 16, spacing: 8})
+                                                navSearch = SDL3.createButton({w: 92, h: 36, text: "搜索", font_size: 14, padding: 0,
+                                      background: true, bg_color: #F2D33CFF, text_color: #1F1F1FFF,
+                                image_path: dirs.join(imgDir, "music.png"), image_size: 18, image_gap: 8,
+                                image_tint: #1F1F1FFF})
+                                navSearch.set_tip("搜索页：关键词 → 勾选 → 下载")
+                             navSearch.on_click(func() { tab.set_active(0) })
+                           side.add(navSearch, {grow: 0, shrink: 0, basis: 36, align: 0})
+                                         navBang = SDL3.createButton({w: 92, h: 36, text: "榜单", font_size: 14, padding: 0,
+                                background: true, bg_color: #FFFFFFFF, text_color: #5A5A5AFF,
+                           image_path: dirs.join(imgDir, "list.png"), image_size: 18, image_gap: 8,
+                            image_tint: #5A5A5AFF})
+                              navBang.set_tip("榜单页：各站排行榜")
+                                    navBang.on_click(func() { tab.set_active(1) })
+                                side.add(navBang, {grow: 0, shrink: 0, basis: 36, align: 0})
+                                  // 弹性空隙放最后 ⇒ 两个菜单项被顶到**上面**（下面留白给以后加"下载队列 / 设置"入口 ✓）
+                              side.add(SDL3.createLabel({text: ""}), {grow: 1, shrink: 0, align: 1})
 
                         tab = SDL3.createTabControl({x: 0, y: 0, w: 992, h: 520,
                             tabs: ["搜索", "榜单"], active: 0, show_header: false, border: false,
@@ -1409,7 +1463,7 @@ struct MusicDlApp {
 
                         // 侧栏 + 页签内容并排（TabControl 吃剩余宽度 ⇒ 窗口缩放时页内跟着重排 ✓）
                         var body = SDL3.createHBox({padX: 0, padY: 0, spacing: 0})
-                        body.add(side, {grow: 0, shrink: 0, basis: 68, align: 3})
+                        body.add(side, {grow: 0, shrink: 0, basis: 104, align: 3})
                         body.add(tab, {grow: 1, shrink: 1, align: 3})
                 root.add(body, {grow: 1, shrink: 1, align: 3})
 
@@ -1568,7 +1622,7 @@ struct MusicDlApp {
     // ==================== 榜单页（页 1）====================
     //   页内也用布局驱动（setPageLayout(1, page1) ⇒ 窗口缩放跟着重排 ✓ 照 dashboard 的做法）
     func buildBangPage() {
-        var page1 = SDL3.createVBox({padX: 0, padY: 0, spacing: 0})
+        var page1 = SDL3.createVBox({padX: 0, padY: 0, spacing: 6})    // 与搜索页同一个行距口径 ✓
 
         // ---- 工具行：音源 + 榜单 + 重新加载 ----
         var brow = SDL3.createHBox({h: 32, padX: 0, padY: 0, spacing: 8})
