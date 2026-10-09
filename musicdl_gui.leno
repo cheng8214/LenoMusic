@@ -49,6 +49,7 @@ import "./songrow.leno" as srow             // 行字段的**具名存取**（�
 import "./dl_window.leno" as dlw
 import "./dl_settings.leno" as dlset        // 设置：读/写/钳位（纯逻辑 ⇒ 能被 test/ 单测 ✓）
 import "./dl_settings_win.leno" as dlswin    // "设置"弹窗（SDL3）—— 标题栏右侧 ⚙ 打开 ✓
+import "./dl_about_win.leno" as dlabout     // "关于"弹窗（SDL3）—— 标题栏右侧那个 ⓘ 打开 ✓
 import "./player_bar.leno" as pb             // 播放条（嵌在主界面里 ✓ 见它的文件头）
 
 use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, CheckBox, Table, ProgressBar, HBox, VBox, Edit, SpinBox, Separator, Scancode, ComboBox, ImageView, TabControl)
@@ -282,7 +283,8 @@ struct MusicDlApp {
     //   为什么要有：一次搜回来常混着 flac / mp3 / aac；只想下某种后缀时，原先只能一行行取消勾选 ✗
     //   ★ 作用范围 = **批量下载**：
     //     · 「下载勾选」/「下载选中行」⇒ 过滤 ✓
-    //     · 右键「下载这一首」/ 双击某行 ⇒ 是**显式点名单曲** ⇒ 不拦 ✓（拦了会像"点了没反应"）
+    //     · 右键「下载这一首」⇒ 是**显式点名单曲** ⇒ 不拦 ✓（拦了会像"点了没反应"）
+    //     · 双击 = 试听（2026-10-09 改 ✓）⇒ 不碰下载 ⇒ 与这里无关 ✓
     //   ⚠ 只**读** `fmtBox`（用户选的 ✓）；tick 里绝不 set_*（`set_selected` 会触发 on_change ✗
     //      —— 与音量滑块同一条纪律 ✓）
 
@@ -547,7 +549,9 @@ struct MusicDlApp {
             int dt = _int(times.ms()) - searchT0
             print("[dsearch] 命中 " + _str(rows.len()) + " 首 / 隐藏 " + _str(searchHidden) + " 首 / 耗时 " + _str(dt) + " ms\n")
             gAutoSearch = ""
-            SDL3.requestExit()
+            // ⚠ 配了双击自检就先**别退**（`DSEARCH=… DDBL=1`）：行刚进表、本拍马上要退 ⇒ 注入根本没机会 ✗
+            //   由双击自检那道钩子在自己断言完再 requestExit ✓（见 gDblTarget 注释 ✓）
+            if gDblStep == 0 { SDL3.requestExit() }
         }
         SDL3.markFrameRedraw()
     }
@@ -559,6 +563,11 @@ struct MusicDlApp {
         pollBangMenu()
         pollBang()
         // 退出路径自检（见 gExitTicks 注释 ✓）
+        // 「关于」弹窗自检（见 gAboutTick 注释 ✓）：第 N 拍自动打开它 ✓
+        if gAboutTick > 0 {
+            gAboutTick = gAboutTick - 1
+            if gAboutTick == 0 { onAbout() }
+        }
         // 悬停自检（见 gHoverTick 注释 ✓）：把指针注入到播放键上 ✓
         if gHoverTick > 0 {
             gHoverTick = gHoverTick - 1
@@ -684,6 +693,54 @@ struct MusicDlApp {
                           + "：目标=1 ⇒ buildMenu(menuCtx=" + _str(gCtxSeen) + ", row=" + _str(gCtxRowSeen) + ")\n")
                 }
                 // ⚠ 开着 DSHOT 时**别抢着退**：让截图钩子先截到"菜单正开着"的样子 ✓（与 DHOVER 同一套 ✓）
+                if dlShot == "" { SDL3.requestExit() }
+            }
+        }
+        // 双击=试听 自检（见 gDblTarget 注释 ✓）：注入两次左键（框架按 400ms/10px 阈值判双击 ✓）
+        //   ⚠ 为什么必须有：这条改动是**改语义**（下载 → 试听），而"双击到底还有没有反应"光看代码
+        //     看不出来（框架的 dbl 判定在 mouseDown 里做、还要过复选框列 / 表头 / 列重排那几道闸 ✓）
+        if gDblStep > 0 {
+            int dblSt = gDblStep
+            gDblStep = gDblStep + 1
+            if dblSt == 1 {
+                // 先等"有行"（联网 ✓）：表空了就点不到行 ⇒ 停在 1 重试（与 gCtxStep 同一手法 ✓）
+                bool hasRow = songs.len() > 0
+                if gDblTarget == 2 { hasRow = bangSongs.len() > 0 }
+                if not hasRow {
+                    gDblStep = 1
+                    gDblWait = gDblWait + 1
+                    // ⚠ 不能无限等：接口被限流 / 关键词无匹配时表会一直空 ⇒ 约 36 秒后报"没等到行"收摊 ✓
+                    if gDblWait > 300 {
+                        print("[ddbl] **不通过**：等了 " + _str(gDblWait) + " 拍还没有行（搜索/榜单没回来）⇒ 没法注入\n")
+                        gDblStep = 0
+                        SDL3.requestExit()
+                    }
+                } else {
+                    Table dt = table
+                    if gDblTarget == 2 { dt = bangTable }
+                    int wid = win.getID()
+                    // 列宽：搜索表 [40,280,…] / 榜单表 [40,300,…] ⇒ x 偏 200 / 150 都稳落在「歌名」列 ✓
+                    // 行 y = 表头 30 + 行高 26 的中点 13（与 DCTX 目标 1 同一算法 ✓）
+                    float cx2 = dt.get_x() + 200.0
+                    float cy2 = dt.get_y() + 30.0 + 13.0
+                    SDL3.testMoveAt(wid, cx2, cy2)
+                    bool ok1 = SDL3.testClickAt(wid, cx2, cy2)
+                    bool ok2 = SDL3.testClickAt(wid, cx2, cy2)
+                    print("[ddbl] 注入双击到" + (if gDblTarget == 2 then "榜单表" else "搜索表")
+                          + "第 0 行 ok=" + _str(ok1 and ok2)
+                          + "  位置=" + _str(_int(cx2)) + "," + _str(_int(cy2)) + "\n")
+                }
+            } eif dblSt == 4 {
+                // 期望：起了**试听**（gPreviewCh + 记下的那一行 ✓），且**没**开下载窗口（这就是"改成播放" ✓）
+                bool ok = gPrevRow.len() > eng.F_ARTIST and gPreviewCh is Channel and dl == null
+                string what = ""
+                if gPrevRow.len() > eng.F_ARTIST { what = eng.songlabel(gPrevRow) }
+                print("[ddbl] " + (if ok then "通过" else "**不通过**")
+                      + "：目标=" + _str(gDblTarget) + " ⇒ 试听行=\"" + what + "\""
+                      + "  试听通道=" + _str(gPreviewCh is Channel)
+                      + "  下载窗口=" + _str(dl != null) + "（期望 false）"
+                      + "  状态栏=\"" + stateLbl.get_text() + "\"\n")
+                // ⚠ 试听线程已在跑 ⇒ 让它自己结束，这里只走正常退出（requestExit ✓）
                 if dlShot == "" { SDL3.requestExit() }
             }
         }
@@ -1095,7 +1152,7 @@ struct MusicDlApp {
 
     // ==================== 右键菜单 ====================
     //   ★ 2026-10-09：搜索表与榜单表**共用同一套菜单**（榜单表原先压根没接右键 ⇒ 切到榜单页
-    //     只能双击一首一首下、想"选中一批再下"没法做 ✗）。做法：只记"这次菜单落在**哪张表**上"，
+    //     只能一首一首来、想"选中一批再下"没法做 ✗）。做法：只记"这次菜单落在**哪张表**上"，
     //     下面三个访问器把"当前表 / 当前行数 / 当前第 i 行（那一首）"统一取出来
     //     ⇒ 菜单项与处理逻辑**零分支**，两个页面永远一致 ✓
     //   ⚠ 别想着"把行数组存成字段去引用另一张表"：那要靠数组的引用语义跨赋值，不好保证 ✗
@@ -1119,6 +1176,22 @@ struct MusicDlApp {
             if i >= 0 and i < ctx_len() { out.add(ctx_row(i)) }
         }
         return out
+    }
+
+    // ★ 双击某行 = **试听**（2026-10-09 改 ✓ 与右键「试听（同时后台下载整首）」**同一条入口** ✓）
+    //   为什么改：双击原先 = 「下载这一首」，但**下载**在界面上本就有两条更明确的路
+    //   （勾选后「下载勾选」/ 右键「下载这一首」✓），而"点了就想先听听"一直没快捷方式 ✗
+    //   ⇒ 把最顺手的双击给试听；想下载仍有右键与按钮 ✓（不是砍功能，是换更顺的分配 ✓）
+    //   ⚠ 与菜单同一取舍：**不套格式过滤**（点名单曲 ⇒ 拦了会像"点了没反应" ✗ 见 fmt 那一段 ✓）
+    //   ⚠ `ctxId`（0=搜索表 songs、1=榜单表 bangSongs）与 menuCtx 同口径，但**绝不写 menuCtx**
+    //     —— 那是右键菜单的字段，双击去动它会让"菜单落在哪张表"串味 ✗ ⇒ 这里只做分支 ✓
+    func previewRow(int ctxId, int row) {
+        if row < 0 { return }
+        if ctxId == 1 {
+            if row < bangSongs.len() { startPreview(bangSongs[row]) }
+        } else {
+            if row < songs.len() { startPreview(songs[row]) }
+        }
     }
 
     // 用这一行去别处搜：关键词 = "歌名 歌手"（歌手为空就只搜歌名 ✓）
@@ -1339,6 +1412,15 @@ struct MusicDlApp {
         }
     }
 
+    // 打开「ⓘ 关于」（标题栏最右那个）：版本 / 致谢 / 免责声明 ✓
+    //   · 纯展示 ⇒ 没有返回值、也不改任何状态（关掉就完事 ✓）
+    //   · 文案与致谢名单都在 dl_about_win.leno 顶部那两个常量里（要加人就加一行 ✓）
+    func onAbout() {
+        dlabout.show_about_window()
+        stateLbl.set_text("关于：版本 / 致谢 / 免责声明")
+        SDL3.markFrameRedraw()
+    }
+
     // ==================== UI 构建 ====================
 
     func buildSources() {
@@ -1388,9 +1470,14 @@ struct MusicDlApp {
         // ★ 侧栏两个入口的图标（2026-10-09 用户提供 ✓ 48×48 蓝色描边线性图标 + 透明底）
         string iconNavSearch = dirs.join(imgDir, "sousuo.png")
         string iconNavBang = dirs.join(imgDir, "bangdan.png")
+        // ★ 标题栏那个「关于」ⓘ（2026-10-09 用户提供 ✓ 群友「小半头砖」的素材 ⇒ 致谢里写着 ✓）
+        //   ⚠ 标题栏的动作按钮**图片图标不吃 `icon_color`**（按原色画 ✓ 见 sdl_titlebar）⇒
+        //     这张图是**深色** glyph，放浅灰标题栏上没问题 ✓（纯白的放上去会"消失" ✗ 前两个按钮
+        //     当初就是因此改用内置矢量名的 ✓）
+        string iconAbout = dirs.join(imgDir, "about.png")
         // 资源缺失时标题栏只会画个**小点、不报错** ⇒ 这里补一句明确警告（打包漏声明资源最常见 ✗）
-        //   ⚠ 四个都查：少任何一个都会在界面上"少一块"，但**不会报错** ⇒ 只能靠这句提醒 ✓
-        Array[string] needIcons = [iconApp, rowIcon, iconNavSearch, iconNavBang]
+        //   ⚠ 五个都查：少任何一个都会在界面上"少一块"，但**不会报错** ⇒ 只能靠这句提醒 ✓
+        Array[string] needIcons = [iconApp, rowIcon, iconNavSearch, iconNavBang, iconAbout]
         bool iconsOk = true
         for needIcons to ic { if not files.exists(ic) { iconsOk = false } }
         if not iconsOk {
@@ -1421,13 +1508,17 @@ struct MusicDlApp {
             close_hover_color: #FDE7E9FF,
             actions: [
                 {id: "download", icon: "download", tip: "下载勾选的歌（打开下载窗口；已开着就切到前台）"},
-                {id: "settings", icon: "settings", tip: "设置：并行下载线程数、默认是否带歌词"}
+                {id: "settings", icon: "settings", tip: "设置：并行下载线程数、默认是否带歌词"},
+                // ★ 「关于」放**最后**（= 最靠内、紧挨设置 ✓ 用户 2026-10-09：放设置旁边 ✓）
+                //   ⚠ 这里是**图片路径**（不是内置矢量名）⇒ 按原色画、不吃 `icon_color`（见上面 iconAbout ✓）
+                {id: "about", icon: iconAbout, tip: "关于：版本 / 致谢 / 免责声明"}
             ]
         })
         titleBar.on_action(func(string id) {
             // 下载入口：判定 / 防重复 / 起线程都在那几处，这里只做"该说清的说清" ✓
             if id == "download" { onDownloadAction() }
             eif id == "settings" { onSettings() }
+            eif id == "about" { onAbout() }
         })
         win.add(titleBar)
         float titleH = titleBar.get_h()
@@ -1462,8 +1553,9 @@ struct MusicDlApp {
         // ★ 格式下拉框（2026-10-08 ✓）——一次搜回来常混着 flac / mp3 / aac，只想下某种后缀时
         //   不用一行行取消勾选 ✓
         //   · 选项**按搜到的内容生成**（`refreshFmtItems` ✓ 搜完才填 ✓）
-        //   · 只作用于**批量下载**（「下载勾选」「下载选中行」✓）；右键「下载这一首」/ 双击某行
+        //   · 只作用于**批量下载**（「下载勾选」「下载选中行」✓）；右键「下载这一首」
         //     是**显式点名单曲** ⇒ 不拦 ✓（拦了就像"点了没反应" ✗）
+        //   · 双击（= 试听 ✓）不碰下载 ⇒ 与这里无关 ✓
         row1.add(SDL3.createLabel({text: "格式", font_size: 13}), {grow: 0, shrink: 0, align: 1})
         fmtBox = SDL3.createComboBox({
             w: 120, h: 32, font_size: 13, item_h: 26, selected: 0,
@@ -1573,9 +1665,8 @@ struct MusicDlApp {
         })
         table.on_check(func(int col, Array[int] checked) { updateCount() })
         table.on_select(func(int row) { dlSelBtn.set_enabled(row >= 0) })
-        table.on_dbl_click(func(int row, int col) {
-            if row >= 0 and row < songs.len() { startDownload([songs[row]], downloadflags()) }
-        })
+        // ★ 双击 = 试听（2026-10-09 改 ✓ 见 previewRow 的注释 ✓）；回车（RETURN）也走这条回调 ✓
+        table.on_dbl_click(func(int row, int col) { previewRow(0, row) })
         //   ★ 右键菜单：先钉住"菜单作用在搜索表上"（menuCtx=0）再建菜单 ✓
         //     （榜单表接的是同一套函数，只是 menuCtx=1 ⇒ 见 buildMenu 的 ctx_* 访问器 ✓）
         table.on_context_will_open(func(int row) { menuCtx = 0; buildMenu(row) })
@@ -1593,7 +1684,7 @@ struct MusicDlApp {
                 var statusRow = SDL3.createHBox({h: 24, padX: 0, padY: 0, spacing: 12})
                 stateLbl = SDL3.createLabel({text: "就绪", font_size: 13})
                 statusRow.add(stateLbl, {grow: 1, shrink: 1, align: 1})
-                statusRow.add(SDL3.createLabel({text: "双击某行 = 下载这一首；右键列表 = 批量/复制/打开目录", font_size: 12}), {grow: 0, shrink: 0, align: 2})
+                statusRow.add(SDL3.createLabel({text: "双击某行 = 试听（后台同时下整首）；右键列表 = 下载/批量/复制/打开目录", font_size: 12}), {grow: 0, shrink: 0, align: 2})
                 page0.add(statusRow, {grow: 0, shrink: 0, align: 3})
 
             // ---- 页签：0 = 搜索、1 = 榜单 ----
@@ -1890,7 +1981,7 @@ struct MusicDlApp {
         int have = 0
         for bangSongs to r { if eng.has_size(r) { have = have + 1 } }
         bangLbl.set_text(srcname(bangCurSrc) + "：「" + bangBox.get_selected_text() + "」共 " + _str(bangSongs.len())
-                         + " 首　·　已补到格式/大小 " + _str(have) + " 首　·　双击某行 = 下载这一首")
+                         + " 首　·　已补到格式/大小 " + _str(have) + " 首　·　双击某行 = 试听（后台同时下整首）")
         // 自检（见 gBangSizeCheck 注释 ✓）：报耗时 / 补到几首 / 首行有没有变（顺序 ✓）
         if gBangSizeCheck {
             int dt = _int(times.ms()) - bangFillT0
@@ -1969,10 +2060,9 @@ struct MusicDlApp {
             multi: true,
             empty_text: "还没有榜单 —— 切到本页会自动加载所选站点的第1 个榜单"
         })
-        //   双击 = 下载这一首（与搜索表同一套语义 ✓）
-        bangTable.on_dbl_click(func(int row, int col) {
-            if row >= 0 and row < bangSongs.len() { startDownload([bangSongs[row]], downloadflags()) }
-        })
+        //   双击 = 试听（★ 2026-10-09 改 ✓ 与搜索表同一套语义：走同一个 previewRow ✓）
+        //     ⚠ 原先这里是"下载这一首"⇒ 两个页面各写一份、改一处忘一处就是这个坑 ✗ ⇒ 共用入口 ✓
+        bangTable.on_dbl_click(func(int row, int col) { previewRow(1, row) })
         //   ★ 右键菜单（2026-10-09 补 ✓ 用户反馈"榜单没有右击菜单、下不了"）：
         //     与搜索表**共用同一套**菜单与处理（试听 / 下载这一首 / 只下歌词 / 复制 /
         //     下载勾选的 N 首 / 全选 / 全不选 / 定位 / 删除本地文件 / 打开目录 ✓）
@@ -2197,6 +2287,23 @@ int gCtxTarget = 1
 //   （补的是真体积：酷我不给体积，只能 HEAD 探 ⇒ 这条自检同时也是"探体积链路"的回归 ✓）
 bool gBangSizeCheck = false
 
+// 双击=试听 自检（`DDBL=1|2` ⇒ 等第 0 行出现后注入**真双击**，断言"起的是试听、没开下载窗口" ✓）
+//   为什么要它：2026-10-09 把双击从"下载这一首"改成"试听"（见 previewRow ✓）—— 这是**改语义**，
+//   而框架那边的 dbl 判定（400ms / 10px 阈值）在 `mouseDown` 里、还要过表头 / 列重排 / 复选框列
+//   那几道闸 ⇒ "双击还有没有反应、反应的是不是试听"光看代码看不出来 ✗
+//     `DSEARCH=<关键词> DDBL=1` ⇒ 搜索表第 0 行（等搜索结果回来 ✓）
+//     `DBANG=1 DDBL=2`         ⇒ 榜单表第 0 行（等榜单行回来 ✓）
+//   同惯例见 gCtxStep / gClickStep ✓；配 DSHOT 还能截到"试听中"的样子 ✓
+int gDblStep = 0
+int gDblTarget = 1
+int gDblWait = 0        // 等行回来的拍数（超时就报"没等到行"⇒ 不挂死 ✓）
+
+// 「关于」弹窗自检（`DABOUT=1` ⇒ 第 3 拍自动打开它 ✓）
+//   为什么要它：这个弹窗是"固定高度 + 多行文案" ⇒ 文案一长就可能被裁 ✗（画面之外看不出来）
+//   ⚠ **DSHOT 截不到它**：DSHOT 读的是**主窗口渲染器**的像素，而模态是**另一个窗口** ✗
+//     ⇒ 用桌面截屏（`Win32.captureScreen` / 系统截图）看，见 README 的自检那一节 ✓
+int gAboutTick = 0
+
 main() {
     var ex = _env("DEXIT")
     if ex != null { gExitTicks = _int(_str(ex)) }
@@ -2219,6 +2326,13 @@ main() {
     }
     var bs = _env("DBANGSIZE")
     if bs != null { gBangSizeCheck = true }
+    var db = _env("DDBL")
+    if db != null {
+        int dbn = _int(_str(db))
+        if dbn > 0 { gDblStep = 1; gDblTarget = dbn }   // 1 = 搜索表 / 2 = 榜单表 ✓
+    }
+    var ab = _env("DABOUT")
+    if ab != null { gAboutTick = 3 }        // 第 3 拍开「关于」（见 gAboutTick 注释 ✓）
     MusicDlApp app = new MusicDlApp()
     app.run()
 }

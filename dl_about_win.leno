@@ -1,0 +1,132 @@
+// dl_about_win.leno — 「关于」弹窗（SDL3）
+//
+// 入口：标题栏右侧那个 ⓘ（`images/about.png` ✓ 见 musicdl_gui 的 `actions`）→ `show_about_window()` ✓
+// 分层与画法**照 dl_settings_win.leno**（同一套：自绘标题栏 + `runModal` 模态 ⇒ 不另起炉灶 ✓）：
+//   · `runModal` = pushModal + run()，主循环已在跑时**不阻塞** ⇒ 关闭动作写在回调里（别读返回值 ✗）
+//   · 标题栏 ✕ 只置 `closeRequested` ⇒ **必须自己接 `on_close`**（不接就是"点 ✕ 没反应" ✗）
+// 内容三块：这是什么 / 致谢 / 免责声明 —— 后两块的口径与 README 第八、九节**同一套**（改一处看另一处 ✓）
+import "SDL3" as SDL3
+import dirs
+use SDL3.(Event, Renderer, Scancode)
+
+// 版本号：与 CLI 的 `musicdl.leno` 里那个 `VERSION` **同一口径**（发版时两处一起改 ✓）
+const APP_VERSION = "0.1.0"
+
+// ==================== 文案（写成常量 ⇒ 改字不用翻代码 ✓）====================
+// 致谢：**一行一位，要加人就加一行**（顺序 = 显示顺序 ✓）
+//   ⚠ 只写"能被核对的事实"（谁提供了什么）—— 不吹、不替别人认领 ✓
+const Array[string] CREDITS = [
+    "· LenoLang / LenoSDL3 —— 语言运行时与 GUI 框架（cheng8214，MIT 许可）",
+    "· 上游开源项目 musicdl（Python 版）—— 音源接口口径、解密与解析思路的来处",
+    "· 群友「小半头砖」二创项目 LenoMusic-main —— 榜单、第三方聚合通路等功能的移植来源",
+    "· IconFont—— 图标素材（含本窗口标题栏那个 ⓘ）",
+    "· 酷我 / 网易云 / QQ音乐 / 酷狗 的公开接口，以及公开的第三方聚合接口 —— 数据来源"
+]
+
+// 免责声明（口径同 README 第八节 ✓）：一句一条，**别写成一整段**（多行会挤在一起不好读 ✗）
+const Array[string] DISCLAIMER = [
+    "· 本工具只做一件事：按你的要求，从各音乐平台的网页端 / 移动端接口取直链，保存到你自己的磁盘。",
+    "· 不提供任何内容分发，软件本身不含任何音频；下载内容的版权归各平台与权利人所有。",
+    "· 请仅用于个人学习、试听与已购内容的备份，并在 24 小时内删除，同时遵守各平台的服务条款。",
+    "· 请勿用于商业用途；因使用本工具产生的一切后果，由使用者自行承担。",
+    "· 若权利人认为本工具不妥，请联系作者删除。"
+]
+
+// 次要文字色（与主界面同一口径：#5A5A5A 在浅色底上够清楚又不抢主文字 ✓）
+const COLOR_DIM = #5A5A5AFF
+// 分隔线色（与标题栏那条发丝线同色 ⇒ 全应用一个观感 ✓）
+const COLOR_LINE = #D5D8DFFF
+
+// 数组 → 多行文本（Label 认 `\n` ✓ 见 sdl_label 的 wrap/多行那条路 ✓）
+func joinlines(Array[string] ls): string {
+    string s = ""
+    for ls.len() to i {
+        if i > 0 { s = s + "\n" }
+        s = s + ls[i]
+    }
+    return s
+}
+
+// 应用图标（标题栏那个同款 ✓）：同样走 `res_dir()` —— 打包后资源在缓存目录，
+//   用 `script_dir()` 会取不到（见 musicdl_gui 那三条 ⚠ 的同一条理由 ✓）
+func appicon(): string {
+    return dirs.join(dirs.join(dirs.res_dir(), "images"), "index.png")
+}
+
+struct AboutDialog {
+    bool closing = false       // 模态该收了（事件回调据此返回 false ✓）
+
+    func build() {
+        string title = "关于 Leno 音乐下载器"
+        int dw = 560
+        int dh = 452               // **内容高**（标题栏另加 DIALOG_TB_H ✓）
+        int tbH = SDL3.DIALOG_TB_H
+        var dlg = SDL3.createDialogWindow({title: title, w: dw, h: tbH + dh})
+        var tb = SDL3.dialogTitleBar(dlg, title)
+        var root = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, padX: 22, padY: 16, spacing: 8})
+        dlg.setRootAt(root, 0, tb.get_h())
+
+        float innerW = _float(dw - 44)       // 正文折行宽度 = 宽 − 两侧 padX(22 × 2) ✓
+
+        // ---- ① 头部：图标 + 名称 + 版本（图标与两行文字**同一行**、交叉轴居中 ✓）----
+        var head = SDL3.createHBox({h: 46, padX: 0, padY: 0, spacing: 12})
+        head.add(SDL3.createImageView({w: 44, h: 44, image_path: appicon()}),
+                 {grow: 0, shrink: 0, basis: 44, align: 1})
+        var htext = SDL3.createVBox({padX: 0, padY: 0, spacing: 2})
+        htext.add(SDL3.createLabel({text: "Leno 音乐下载器", font_size: 18}), {grow: 0, shrink: 0, align: 0})
+        htext.add(SDL3.createLabel({text: "v" + APP_VERSION + " · MIT 许可 · 搜索 / 试听 / 下载 / 播放（GUI 与 CLI 共用同一套引擎）",
+                                    font_size: 11, text_color: COLOR_DIM, wrap: true, wrap_w: innerW - 56.0}),
+                  {grow: 0, shrink: 0, align: 0})
+        head.add(htext, {grow: 1, shrink: 1, align: 1})
+        root.add(head, {grow: 0, shrink: 0, align: 3})
+
+        // ---- ② 致谢 ----
+        root.add(SDL3.createSeparator({w: 100, color: COLOR_LINE}), {grow: 0, shrink: 0, align: 3})
+        root.add(SDL3.createLabel({text: "致谢（这份工具的每一块都不是凭空来的）", font_size: 13}),
+                 {grow: 0, shrink: 0, align: 0})
+        root.add(SDL3.createLabel({text: joinlines(CREDITS), font_size: 12, text_color: COLOR_DIM,
+                                   wrap: true, wrap_w: innerW}),
+                 {grow: 0, shrink: 0, align: 0})
+
+        // ---- ③ 免责声明 ----
+        root.add(SDL3.createSeparator({w: 100, color: COLOR_LINE}), {grow: 0, shrink: 0, align: 3})
+        root.add(SDL3.createLabel({text: "免责声明", font_size: 13}), {grow: 0, shrink: 0, align: 0})
+        root.add(SDL3.createLabel({text: joinlines(DISCLAIMER), font_size: 12, text_color: COLOR_DIM,
+                                   wrap: true, wrap_w: innerW}),
+                 {grow: 0, shrink: 0, align: 0})
+
+        // ---- ④ 按钮行：只有一个「关闭」（弹窗就是"看完就关"，不给第二个选择 ✓）----
+        var closeBtn = SDL3.createButton({w: 100, h: 32, text: "关闭", type: "primary", font_size: 13})
+        root.add(SDL3.dialogButtonRow([closeBtn], 10), {grow: 1, shrink: 1, align: 3})
+        closeBtn.on_click(func() { finish() })
+        // 标题栏 ✕ 必须自己接（TitleBar 只置 closeRequested ✓）
+        tb.on_close(func() { finish() })
+
+        SDL3.runModal(dlg,
+            func(Event ev): bool {
+                if ev.isQuit() { return false }
+                if ev.isWindowClose() { finish(); return false }
+                // 看完就关：ESC 与回车都收 ✓（弹窗里没有别的可操作项 ⇒ 不必防误触）
+                if ev.isKeyDown() {
+                    int sc = ev.scancode()
+                    if sc == Scancode.ESCAPE or sc == Scancode.RETURN { finish(); return false }
+                }
+                if closing { return false }
+                return true
+            },
+            func(Renderer r) { SDL3.dialogFramePaint(r, dw, tbH + dh) }
+        )
+        SDL3.markFrameRedraw()
+    }
+
+    func finish() {
+        closing = true
+        SDL3.markFrameRedraw()
+    }
+}
+
+// 打开「关于」窗口（模态、纯展示 ⇒ 没有返回值 ✓）
+export func show_about_window() {
+    AboutDialog d = new AboutDialog()
+    d.build()
+}
