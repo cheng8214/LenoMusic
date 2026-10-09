@@ -1,4 +1,4 @@
-﻿// musicdl_gui.leno — 音乐下载器（GUI 版）
+// musicdl_gui.leno — 音乐下载器（GUI 版）
 //
 // 与 CLI 版（musicdl.leno）共用同一套"引擎"：网络/取直链/落盘在 dl_engine.leno
 //   · dl_engine 复用 kuwo_core.leno（CLI 同款）+ kuwo_des.leno（官方接口 DES 加密）
@@ -1383,12 +1383,17 @@ struct MusicDlApp {
                         //   ⚠ **侧栏必须窄（68px）**：搜索页表格 986px 正好等于窗口 1060 扣掉边距后的宽度
                         //     ⇒ 侧栏每宽 1px 都从表格那里扣（dashboard 那种 190px 文字侧栏会让表格
                         //     出横向滚动条 ✗ —— 这里的横向预算和仪表盘完全不同）
-                        var side = SDL3.createVBox({padX: 0, padY: 6, spacing: 6, bg_color: #E9EBEEFF})
-                        navSearch = SDL3.createButton({w: 68, h: 44, text: "● 搜索", font_size: 13})
+                        var side = SDL3.createVBox({padX: 0, padY: 16, spacing: 6})
+                        navSearch = SDL3.createButton({w: 68, h: 40, text: "搜索", font_size: 13,
+  // ⚠ `background` 是**开关**（true/false），颜色要另外给 `bg_color` ⇒ 传颜色给它会被警告并按 true 处理 ✗
+         background: true, bg_color: #F2D33CFF, text_color: #1F1F1FFF,
+    image_path: dirs.join(imgDir, "music.png"), image_size: 18, image_gap: 2, image_tint: #1F1F1FFF})
                         navSearch.set_tip("搜索页：关键词 → 勾选 → 下载")
                         navSearch.on_click(func() { tab.set_active(0) })
                         side.add(navSearch, {grow: 0, shrink: 0, basis: 68, align: 1})
-                        navBang = SDL3.createButton({w: 68, h: 44, text: "榜单", font_size: 13})
+                        navBang = SDL3.createButton({w: 68, h: 40, text: "榜单", font_size: 13,
+                               background: true, bg_color: #FFFFFFFF, text_color: #5A5A5AFF,
+                           image_path: dirs.join(imgDir, "list.png"), image_size: 18, image_gap: 2, image_tint: #5A5A5AFF})
                         navBang.set_tip("榜单页：各站排行榜")
                         navBang.on_click(func() { tab.set_active(1) })
                    side.add(navBang, {grow: 0, shrink: 0, basis: 68, align: 1})
@@ -1414,7 +1419,11 @@ struct MusicDlApp {
            pbar = pb.create_player_bar(outdir, imgDir, stateLbl)
                 root.add(pbar.box, {grow: 0, shrink: 0, align: 3})
 
-                win.setRootAt(root, 0, titleH)
+                // ★ 启动时**主动同步一次**侧栏选中态：
+    //   · `tab.on_change` 只在**切页**时回调 ⇒ 不这么调一次，开局两个按钮会停在
+        //   Button 的**默认底色（primary 蓝）** ✗（`background` 构造参数会被默认 type 覆盖 ⇒ 实测）
+  onTabChanged(0)
+        win.setRootAt(root, 0, titleH)
     }
 
     // ==================== 榜单页（页 1）====================
@@ -1449,8 +1458,17 @@ struct MusicDlApp {
             curPage = idx
             // 选中态：文字前的 ●（图标以后再补★ 先不引图标依赖 ✓）
             //   两个入口都走这一个回调（点侧栏按钮 / 程序 set_active）⇒ 状态不会漂移 ✓
-            navSearch.set_text(if idx == 0 then "● 搜索" else "搜索")
-            navBang.set_text(if idx == 1 then "● 榜单" else "榜单")
+            if idx == 0 {
+                    navSearch.set_bg_color(#F2D33CFF)
+                      navSearch.set_text_color(#1F1F1FFF)
+                      navBang.set_bg_color(#FFFFFFFF)
+                  navBang.set_text_color(#5A5A5AFF)
+                    } else {
+                  navSearch.set_bg_color(#FFFFFFFF)
+                        navSearch.set_text_color(#5A5A5AFF)
+               navBang.set_bg_color(#F2D33CFF)
+              navBang.set_text_color(#1F1F1FFF)
+                    }
        if idx == 1 and bangLoadedFor < 0 { loadBangMenu() }
           SDL3.markFrameRedraw()
       }
