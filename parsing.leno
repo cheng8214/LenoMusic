@@ -1,0 +1,175 @@
+// parsing.leno — **严格解析**工具（纯逻辑：无 UI / 无网络 / 不 import SDL3⇒ 可离线单测 ✓）
+//
+// 为什么要有这一个模块：
+//   语言目前**没有** `string.to_int()` / `string.to_float()` 这种"认不出就失败"的严格解析。
+//   而 `_int()` 不能替代它（★ 实测，2026-10-09 —— 别再记错这一条）：
+//       _int("123")  = 123✓        _int("-7")   = -7   ✓（支持负号）
+//       _int("")     = 0（不抛）    _int(null)  = 0   （不抛）
+//       _int("abc") / _int("12.9") / _int(" 42 ") / _int("0x1F") ⇒ **抛异常**
+//   ⇒ 它是"**强转**"而不是"**解析**"：语义是"我保证这串是整数，认不出就是你写错了"，
+//     于是无法用它做"数据脏了就不认"的判定—— 想判又不想抛异常，只能自己先看一遍形状 ✓
+//   同样的道理，这里把"判定"收成一处，并让接口用**多返回值**表达成功与否：
+//       var[float, bool](t, ok) = parse_secs(tag)     // 取值 + 成功判定一行搞定 ✓
+//   而不是拿 -1 当哨兵（-1 既是合法值又是失败信号 ⇒ 调用处永远要写两遍判断、
+//   而且"解析失败"和"真的 -1"永远分不开 ✗ —— 本仓踩过 ✓）。
+//
+//   ⚠ 也别指望 `as int` 能顶替它（★ 2026-10-09 实测，我先后误判过两次 ✗✗）：
+//     `as` 是 **any → T 的运行时转换**，不是"解析"：
+//         var x = "77"; x as int   ⇒ null   （**任何**字符串都是 null，连 "0" / "77" 也一样 ✗）
+//         var y = 1.5;  y as int   ⇒ 1      （float 会截断 ✓）
+//         var z = true; z as int   ⇒ 1      （bool 会转 ✓）
+//         "3.5" as float ⇒ null（同理 ✗）
+//     ⇒ 语言现在有三种"转换"：`_int()` 强转（失败抛异常）、`as T` 动态转换（失败 null、
+//       但只认 any）、`is` + 收窄（判定）；**唯独"字符串 → 数值 的解析"是空的** ✓
+//       而它恰好是业务代码最高频的需求（时间戳 / 体积 / 计数 / ID / 歌词毫秒…）。
+//
+// ★ 顺带一条给 Leno 本体的建议（还没做）：strings 加一个**严格**的 `to_int()` /
+//   `to_float()`（认不出给 ok=false 或抛可捕获的异常），就不用每个项目各写一遍 ✓
+//   现有 `_int()` 保留"强转"语义即可 —— 两者用途不同，不该混成一个。
+//
+// ⚠ 这里的判定口径必须与原来的实现**逐位一致**（重构不改行为 ✓
+//   金标回归见 test/test_lrc_parse.leno）。
+import strings
+
+// ==================== 数字 ====================
+
+// 全是非负 ASCII 数字？（空串 ⇒ false ✓；有任何一个非数字 ⇒ false ✓）
+export func digits_only(string s): bool {
+    if s == null or s == "" { return false }
+    Array[int] c = strings.to_codepoints(s)
+    int i = 0
+    while i < c.len() {
+        if c[i] < 48 or c[i] > 57 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// 纯数字 ⇒ 值；不是⇒ dflt（内部用，省一次遍历 ✓）
+//   ⚠ 与 digits_only 的区别：这个**不报失败**，只给兜底值（给"失败也无所谓"的场合用 ✓）
+func uint_or(string s, int dflt): int {
+    if s == null or s == "" { return dflt }
+    Array[int] c = strings.to_codepoints(s)
+    int n = 0
+    int i = 0
+    while i < c.len() {
+        int d = c[i] - 48
+        if d < 0 or d > 9 { return dflt }
+        n = n * 10 + d
+        i = i + 1
+    }
+    return n
+}
+
+// 严格解析非负整数 ⇒ (值, 是否成功)
+//   不要 -1 哨兵的理由见文件头 ✓；`var[int,bool](n, ok) = parse_uint(s)`
+export func parse_uint(string s): [int, bool] {
+    if not digits_only(s) { return 0, false }
+    return uint_or(s, 0), true
+}
+
+// 严格解析"时间标签"⇒ (秒, 是否认得)
+//   认： "mm:ss" / "mm:ss.x" / "mm:ss.xxx"（小数任意位 ✓）
+//   不认：任何别的形状 —— **纯毫秒数"1234"也不认**（那是逐字起点的形状，
+//         由 parse_millis / parse_word_span 单独处理 ⇒ 两件事不混在一个判定里 ✓）
+//   ⚠ 不做 trim；尾巴多一个字符就不认 ⇒ `[ti:歌名]` 这类元信息标签会被判失败 ✓
+//     （歌词解析靠这条把元信息整行跳过）
+export func parse_secs(string tag): [float, bool] {
+    Array[int] c = strings.to_codepoints(tag)
+    int mm = 0
+    int i = 0
+    int d = 0
+    while i < c.len() and c[i] >= 48 and c[i] <= 57 { mm = mm * 10 + (c[i] - 48); i = i + 1; d = d + 1 }
+    if d == 0 { return 0.0, false }
+    if i >= c.len() or c[i] != 58 { return 0.0, false }              // ':'
+    i = i + 1
+    int ss = 0
+    d = 0
+    while i < c.len() and c[i] >= 48 and c[i] <= 57 { ss = ss * 10 + (c[i] - 48); i = i + 1; d = d + 1 }
+    if d == 0 { return 0.0, false }
+    float frac = 0.0
+    if i < c.len() and c[i] == 46 {                                 // '.'
+        i = i + 1
+        int cs = 0
+        int n = 0
+        while i < c.len() and c[i] >= 48 and c[i] <= 57 { cs = cs * 10 + (c[i] - 48); i = i + 1; n = n + 1 }
+        float sc = 1.0
+        int t = 0
+        while t < n { sc = sc * 10.0; t = t + 1 }
+        if n > 0 { frac = _float(cs) / sc }
+    }
+    if i != c.len() { return 0.0, false }                // 尾巴上还有别的字符 ⇒ 不认 ✓
+    return _float(mm * 60 + ss) + frac, true
+}
+
+// 纯毫秒数（酷我 `lrcx` 的逐字起点就是这个形状 ✓）⇒ (秒, 是否认得)
+export func parse_millis(string s): [float, bool] {
+    var[int, bool](n, ok) = parse_uint(s)
+    if not ok { return 0.0, false }
+    return _float(n) / 1000.0, true
+}
+
+// 逐字标签 `<起点,时长>` 的内层（"1234,567" / "00:12.34,0.5"）⇒ (起点秒, 时长秒, 起点是否认得)
+//   · 起点认 "mm:ss.xx" 与纯毫秒两种形状 ✓
+//   · **时长一律按毫秒理解**（"0,500" ⇒ 0.5s ✓）—— 起点写成 mm:ss.xx 时，
+//     时长大概率也是"小数秒"而不是毫秒，这里沿用既有口径：按毫秒读，
+//     带小数点 ⇒ 认不出 ⇒ 时长 0（渲染侧退回"唱到下一个字的起点" ✓ 金标钉住）
+//   · 起点认不出 ⇒ ok=false（调用方据此整段退回线性 ✓）
+export func parse_word_span(string tag): [float, float, bool] {
+    if tag == null or tag == "" { return -1.0, 0.0, false }
+    Array[string] parts = tag.split(",")
+    if parts.len() == 0 { return -1.0, 0.0, false }
+    string a = parts[0].trim()
+    var[float, bool](t, ok1) = parse_secs(a)
+    if not ok1 {
+        var[float, bool](ms, ok2) = parse_millis(a)
+        if not ok2 { return -1.0, 0.0, false }
+        t = ms
+    }
+    float d = 0.0
+    if parts.len() >= 2 {
+        // ⚠ 认不出（含小数点/空串）⇒ 时长 0，而不是把已读的数字当结果 ✓
+        int m = uint_or(parts[1].trim(), -1)
+        if m >= 0 { d = _float(m) / 1000.0 }
+    }
+    return t, d, true
+}
+
+// ==================== 越界安全取值 ====================
+// 为什么：一行数据是 `Array[string]`（**跨线程只能传纯字符串数组** —— 语言硬约束，
+//   见 dl_engine.leno 文件头 ✓），于是每次取字段都要先问长度：
+//       if row.len() <= F_SRC { return "" }  return row[F_SRC]
+//   这类检查散落在引擎 + GUI + 下载窗口各处（各写一遍、还各自解释一遍字段含义 ✗）。
+//   收口成at()/at_int() 后：**越界不可能、默认值一处定** ✓
+
+// 第 i 段（越界 ⇒ dflt ✓）
+export func at(Array[string] row, int i, string dflt): string {
+    if i < 0 or i >= row.len() { return dflt }
+    return row[i]
+}
+
+// 第 i 段当整数（**越界 / 不是非负数字 ⇒ dflt，绝不抛异常**✓）
+//   ⚠ 为什么不直接 `_int(row[i])`：`_int` 是**强转**语义，遇脏数据会**抛异常**
+//     （实测"_abc" / "12.9" / " 42 "都抛 ⇒ 搜索结果里一个脏字段就能让整轮处理崩掉 ✗）。
+//     这里先 `digits_only` 看形状再转 ⇒ 脏数据只影响这一行的这一个字段 ✓
+//   ⚠ 只认**非负**数字（字节数、任务序号本来就是非负 ✓；"-5" 视为脏数据 ⇒ dflt）。
+//     真要读带符号的数，自己判首字符后调 `_int` ✓
+//   ⚠ 过了 digits_only 之后 `_int` **不会抛**（实测：27 位数字也精确给出 ✓
+//     —— Leno 的 int 是任意精度的，不存在溢出 ⇒ 这一步是安全的强转 ✓）
+export func at_int(Array[string] row, int i, int dflt): int {
+    string s = at(row, i, "")
+    if not digits_only(s) { return dflt }
+    return _int(s)
+}
+
+// 从第 i 段起的切片（i 越界 ⇒ 空数组 ✓）—— 用于"行尾那几个可选字段"
+export func tail_from(Array[string] row, int i): Array[string] {
+    Array[string] out = []
+    if i < 0 { return out }
+    int k = i
+    while k < row.len() {
+        out.add(row[k])
+        k = k + 1
+    }
+    return out
+}

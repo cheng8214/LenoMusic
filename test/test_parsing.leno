@@ -1,0 +1,150 @@
+// test_parsing.leno — `parsing.leno` / `songrow.leno` 的**边界回归**（纯逻辑、离线 ✓）
+//
+// 为什么要有：这两个模块的职责就是"**替别人做判定**"⇒ 判定一旦变了，症状会出现在
+//   别处（歌词不同步、某首歌莫名下不了），没人能从界面上看出是这里改了 ✗
+//   ⇒ 边界必须自己钉住，尤其是"**不该抛的地方抛了**"这类：
+//     `_int()` 是**强转**语义（脏数据抛异常），`at_int()` 是**取值**语义（脏数据给默认值 ✓）
+//   这条区别是 2026-10-09 实测踩出来的（详见 parsing.leno 文件头的实测表）。
+import "../parsing.leno" as parsing
+import "../songrow.leno" as srow
+
+var fails = 0
+
+func check(string name, bool ok) {
+    if ok {
+        print($"[通过] {name}")
+    } else {
+        fails = fails + 1
+        print($"[失败] {name}")
+    }
+}
+
+func checks(string name, Array[string] got, Array[string] want) {
+    bool ok = got.len() == want.len()
+    int i = 0
+    while ok and i < got.len() {
+        if got[i] != want[i] { ok = false }
+        i = i + 1
+    }
+    check(name, ok)
+}
+
+func checki(string name, Array[int] got, Array[int] want) {
+    bool ok = got.len() == want.len()
+    int i = 0
+    while ok and i < got.len() {
+        if got[i] != want[i] { ok = false }
+        i = i + 1
+    }
+    check(name, ok)
+}
+
+main() {
+    print("=== parsing / songrow 边界回归 ===")
+
+    // ---- at_int：越界与脏数据都必须给默认值，**绝不抛异常** ✓ ----
+    Array[string] row = ["kuwo", "歌名", "歌手", "专辑", "229", "flac", "52.8MB", "55372096"]
+    check("at_int 取第 7 段", parsing.at_int(row, 7, -1) == 55372096)
+    check("at_int 越界 ⇒ 默认值", parsing.at_int(row, 99, -1) == -1)
+    check("at_int 负下标 ⇒ 默认值", parsing.at_int(row, -1, -1) == -1)
+    check("at_int 空串 ⇒ 默认值", parsing.at_int(["a", ""], 1, -1) == -1)
+    check("at_int 字母 ⇒ 默认值（**不抛** ✓）", parsing.at_int(["a", "abc"], 1, -1) == -1)
+    check("at_int 小数串 ⇒ 默认值（**不抛** ✓）", parsing.at_int(["a", "12.9"], 1, -1) == -1)
+    check("at_int 带空格 ⇒ 默认值（**不抛** ✓）", parsing.at_int(["a", " 42 "], 1, -1) == -1)
+    check("at_int 负号 ⇒ 默认值（只认非负 ✓）", parsing.at_int(["a", "-5"], 1, -1) == -1)
+    check("at_int 任意精度不溢出 ✓", parsing.at_int(["a", "999999999999999999999999"], 1, 0) == 999999999999999999999999)
+
+    // ---- at / tail_from ----
+    check("at 取正常段", parsing.at(row, 1, "?") == "歌名")
+    check("at 越界 ⇒ 默认值", parsing.at(row, 42, "?") == "?")
+    checks("tail_from 取尾段", parsing.tail_from(["a", "b", "c", "d"], 2), ["c", "d"])
+    checks("tail_from 越界 ⇒ 空表", parsing.tail_from(["a"], 9), [])
+    checks("tail_from 负起点 ⇒ 空表", parsing.tail_from(["a"], -1), [])
+
+    // ---- digits_only / parse_uint ----
+    check("digits_only 123", parsing.digits_only("123"))
+    check("digits_only 空串 ⇒ false", not parsing.digits_only(""))
+    check("digits_only 12a ⇒ false", not parsing.digits_only("12a"))
+    check("digits_only -12 ⇒ false", not parsing.digits_only("-12"))
+    check("digits_only 前导空格 ⇒ false", not parsing.digits_only(" 12"))
+
+    var[int, bool](n1, ok1) = parsing.parse_uint("2026")
+    check("parse_uint 成功 ⇒ 取值 + ok", ok1 and n1 == 2026)
+    var[int, bool](n2, ok2) = parsing.parse_uint("20x6")
+    check("parse_uint 失败 ⇒ ok=false 且值给 0", (not ok2) and n2 == 0)
+
+    // ---- parse_secs：三种形状 + 严格性 ----
+    var[float, bool](s1, k1) = parsing.parse_secs("00:12.34")
+    check("parse_secs mm:ss.xx", k1 and _int(s1 * 100.0) == 1234)
+    var[float, bool](s2, k2) = parsing.parse_secs("01:05")
+    check("parse_secs mm:ss", k2 and _int(s2) == 65)
+    var[float, bool](s3, k3) = parsing.parse_secs("00:00.001")
+    check("parse_secs 毫秒位", k3 and _int(s3 * 1000.0) == 1)
+    var[float, bool](s4, k4) = parsing.parse_secs("ti:歌名")
+    check("parse_secs 元信息标签 ⇒ 失败 ✓", not k4)
+    var[float, bool](s5, k5) = parsing.parse_secs("1234")
+    check("parse_secs 纯毫秒**不认**（交给 parse_millis ✓）", not k5)
+    var[float, bool](s6, k6) = parsing.parse_secs("12:34:56")
+    check("parse_secs 三段 ⇒ 失败 ✓", not k6)
+    var[float, bool](s7, k7) = parsing.parse_secs(" 12:34")
+    check("parse_secs 前导空格 ⇒ 失败（不 trim ✓）", not k7)
+
+    // ---- parse_millis ----
+    var[float, bool](m1, mk1) = parsing.parse_millis("1500")
+    check("parse_millis 1500 ⇒ 1.5s", mk1 and _int(m1 * 100.0) == 150)
+    var[float, bool](m2, mk2) = parsing.parse_millis("15.0")
+    check("parse_millis 小数 ⇒ 失败 ✓", not mk2)
+
+    // ---- parse_word_span：三返回值 ----
+    var[float, float, bool](w1, d1, wk1) = parsing.parse_word_span("1000,500")
+    check("word_span 毫秒起点 + 时长", wk1 and _int(w1 * 1000.0) == 1000 and _int(d1 * 1000.0) == 500)
+    var[float, float, bool](w2, d2, wk2) = parsing.parse_word_span("00:10.00,500")
+    check("word_span mm:ss 起点", wk2 and _int(w2 * 100.0) == 1000)
+    var[float, float, bool](w3, d3, wk3) = parsing.parse_word_span("abc,500")
+    check("word_span 起点认不出 ⇒ ok=false ✓", not wk3)
+    var[float, float, bool](w4, d4, wk4) = parsing.parse_word_span("1000,0.5")
+    check("word_span 时长带小数 ⇒ 记 0（既有口径 ✓）", wk4 and _int(d4 * 1000.0) == 0)
+    var[float, float, bool](w5, d5, wk5) = parsing.parse_word_span("")
+    check("word_span 空串 ⇒ ok=false ✓", not wk5)
+
+    // ---- songrow：字段契约 ----
+    Array[string] full = ["id1", "歌名", "歌手", "专辑", "229", "flac", "52.8MB", "55372096", "kugou", "http://x"]
+    check("rowid", srow.rowid(full) == "id1")
+    check("rowname", srow.rowname(full) == "歌名")
+    check("rowartist", srow.rowartist(full) == "歌手")
+    check("rowext", srow.rowext(full) == "flac")
+    check("rowbytes", srow.rowbytes(full) == 55372096)
+    check("rowsrc", srow.rowsrc(full) == "kugou")
+    check("rowurl", srow.rowurl(full) == "http://x")
+    check("rowhas_size ⇒ true", srow.rowhas_size(full))
+    check("下标常量对得上（防 songrow 与调用处脱节 ✓）",
+        full[srow.F_ID] == "id1" and full[srow.F_NAME] == "歌名" and full[srow.F_URL] == "http://x")
+
+    // 老行（只有 8 段）⇒ 一律安全失败，不抛 ✓
+    Array[string] old = ["id2", "歌名", "歌手", "专辑", "229", "flac", "52.8MB", "55372096"]
+    check("老行 rowext 仍可读", srow.rowext(old) == "flac")
+    check("老行 rowsrc ⇒ 空（调用方回落 kuwo ✓）", srow.rowsrc(old) == "")
+    check("老行 rowurl ⇒ 空（调用方现取 ✓）", srow.rowurl(old) == "")
+    check("老行 rowhas_size 仍成立", srow.rowhas_size(old))
+
+    // 没大小的行 ⇒ 不该进结果表（三音源统一口径）
+    Array[string] nosize = ["id3", "歌名", "歌手", "专辑", "229", "", "", "0", "netease", ""]
+    check("无格式 ⇒ rowhas_size=false ✓", not srow.rowhas_size(nosize))
+    Array[string] nobytes = ["id4", "歌名", "歌手", "专辑", "229", "mp3", "3.2MB", "", "netease", ""]
+    check("字节数空 ⇒ rowhas_size=false ✓", not srow.rowhas_size(nobytes))
+
+    // 空行 ⇒ 全字段默认值（**不抛** ✓）
+    Array[string] empty = []
+    check("空行 rowname ⇒ 空串", srow.rowname(empty) == "")
+    check("空行 rowbytes ⇒ 0", srow.rowbytes(empty) == 0)
+    check("空行 rowhas_size ⇒ false", not srow.rowhas_size(empty))
+    check("has_field 越界 ⇒ false", not srow.has_field(empty, srow.F_ID))
+    check("has_field 越上界 ⇒ false", not srow.has_field(full, 99))
+
+    print("")
+    if fails == 0 {
+        print("=== 全部通过 ===")
+    } else {
+        print($"=== 有失败：{fails} 项 ✗ ===")
+    }
+}

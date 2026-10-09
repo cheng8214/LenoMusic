@@ -1,0 +1,134 @@
+// test_lrc_parse.leno — 歌词解析（`.lrc` / 逐字 lrcx）的**金标回归**（纯逻辑、离线 ✓）
+//
+// 为什么必须有：`player.leno` 的解析里有大量"手搓码点游标 + 哨兵 -1"的判定
+//   （`lrc_tag_secs`认不出就返回 -1、`lrc_word_span` 同款）。这类代码改起来
+//   **看不出错、只是结果悄悄变了** —— 歌词坏掉往往表现为"某一句不同步"，
+//   没人能从界面上看出是这一行改坏了 ✗
+//   ⇒ 所以先用**公开接口** `lrc_from_text` 把现状钉成金标，重构后逐项对拍✓
+//
+// 覆盖：标准 LRC / 一行多标签 / 元信息行跳过 / 逐字（毫秒起点 & mm:ss 起点）/
+//       译文行并回原文 / 无小数 / 非法标签（必须整行跳过 ✓）
+//
+// 跑：<发行包>\leno.exe test\test_lrc_parse.leno
+import "../player.leno" as pl
+use pl.Lrc
+
+var fails = 0
+
+func check(string name, bool ok) {
+    if ok {
+        print($"[通过] {name}")
+    } else {
+        fails = fails + 1
+        print($"[失败] {name}")
+    }
+}
+
+func checkf(string name, Array[float] got, Array[float] want) {
+    bool ok = got.len() == want.len()
+    int i = 0
+    while ok and i < got.len() {
+        // 逐字比对用整数毫秒：浮点直接比会因精度噪声假失败 ✗
+        if _int(got[i] * 1000.0) != _int(want[i] * 1000.0) { ok = false }
+        i = i + 1
+    }
+    if ok {
+        print($"[通过] {name}")
+    } else {
+        fails = fails + 1
+        print($"[失败] {name}  got={got}  want={want}")
+    }
+}
+
+func checks(string name, Array[string] got, Array[string] want) {
+    bool ok = got.len() == want.len()
+    int i = 0
+    while ok and i < got.len() {
+        if got[i] != want[i] { ok = false }
+        i = i + 1
+    }
+    if ok {
+        print($"[通过] {name}")
+    } else {
+        fails = fails + 1
+        print($"[失败] {name}  got={got}  want={want}")
+    }
+}
+
+func checki(string name, Array[int] got, Array[int] want) {
+    bool ok = got.len() == want.len()
+    int i = 0
+    while ok and i < got.len() {
+        if got[i] != want[i] { ok = false }
+        i = i + 1
+    }
+    if ok {
+        print($"[通过] {name}")
+    } else {
+        fails = fails + 1
+        print($"[失败] {name}  got={got}  want={want}")
+    }
+}
+
+main() {
+    print("=== 歌词解析金标回归 ===")
+
+    // ---- ① 标准 LRC：[mm:ss.xx] ----
+    var a = pl.lrc_from_text("[00:12.34]你好世界")
+    checkf("标准行 secs", a.secs, [12.34])
+    checks("标准行 texts", a.texts, ["你好世界"])
+    checki("标准行无逐字 ⇒ wt_line 为空", a.wt_line, [])
+
+    // ---- ② 一行挂多个时间标签 ⇒ 拆成多句 ----
+    var b = pl.lrc_from_text("[00:12][01:20]同一句")
+    checkf("多标签拆两行 secs", b.secs, [12.0, 80.0])
+    checks("多标签两行同文", b.texts, ["同一句", "同一句"])
+
+    // ---- ③ 元信息行整行跳过（[ti:…] 不是时间形状 ✓）----
+    var c = pl.lrc_from_text("[ti:歌名]\n[ar:歌手]\n[00:05]真歌词")
+    checkf("元信息行被跳过", c.secs, [5.0])
+    checks("只留下真歌词", c.texts, ["真歌词"])
+
+    // ---- ④ 无小数的 [mm:ss] ----
+    var d = pl.lrc_from_text("[01:05]五分零五秒")
+    checkf("mm:ss 形状", d.secs, [65.0])
+
+    // ---- ⑤ 逐字（酷我 lrcx：起点是**毫秒**）----
+    var e = pl.lrc_from_text("[00:00.00]<1000,500>你<1600,500>好")
+    checkf("逐字毫秒：整句起点", e.secs, [0.0])
+    checks("逐字毫秒：正文剥掉标签", e.texts, ["你好"])
+    checki("逐字毫秒：两个字的行号", e.wt_line, [0, 0])
+    checkf("逐字毫秒：字起点（ms）", e.wt_sec, [1.0, 1.6])
+    checkf("逐字毫秒：字结束 = 起点+时长", e.wt_end, [1.5, 2.1])
+
+    // ---- ⑥ 逐字起点写成 mm:ss.xx（也容一手 ✓）----
+    var f = pl.lrc_from_text("[00:10.00]<00:10.00,0.5>你<00:10.50,0.5>好")
+    checkf("逐字 mm:ss 起点", f.wt_sec, [10.0, 10.5])
+    // ⚠ 当前行为（金标照抄，**别顺手改**）：时长写 "0.5" 带小数点 ⇒ 现有解析判"非纯数字"
+    //   ⇒ 时长记0 ⇒ 结束秒 == 起点秒 ⇒ 渲染侧退回"唱到下一个字的起点"（见 player.lrc_word_span 注释）
+    checkf("逐字 mm:ss 时长带小数⇒记 0（退回线性 ✓）", f.wt_end, [10.0, 10.5])
+
+    // ---- ⑦ 译文行 `<0,0>`：并回上一句尾，不加新行 ----
+    var g = pl.lrc_from_text("[00:30.00]原文\n[00:35.00]<0,0>译文")
+    checkf("译文行不加新句（时间戳被丢掉 ✓）", g.secs, [30.0])
+    checks("译文接到上一句尾", g.texts, ["原文 译文"])
+    // ⚠ 边界（金标照抄）：译文行出现在**首行**时前面没有句子可并⇒ 与原文并成一行
+    var g2 = pl.lrc_from_text("[00:30.00]原文<0,0>译文")
+    checks("首行译文⇒ 与原文同行", g2.texts, ["原文译文"])
+
+    // ---- ⑧ 非法标签：整行跳过（不是时间形状 ✓）----
+    var h = pl.lrc_from_text("[abc]x\n[01:xx]y\n[12]z\n[00:09]好的")
+    checkf("非法标签行被跳过", h.secs, [9.0])
+    checks("只留合法行", h.texts, ["好的"])
+
+    // ---- ⑨ 不闭合的逐字标签当普通字符（别吞内容 ✓）----
+    var i2 = pl.lrc_from_text("[00:01.00]a<100 b")
+    checks("不闭合 < 保留为文本", i2.texts, ["a<100 b"])
+
+    print("")
+    if fails == 0 {
+        print("=== 全部通过 ===")
+    } else {
+        print($"=== 有失败：{fails} 项 ✗ ===")
+    }
+}

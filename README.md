@@ -77,6 +77,8 @@
 | 文件 | 职责 |
 | --- | --- |
 | `musicdl_gui.leno` | GUI 主程序：主窗口（搜索栏 / 音源勾选 / 结果表 / 右键菜单）+ 标题栏动作 |
+| `songrow.leno` | **歌曲行的字段契约**：10 个下标常量（`F_*`）+ 具名存取（`rowname` / `rowext` / `rowbytes` …）。全仓唯一事实来源 —— 引擎转发一份 `eng.F_*` 保兼容，GUI/下载窗口零改动 |
+| `parsing.leno` | **严格解析**工具（纯逻辑）：`parse_secs` / `parse_millis` / `parse_word_span` / `parse_uint` 一律用**多返回值**`(值, 是否成功)`，不用 -1 哨兵；外加越界安全取值 `at` / `at_int` / `tail_from` |
 | `dl_engine.leno` | **引擎层**（无 UI、无 print、无 main）：音源注册表 + 分片下载（进度 / 续传 / 暂停取消）+ 跨线程 worker 入口；对外一律传「纯字符串数组行」（struct 不能跨线程 ✗） |
 | `dl_window.leno` | 下载窗口（非模态、不重复打开：任务表 + 总进度 + 按钮 + 120ms 刷新） |
 | `player.leno` | 播放器**纯逻辑**：扫目录 / 播放索引 / 循环三态 / 歌词解析（标准 LRC + 逐字时间轴） |
@@ -124,10 +126,12 @@ leno.exe musicdl.leno --help
 
 ## 五、跑测试
 
-8 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
+10 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
 
 ```bat
 <发行包>\leno.exe test\test_player_state.leno      :: 播放器规则：认哪些扩展名 / 下一首是谁 / 循环三态 / 失败要安全
+<发行包>\leno.exe test\test_parsing.leno           :: parsing/songrow 的边界：at_int 脏数据**不抛** / 解析严格性 / 老行兼容（43 项断言 ✓）
+<发行包>\leno.exe test\test_lrc_parse.leno         :: 歌词解析金标：标准 LRC / 逐字时间轴 / 译文行 / 非法标签（22 项断言 ✓）
 <发行包>\leno.exe test\test_parallel_dl.leno       :: 多首歌并行下载（离线服务端）
 <发行包>\leno.exe test\test_settings.leno          :: 设置的真文件读写与钳位
 <发行包>\leno.exe test\test_dl_window_open.leno    :: 下载窗口「不重复打开」的规则
@@ -149,6 +153,14 @@ leno.exe musicdl.leno --help
 
 ## 七、约定
 
+- **字段契约只有一处**：歌曲行的下标一律用 `songrow.leno` 的 `F_*`（或它的具名存取
+  `srow.rowname(row)` 等），**不要写裸下标** `row[1]` —— 加字段只能在**末尾**追加，
+  中间插入会让已缓存的行含义错位且**编译器不报错** ✗
+- **严格解析走 `parsing.leno`**：需要"认不出就失败"时用 `parse_secs` / `parse_uint`
+  这类接口（多返回值 `(值, 是否成功)`），**不要拿 -1 当失败哨兵** —— `-1` 与合法负数
+  永远分不开 ✗（`player.lrc_tag_secs` 就是这么被替掉的）
+- **跨线程只传 `Array[string]`**：struct / 多返回值都不能过 channel（收到的是 `any`，
+  静态检查会拒绝解构）⇒ 行协议与进度协议保持"纯字符串数组"是有原因的，不是偷懒 ✓
 - `downloads/` 是默认输出目录（音频 + 同名 `.lrc`），**已在 `.gitignore` 里**
   ⇒ 别把下下来的内容提交上来（体积大，而且那不该由这个仓库分发）
 - `.lenocache/`、`*.lenb`、`dist/` 同样是产物，不入库

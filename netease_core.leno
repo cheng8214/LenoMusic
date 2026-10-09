@@ -31,6 +31,7 @@ import jsons
 import strings
 import "web_net" as net
 import "./netease_crypto.leno" as wc
+import "./songrow.leno" as srow
 import "./thirdparty.leno" as thirdparty
 
 use net.(HttpClient)
@@ -159,11 +160,11 @@ export func searchrows(HttpClient client, string keyword, int limit): Array[Arra
     int k = 0
     while k < rows.len() {
         Array[string] row = rows[k]
-        int sz = getsize(sizes, row[0])
+        int sz = getsize(sizes, srow.rowid(row))
         if sz > 0 {
-            row[5] = "mp3"                  // 未登录时服务端只给 mp3（见头部 ③）
-            row[6] = fmtsize(sz)
-            row[7] = _str(sz)
+            row[srow.F_EXT] = "mp3"                  // 未登录时服务端只给 mp3（见头部 ③）
+            row[srow.F_SIZETEXT] = fmtsize(sz)
+            row[srow.F_BYTES] = _str(sz)
         }
         k = k + 1
     }
@@ -178,15 +179,15 @@ export func searchrows(HttpClient client, string keyword, int limit): Array[Arra
 //     下载时再取一次必然失败 ⇒ dl_engine 直接拿行里的直链下 ✓
 //   ★ 拿不到就**保持官方结果**：有 mp3 体积的行照旧可下 ⇒ 第三方全挂也不会比以前差 ✓
 export func proberow(HttpClient client, Array[string] row) {
-    Array[string] tp = thirdparty.resolve(client, "netease", row[0])
+    Array[string] tp = thirdparty.resolve(client, "netease", srow.rowid(row))
     if tp.len() < 3 { return }
-    row[5] = tp[1]                  // ext 按**直链后缀**（flac / 兜底的 mp3 ✓）
+    row[srow.F_EXT] = tp[1]                  // ext 按**直链后缀**（flac / 兜底的 mp3 ✓）
     int tb = _int_or(tp[2], 0)
     if tb > 0 {
-        row[6] = fmtsize(tb)
-        row[7] = _str(tb)
+        row[srow.F_SIZETEXT] = fmtsize(tb)
+        row[srow.F_BYTES] = _str(tb)
     }
-    row[9] = tp[0]
+    row[srow.F_URL] = tp[0]
 }
 
 // id → 可下体积（拿不到直链的 id 不进表 ⇒ 列表里显示空白 = 这首下不了）

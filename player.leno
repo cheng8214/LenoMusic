@@ -4,6 +4,7 @@ import dirs
 import files
 import strings
 import "Music" as audio
+import "./parsing.leno" as parsing
 use audio.Sound
 
 // ==================== 显示用：从文件名拆"歌名 / 歌手"（纯逻辑 ✓ 能离线单测）====================
@@ -155,34 +156,11 @@ func cp_slice(Array[int] cps, int from, int count): string {
     return out
 }
 
-// 一个时间标签（"mm:ss.xx"）⇒ 秒 ✓；**不是这个形状就返回 -1**（`[ti:…]` 走这条 ✓）
-func lrc_tag_secs(string tag): float {
-    Array[int] c = strings.to_codepoints(tag)
-    int mm = 0
-    int i = 0
-    int d = 0
-    while i < c.len() and c[i] >= 48 and c[i] <= 57 { mm = mm * 10 + (c[i] - 48); i = i + 1; d = d + 1 }
-    if d == 0 { return -1.0 }
-    if i >= c.len() or c[i] != 58 { return -1.0 }        // ':'
-    i = i + 1
-    int ss = 0
-    d = 0
-    while i < c.len() and c[i] >= 48 and c[i] <= 57 { ss = ss * 10 + (c[i] - 48); i = i + 1; d = d + 1 }
-    if d == 0 { return -1.0 }
-    float frac = 0.0
-    if i < c.len() and c[i] == 46 {                      // '.'
-        i = i + 1
-        int cs = 0
-        int n = 0
-        while i < c.len() and c[i] >= 48 and c[i] <= 57 { cs = cs * 10 + (c[i] - 48); i = i + 1; n = n + 1 }
-        float sc = 1.0
-        int t = 0
-        while t < n { sc = sc * 10.0; t = t + 1 }
-        if n > 0 { frac = _float(cs) / sc }
-    }
-    if i != c.len() { return -1.0 }                      // 尾巴上还有别的字符 ⇒ 不认 ✓
-    return _float(mm * 60 + ss) + frac
-}
+// 时间标签 / 逐字标签的解析都在 `parsing.leno`（parse_secs / parse_word_span ✓
+//   2026-10-09：原先是本文件里两段手搓码点游标（lrc_tag_secs / lrc_word_span，
+//   各 30~40 行逐字节判 ASCII 数字）⇒ 同一套"严格解析"散在多处、还各用 -1 当失败哨兵✗
+//   现在统一走 parsing：**多返回值 (值, 是否成功)**，调用处一行拿到"取值 + 判定" ✓
+//   ⚠ 口径必须与原实现逐位一致（重构不改行为 ✓ 金标见 test/test_lrc_parse.leno）
 
 // 第 i 句有几条逐字时间（0 = 这句会退回线性 ✓；界面/自检都能读 ✓）
 export func word_count_at(Lrc l, int i): int {
@@ -193,50 +171,6 @@ export func word_count_at(Lrc l, int i): int {
         k = k + 1
     }
     return c
-}
-
-// 逐字标签 ⇒ (起始秒, 时长秒)
-//   · 酷我 lrcx 那种是 **毫秒**："1234,567"（起点, 时长 ✓）⇒ (1.234, 0.567) ✓
-//   · 也容一手 "00:12.34,0.5"（起点写成 mm:ss.xx、时长还是秒 ✓）
-//   · 起点认不出 ⇒ (-1, 0)（当作没有逐字数据 ✓ 退回线性 ✓）
-//   · 时长缺失/认不出 ⇒ 0（渲染侧会退回"唱到下一个字的起点" ✓）
-func lrc_word_span(string tag): [float, float] {
-    if tag == null or tag == "" { return -1.0, 0.0 }
-    Array[string] parts = tag.split(",")
-    if parts.len() == 0 { return -1.0, 0.0 }
-    // 起点
-    string a = parts[0].trim()
-    float t = lrc_tag_secs(a)                    // "00:12.34" 这种 ✓
-    if t < 0.0 {
-        Array[int] c = strings.to_codepoints(a)  // 纯数字 ⇒ 毫秒 ✓
-        if c.len() == 0 { return -1.0, 0.0 }
-        int n = 0
-        int i = 0
-        while i < c.len() {
-            if c[i] < 48 or c[i] > 57 { return -1.0, 0.0 }
-            n = n * 10 + (c[i] - 48)
-            i = i + 1
-        }
-        t = _float(n) / 1000.0
-    }
-    // 时长（可缺 ✓）
-    float d = 0.0
-    if parts.len() >= 2 {
-        string b = parts[1].trim()
-        Array[int] c2 = strings.to_codepoints(b)
-        int m = 0
-        int j = 0
-        bool bad = false
-        while j < c2.len() {
-            if c2[j] < 48 or c2[j] > 57 { bad = true } else { m = m * 10 + (c2[j] - 48) }
-            j = j + 1
-        }
-        if not bad and c2.len() > 0 {
-            // 起点写成了 mm:ss.xx ⇒ 时长大概率也是秒 ✗ 不好判 ⇒ 一律按**毫秒**理解再兜底 ✓
-            d = _float(m) / 1000.0
-        }
-    }
-    return t, d
 }
 
 // 一行 ⇒ 往 out 里加 0..N 条（元信息/空行 ⇒ 0 条 ✓）
@@ -254,8 +188,10 @@ func lrc_add_line(string line, Lrc out) {
         int j = i + 1
         while j < cps.len() and cps[j] != 93 { j = j + 1 }   // ']'
         if j >= cps.len() { return }                     // 不闭合 ⇒ 这行不要 ✓
-        float t = lrc_tag_secs(cp_slice(cps, i + 1, j - i - 1))
-        if t < 0.0 { return }                            // [ti:…] 之类 ⇒ 整行跳过 ✓
+        // 时间标签 ⇒ (秒, 是否认得)——"认不出"就是元信息行 ⇒ 整行跳过 ✓
+        //   ⚠ 解构出ok 比原来的"t < 0.0"更直白：失败时给的是 0.0，不是靠哨兵值区分 ✓
+        var[float, bool](t, tok) = parsing.parse_secs(cp_slice(cps, i + 1, j - i - 1))
+        if not tok { return }
         ts.add(t)
         i = j + 1
     }
@@ -280,8 +216,9 @@ func lrc_add_line(string line, Lrc out) {
                 if seen == 0 and tag.split(",").len() > 0 and tag.split(",")[0].trim() == "0" {
                     zeroLead = true
                 }
-                var[float, float](w, wd) = lrc_word_span(tag)
-                if w >= 0.0 {
+                // 逐字标签 ⇒ (起点秒, 时长秒, 起点是否认得) ✓ 三返回值
+                var[float, float, bool](w, wd, wok) = parsing.parse_word_span(tag)
+                if wok {
                     lastW = w
                     lastWEnd = w + wd                    // 时长缺失(0) ⇒ end == start ⇒ 渲染侧退回"唱到下一个字" ✓
                 }

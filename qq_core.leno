@@ -34,6 +34,7 @@ import rands
 import times
 import "web_net" as net
 import "./qq_crypto.leno" as qc
+import "./songrow.leno" as srow
 import "./thirdparty.leno" as thirdparty
 
 use net.(Response, HttpClient)
@@ -233,21 +234,21 @@ func searchonce(HttpClient client, string keyword, int limit): Array[Array[strin
 //   ⇒ 交给 dl_engine.probe_rows 分片**并行**跑 ✓
 //   第三方只认 **songmid**（复合 id 的前半段）✓；拿不到就保持官方结果（免费曲的 M800/M500 照旧可下 ✓）
 export func proberow(HttpClient client, Array[string] row) {
-    Array[string] tp = thirdparty.resolve(client, "qq", parseid(row[0])[0])
+    Array[string] tp = thirdparty.resolve(client, "qq", parseid(srow.rowid(row))[0])
     if tp.len() < 3 { return }
-    string oldext = row[5]
+    string oldext = srow.rowext(row)
     string ext = tp[1]
     int tb = _int_or(tp[2], 0)
-    row[5] = ext
+    row[srow.F_EXT] = ext
     if tb > 0 {
-        row[6] = strings.fmt_size(tb)
-        row[7] = _str(tb)
+        row[srow.F_SIZETEXT] = strings.fmt_size(tb)
+        row[srow.F_BYTES] = _str(tb)
     } else if oldext != ext {
         // 档位跟原列表不同、体积又探不到 ⇒ **不冒充**（宁可这行被 has_size 过滤 ✓）
-        row[6] = ""
-        row[7] = "0"
+        row[srow.F_SIZETEXT] = ""
+        row[srow.F_BYTES] = "0"
     }
-    row[9] = tp[0]
+    row[srow.F_URL] = tp[0]
 }
 
 // 搜索（带重试）：公开兜底 q36 会被限流 ⇒ 偶发返回空壳

@@ -1,0 +1,63 @@
+// songrow.leno — **歌曲行的字段契约**：下标常量 + 具名存取（唯一事实来源 ✓）
+//
+// 为什么单独一个文件：行是 `Array[string]`（**跨线程只能传纯字符串数组** —— 语言硬约束，
+//   见 dl_engine.leno 文件头 ✓），所以"第几段是什么"这件事只能靠约定。
+//   此前这个约定有**三份副本**：
+//     ① dl_engine.leno 头部（`export const int F_ID` … + 字段表注释 ✓）
+//     ② player.leno / dl_window.leno / musicdl_gui.leno 各自抄一份解释（"job[1] =歌名"…）
+//     ③ **三个音源模块直接写裸下标** `row[5]` / `row[9]`（kugou / qq / netease 的 probe_row ✓）
+//   而 ① 改字段顺序时，②③ 不会跟着报错 —— ③ 连常量都没用 ⇒ 纯靠人记 ✗
+//   ⇒ 常量沉到这个**叶子模块**（只 import parsing ⇒ 谁都能 import，不成环 ✓），
+//     大家只认这里；dl_engine 再原样转发一份（`export const int F_ID = srow.F_ID`）
+//     以保住已有的 `eng.F_xxx` 调用（GUI / 下载窗口零改动 ✓）。
+//
+// ⚠ 字段顺序是**界面与落盘共用**的契约：加字段只能在**末尾**追加（中间插入会让
+//   已缓存的行含义错位 ⇒ 静默出错 ✗）。老行缺新字段时一律走 accessor 的默认值
+//   （向后兼容 ✓ 见 dl_engine.srcid 的"缺这一项当 kuwo"）。
+import "./parsing.leno" as parsing
+
+// ==================== 字段下标（唯一事实来源）====================
+export const int F_ID = 0
+export const int F_NAME = 1
+export const int F_ARTIST = 2
+export const int F_ALBUM = 3
+export const int F_DURATION = 4
+export const int F_EXT = 5
+export const int F_SIZETEXT = 6
+export const int F_BYTES = 7
+// 音源标记："kuwo" / "netease" / "kugou" / "qq"（缺 ⇒ 回落 kuwo，见 dl_engine.srcid ✓）
+export const int F_SRC = 8
+// 直链：搜索时第三方已经取回来的直链，空串 ⇒ 调用方现取（见 dl_engine.songurl ✓）
+export const int F_URL = 9
+
+// 行里"有没有这一段"（判断老行 / 新行 ⇒ 决定要不要补默认值 ✓）
+export func has_field(Array[string] row, int field): bool {
+    return field >= 0 and field < row.len()
+}
+
+// ==================== 只读存取（越界给默认值，不抛 ✓）====================
+// 为什么不直接 row[F_NAME]：`F_NAME` 在别处被改过下标时，直接下标会**静默取错段**；
+//   走 accessor 时"含义"与"下标"绑在一起 ✓
+export func rowid(Array[string] row): string { return parsing.at(row, F_ID, "") }
+export func rowname(Array[string] row): string { return parsing.at(row, F_NAME, "") }
+export func rowartist(Array[string] row): string { return parsing.at(row, F_ARTIST, "") }
+export func rowalbum(Array[string] row): string { return parsing.at(row, F_ALBUM, "") }
+export func rowduration(Array[string] row): string { return parsing.at(row, F_DURATION, "") }
+export func rowext(Array[string] row): string { return parsing.at(row, F_EXT, "") }
+export func rowsizetext(Array[string] row): string { return parsing.at(row, F_SIZETEXT, "") }
+export func rowbytes(Array[string] row): int { return parsing.at_int(row, F_BYTES, 0) }
+export func rowsrc(Array[string] row): string { return parsing.at(row, F_SRC, "") }
+export func rowurl(Array[string] row): string { return parsing.at(row, F_URL, "") }
+
+// 字节数的**字符串**形态（行里存的就是字符串 ⇒ 进度消息要原样带走，别转 int 又转回 ✓）
+export func rowbytes_text(Array[string] row): string { return parsing.at(row, F_BYTES, "0") }
+
+// 这一行"有没有歌曲大小"—— 没有就不进结果表（三音源口径一致：没有大小 = 下不了 ✓
+//   判据：格式文本为空 **或** 字节数为 0（任一不满足都算"下不了" ✓）
+//   ⚠ 与旧实现的一处**有意差异**：老实现直接 `row[F_SIZETEXT]` 硬索引，
+//     行短于 8 段时会抛异常；这里越界给默认值 ⇒ 返回 false（安全失败 ✓）。
+//     搜索结果行恒为 10 段，所以线上无差异，只是把"崩"换成"不认" ✓
+export func rowhas_size(Array[string] row): bool {
+    if rowsizetext(row) == "" { return false }
+    return rowbytes(row) > 0
+}
