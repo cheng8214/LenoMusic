@@ -1,0 +1,65 @@
+// test_history.leno — 下载历史的**真文件读写**回归（纯逻辑、无 SDL3 ⇒ 无 GUI 可跑 ✓）
+//
+// ⚠ 会真写 %APPDATA%\LenoMusicDl\history.json：**测完把原内容写回去**，不留痕 ✓
+//   （与 test_settings 同一套思路：读写必须真的过一遍文件系统才算测过 ✓）
+// 跑：build\leno.exe test\test_history.leno
+import jsons
+import "../dl_history.leno" as hist
+
+main() {
+    print("=== 下载历史（真文件）===")
+    print("   " + hist.store_path())
+
+    Array[Array[string]] keep = hist.load()          // 先记下原来的（测完放回去 ✓）
+
+    // ① 清空
+    hist.clear()
+    assert_eq(hist.load().len(), 0)
+
+    // ② 追加：**新的在前**（历史页第一行就是刚下完的 ✓）+ 六段字段都过得去
+    hist.append([hist.mkrow("A - 甲", "flac", "10.00 MB", "完成", "D:\\m\\A.flac", 1791552000)])
+    hist.append([hist.mkrow("B - 乙", "mp3", "4.00 MB", "失败：取直链失败", "", 1791552100)])
+    hist.append([hist.mkrow("C - 丙", "lrc", "-", "完成", "D:\\m\\C.lrc", 1791552200)])
+    Array[Array[string]] got = hist.load()
+    assert_eq(got.len(), 3)
+    assert_eq(hist.hlabel(got[0]), "C - 丙")
+    assert_eq(hist.hext(got[0]), "lrc")
+    assert_eq(hist.hlabel(got[2]), "A - 甲")
+    assert_eq(hist.hpath(got[1]), "")                 // 失败行没有路径（定位按钮据此置灰 ✓）
+    assert_eq(hist.hstatus(got[1]), "失败：取直链失败")
+    assert_eq(hist.htime_text(got[2]).len(), 16)      // "2026-10-09 21:35"（本地时区不影响长度 ✓）
+    assert_eq(hist.fmt_time("0"), "")                 // 坏时间 ⇒ 空串（不抛 ✓）
+    assert_eq(hist.fmt_time("坏值"), "")
+
+    // ③ 删一条：按**当前顺序**的下标 ✓；越界给 false（不抛 ✓）
+    assert_eq(hist.remove_at(1), true)
+    Array[Array[string]] after = hist.load()
+    assert_eq(after.len(), 2)
+    assert_eq(hist.hlabel(after[0]), "C - 丙")
+    assert_eq(hist.hlabel(after[1]), "A - 甲")        // 中间那条被删掉 ✓
+    assert_eq(hist.remove_at(99), false)
+
+    // ④ 上限：一次塞 MAX_ITEMS+5 条 ⇒ 只留 MAX_ITEMS，且**丢的是最新的尾部**（先来的保住 ✓）
+    Array[Array[string]] many = []
+    int i = 0
+    while i < hist.MAX_ITEMS + 5 {
+        many.add(hist.mkrow("item " + _str(i), "mp3", "1.00 MB", "完成", "p", 1791552000))
+        i = i + 1
+    }
+    hist.append(many)
+    Array[Array[string]] capped = hist.load()
+    assert_eq(capped.len(), hist.MAX_ITEMS)
+    assert_eq(hist.hlabel(capped[0]), "item 0")
+    assert_eq(hist.hlabel(capped[hist.MAX_ITEMS - 1]), "item " + _str(hist.MAX_ITEMS - 1))
+
+    // ⑤ 坏文件 ⇒ 空数组（**不抛** ✓ 历史坏了不该拦着应用起不来）
+    assert_eq(jsons.write_text(hist.store_path(), "{ 这不是 json"), true)
+    assert_eq(hist.load().len(), 0)
+
+    // ⑥ 还原用户原来的历史（先清空再按原顺序 append ⇒ 次序原样 ✓）
+    hist.clear()
+    hist.append(keep)
+    assert_eq(hist.load().len(), keep.len())
+    print("   已还原原历史（" + _str(keep.len()) + " 条）")
+    print("test_history passed")
+}

@@ -1,0 +1,171 @@
+// dl_history.leno — 音乐下载器的**下载历史**（纯逻辑：读写记录；**不 import SDL3 ⇒ 可单测 ✓**）
+//
+// 分层与 dl_settings.leno 同款：本文件只回答"记录是什么、存哪儿、怎么读怎么写"；
+//   画界面（下载窗口的「历史」页签）在 dl_window.leno 里 ✓
+//
+// 存放位置（与设置同目录、同约定 ⇒ 只差一个文件名 ✓）：
+//   Windows    ：%APPDATA%\LenoMusicDl\history.json
+//   Linux/macOS：$XDG_CONFIG_HOME（或 ~/.config）/LenoMusicDl/history.json
+//   ⚠ 与设置一样**不放应用目录**：打包后应用目录可能只读、或每次运行换个临时目录 ✓
+//
+// 记录形态（每行 6 段；**自成一套下标**，不跟 songrow 的歌曲行混 —— 历史只给人看，
+//   而且它比歌曲行多"状态/路径/时间"、少"专辑/时长" ⇒ 硬套 songrow 只会两边都别扭 ✓）：
+//   [0] 歌名 - 歌手（已拼好 ✓）  [1] 格式（flac/mp3/lrc）  [2] 大小文本（"10.32 MB"；失败给 "-"）
+//   [3] 状态（"完成" / "失败：原因" / "已取消"）  [4] 文件路径（失败/取消给 "" ⇒ 定位按钮据此置灰）
+//   [5] 完成时间（Unix **秒**字符串；显示时走 fmt_time ⇒ 本地时间 ✓）
+//   ⚠ 时间用 `times.now()`（墙钟秒）**不是** `times.ms()` ✗ —— 后者是单调毫秒，不是时间戳（踩过 ✓）
+import dirs
+import files
+import jsons
+import times
+
+// 上限：超出丢**最旧**的（历史只用来"回头看看"，不该无限膨胀 ✓）
+export const int MAX_ITEMS = 500
+
+// ---- 下标契约（唯一事实来源；界面/测试都引这里，不写裸下标 ✓）----
+export const int H_LABEL = 0
+export const int H_EXT = 1
+export const int H_SIZE = 2
+export const int H_STATUS = 3
+export const int H_PATH = 4
+export const int H_TIME = 5
+
+// 记录目录（与 dl_settings.app_dir 同一份约定；两边各算一遍 ⇒ 互不依赖 ✓）
+func app_dir(): string {
+    if _os() == "windows" {
+        return dirs.join(_env_or("APPDATA", _tmpdir()), "LenoMusicDl")
+    }
+    string base = _env_or("XDG_CONFIG_HOME", "")
+    if base == "" {
+        string home = _env_or("HOME", "")
+        if home == "" { base = _tmpdir() } else { base = dirs.join(home, ".config") }
+    }
+    return dirs.join(base, "LenoMusicDl")
+}
+
+// 历史文件路径（**导出**：测试与设置共用同一份口径 ✓）
+export func store_path(): string {
+    return dirs.join(app_dir(), "history.json")
+}
+
+// ---- 存取 ----------------------------------------------------------------
+
+// 读全部记录（**新的在前** == 文件里的顺序 ✓）
+//   文件不存在 / 坏了 / 形状不对 ⇒ **空数组**，绝不抛 ✓（历史坏了不该拦着应用起不来）
+export func load(): Array[Array[string]] {
+    Array[Array[string]] out = []
+    string p = store_path()
+    if not dirs.stat(p).exists { return out }
+    var d = null
+    try {
+        d = jsons.read_file(p)
+    } catch e {
+        return out
+    }
+    var m = d as Dict[string, any]
+    if m == null { return out }
+    var items = jsons.get_obj(m, "items")
+    if items is Array => raw {
+        int i = 0
+        while i < raw.len() {
+            var one = raw[i] as Array
+            if one != null {
+                Array[string] row = []
+                int k = 0
+                while k < 6 {
+                    string v = ""
+                    if k < one.len() { v = _str(one[k]) }
+                    row.add(v)
+                    k = k + 1
+                }
+                out.add(row)
+            }
+            i = i + 1
+        }
+    }
+    return out
+}
+
+// 整表写回（内部用 ✓）；失败 ⇒ false（调用方自己决定要不要提示）
+func saveall(Array[Array[string]] items): bool {
+    try {
+        jsons.write_file(store_path(), {version: 1, items: items})
+    } catch e {
+        return false
+    }
+    return true
+}
+
+// 追加若干条（**新记录在前** ⇒ 历史页第一行就是刚下完的 ✓）
+//   · 一次调用只 **读一次盘 + 写一次盘**（下载窗口每完成一首调一次 ⇒ 别每首读两遍 ✓）
+//   · 超出 MAX_ITEMS ⇒ 丢最旧的（数组没有 remove ⇒ 用切片重建 ✓）
+export func append(Array[Array[string]] rows): bool {
+    if rows.len() == 0 { return true }
+    Array[Array[string]] cur = load()
+    Array[Array[string]] out = []
+    for rows to r { out.add(r) }
+    for cur to r { out.add(r) }
+    if out.len() > MAX_ITEMS {
+        Array[Array[string]] cut = []
+        int i = 0
+        while i < MAX_ITEMS {
+            cut.add(out[i])
+            i = i + 1
+        }
+        out = cut
+    }
+    return saveall(out)
+}
+
+// 清空（保留文件，写个空表 ✓ 比删文件好：下次读不用处理"文件不在"这条分支）
+export func clear(): bool {
+    return saveall([])
+}
+
+// 删掉某一条（按**当前顺序**的下标 ✓ 界面拿的是它）；越界 ⇒ false（不抛 ✓）
+export func remove_at(int idx): bool {
+    Array[Array[string]] cur = load()
+    if idx < 0 or idx >= cur.len() { return false }
+    Array[Array[string]] out = []
+    int i = 0
+    while i < cur.len() {
+        if i != idx { out.add(cur[i]) }
+        i = i + 1
+    }
+    return saveall(out)
+}
+
+// ---- 小工具 --------------------------------------------------------------
+
+// 拼一条记录（界面只给"业务字段"，6 段布局收在这里 ✓）
+export func mkrow(string label, string ext, string size, string status, string path, int secs): Array[string] {
+    Array[string] r = []
+    r.add(label)
+    r.add(ext)
+    r.add(size)
+    r.add(status)
+    r.add(path)
+    r.add(_str(secs))
+    return r
+}
+
+// 秒 → "2026-10-09 21:35"（**本地时间** ✓ 由 times.format 走 localtime；0/坏值 ⇒ ""）
+export func fmt_time(string secs): string {
+    int t = _int_or(secs, 0)
+    if t <= 0 { return "" }
+    return times.format(t, "%Y-%m-%d %H:%M")
+}
+
+// ---- 只读访问（越界给默认值 ⇒ 界面不必先判长度 ✓）----
+
+func at(Array[string] row, int i, string dflt): string {
+    if i < 0 or i >= row.len() { return dflt }
+    return row[i]
+}
+
+export func hlabel(Array[string] row): string { return at(row, H_LABEL, "") }
+export func hext(Array[string] row): string { return at(row, H_EXT, "") }
+export func hsize(Array[string] row): string { return at(row, H_SIZE, "") }
+export func hstatus(Array[string] row): string { return at(row, H_STATUS, "") }
+export func hpath(Array[string] row): string { return at(row, H_PATH, "") }
+export func htime_text(Array[string] row): string { return fmt_time(at(row, H_TIME, "")) }

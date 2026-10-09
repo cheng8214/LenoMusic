@@ -27,8 +27,10 @@ import dirs
 import files
 import strings
 import threads
+import times
 import "./dl_engine.leno" as eng
-use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, Table, ProgressBar, VBox, Scancode)
+import "./dl_history.leno" as hist       // 下载历史（纯逻辑模块 ✓ 见它的文件头）
+use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, Table, ProgressBar, VBox, HBox, TabControl, Scancode)
 
 // flags 里有没有某项（与主界面、引擎层的同名私有函数各管各的，不跨模块 ✓）
 func hasflag(Array[string] flags, string name): bool {
@@ -124,21 +126,37 @@ export struct DlWindow {
 
     // ---- 控件（build() 里赋值；`open` 为 true 之后才会被 tick/回调碰到 ✓）----
     Window dlg
+    TabControl tabs                  // ★ 页签：0 = 下载（任务表）/ 1 = 历史（见 build ✓）
     Table table
     ProgressBar bar
     Label info
     Label stat
+
+    // ---- ★ 下载历史（2026-10-09 加「历史」页签 ✓）----
+    //   `histItems` = **完整记录**（含文件路径 ✓，与 histTable 的行**一一对应** ⇒ 右键按行号取它）
+    //   `histLbl`   = 计数/提示行
+    Table histTable
+    Label histLbl
+    Array[Array[string]] histItems = []
+    // 每条任务的**落盘路径**（`start` 消息里带着 ✓ 缓存下来 ⇒ 失败/取消也能记下"半截文件在哪"）
+    Array[string] paths = []
     // ★ 按钮提成**字段**（2026-10-08 ✓）：先前是 build 里的局部变量 ⇒ 除了"开始"那一下，
     //   别处（例如右键「重试」）改不动它们的可用态 ✗ ⇒ 现在统一由 `setRunningUi` 管 ✓
     Button startBtn
     Button pauseBtn
     Button cancelBtn
+    Button clearBtn
     Button openBtn
     Button closeBtn
 
     // ★ 右键「重试」要把**哪些下标**重下 —— 列在这里，由主界面起线程 ✓
     //   （与 `wantStart` 同一条硬约束：`threads.start` 必须在起线程那个文件里 ✓ 见文件头 ⚠）
     Array[int] retryList
+
+    // ★ 「清空」遗留的线程（2026-10-09 ✓）：清空时若还在下载 ⇒ 先发取消，再把 worker 挪到这儿 ——
+    //   本轮的结果已经不要了（表都清了 ✗），但线程**必须有人 join**（不然句柄没人回收 ✓）
+    //   ⇒ 由 tick() 悄悄收：谁停了就 join 掉、抛出的异常也吞掉（那正是"取消"引起的 ✓）
+    Array[Thread] orphan
 
     // ---- 与主界面 / worker 的连线（**多首歌并行**：N 个 worker ✓）----
     Label? hostLbl = null            // 主界面状态栏：结束时回写一句（open 时传进来一次 ✓）
@@ -152,8 +170,8 @@ export struct DlWindow {
     // ⚠ 非模态 ⇒ 别再用 `runModal`：它是 `pushModal + run`，而模态会让主窗口**收不到任何事件** ✗
     func build() {
         string title = if lyriconly then "下载歌词" else "下载"
-        int dw = 820
-        int dh = 440
+        int dw = 860
+        int dh = 500                     // ★ 加「历史」页签后加高一点（不然历史表只剩三四行 ✓）
         int tbH = SDL3.DIALOG_TB_H
         // ★ 非模态对话框（**不 pushModal**）⇒ 主窗口照样收事件 ✓
         //   `createDialogWindow` 是模态那条（UTILITY 标志 + 自动 raise）；非模态这条不自动置前
@@ -163,6 +181,13 @@ export struct DlWindow {
         TitleBar tb = SDL3.dialogTitleBar(dlg, title)
         var droot = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, padX: 16, padY: 14, spacing: 8})
         dlg.setRootAt(droot, 0, tb.get_h())
+        // ★ 2026-10-09：内容拆成**两个页签**（页 0 = 下载任务 / 页 1 = 下载历史 ✓）
+        //   为什么用页签、不再开一个窗口：任务与历史是同一条流程的两面（刚下完就想回头看看 ✓），
+        //   而本窗口已经是**非模态**的；再开一个窗口只多一个"要记得关"的东西 ✗
+        //   （做法照 leno_gui 数据看板 dashboard.leno 与主界面：`setPageLayout` ⇒ 页内也是布局驱动 ✓）
+        //   padY 12：页签头与页内容之间留一口气（原先 0 ⇒ 按钮行紧贴「下载 / 历史」标签，挤 ✗）
+        //   spacing 10：表 / 进度条 / 说明 / 按钮各行之间也松一点 ✓
+        var page0 = SDL3.createVBox({padX: 0, padY: 12, spacing: 10})
 
         // 重置本轮状态
         closing = false
@@ -177,6 +202,8 @@ export struct DlWindow {
         status = []
         got = []
         exp = []
+        paths = []
+        orphan = []                  // 上一批"被清空"留下的线程（新窗口实例本来也是空的 ✓ 写在这里防漏 ✓）
         int totalExp = 0
         Array[Array[string]] rows = []
         for jobs to j {
@@ -185,6 +212,7 @@ export struct DlWindow {
             got.add(0)
             exp.add(e)
             status.add("等待中")
+            paths.add("")        // 落盘路径：start 消息到了就填 ✓（失败/取消时也能记下"半截文件在哪"）
             totalExp = totalExp + e
             // "只下歌词"模式：格式/大小那两列没有意义 ⇒ 显示 "-"（歌词约几十 KB，不值得标）
             // 进度列写**数值**（progress 单元格把该列文本当数值 ⇒ 别写"37%"以外的花活也行 ✓）
@@ -193,12 +221,14 @@ export struct DlWindow {
 
         table = SDL3.createTable({
             headers: ["歌曲", "格式", "大小", "进度", "状态"],
-            col_widths: [330.0, 60.0, 90.0, 94.0, 190.0],   // 进度列放宽：要装下"条 + 百分比" ✓
-            aligns: [0, 1, 2, 1, 0],
-            header_aligns: [0, 1, 2, 1, 0],
+            // 列宽合计 = **824**（页内容区实宽 828 ⇒ 留 4px 余量 ✓ 同历史表口径）
+            //   进度列放宽：要装下"条 + 百分比" ✓；状态列居中（与"大小"右对齐分得开 ✓）
+            col_widths: [360.0, 64.0, 96.0, 104.0, 200.0],
+            aligns: [0, 1, 2, 1, 1],
+            header_aligns: [0, 1, 2, 1, 1],
             zebra: true, row_h: 26, header_h: 28, font_size: 13,
             sortable: false, col_reorder: false, resizable: false,
-            empty_text: "没有任务",
+            empty_text: "还没有任务 —— 勾选歌曲后点「下载勾选」",
             // ★ 进度列 = **真进度条**（2026-10-07）：原先这列只能把进度写成文字"37%" ✗
             //   观感与下面那条总进度条**同源**（都出 sdl_progress.drawBar ✓）⇒ 不会一大一小两种样式
             cell_types: ["", "", "", "progress", ""],
@@ -214,39 +244,61 @@ export struct DlWindow {
         table.on_context_will_open(func(int row) { buildMenu(row) })
         table.on_context_select(func(int row, string id) { onMenu(row, id) })
         table.get_context_menu().set_image_size(18)      // 菜单项图标尺寸（与主界面同一口径 ✓）
-        droot.add(table, {grow: 1, shrink: 1, align: 3})
+        page0.add(table, {grow: 1, shrink: 1, align: 3})
 
         bar = SDL3.createProgressBar({h: 16, show_text: true, font_size: 12})
         bar.set_value(0.0)
-        droot.add(bar, {grow: 0, shrink: 0, align: 3})
+        page0.add(bar, {grow: 0, shrink: 0, align: 3})
 
-        // 并行度走引擎那一处口径（任务少就少开 ✓，上限来自**设置** ✓）—— 顺带让用户看得见"是并行在下" ✓
-        int nw = eng.dl_workers(jobs.len(), maxw)
-        string infotext = "共 " + _str(jobs.len()) + " 首"
-        if nw > 1 { infotext = infotext + "，" + _str(nw) + " 个线程并行下" }
-        if lyriconly {
-            infotext = infotext + "，点「开始下载歌词」开始（只抓 .lrc，不碰音频）"
+        string infotext = ""
+        string stattext = "下载中会实时显示每一首的进度；暂停/取消随时可用"
+        if jobs.len() == 0 {
+            // ★ 空任务（2026-10-09 ✓）：主界面那个下载图标现在**没勾选也开窗** ⇒ 空任务是它的**正常长相**，
+            //   得把"怎么往里加任务"说清楚（表格那行空文案 + 这两句 ✓）
+            infotext = "还没有任务 —— 回结果表勾选歌曲（或右键某一行「下载这一首」），再点「下载勾选」"
+            stattext = "「历史」页签里是以前下载过的记录（可复制文件名 / 定位文件 / 删记录 / 清空）"
         } else {
-            infotext = infotext + "，点「开始下载」开始（合计约 " + strings.fmt_size(totalExp) + "）"
-            if hasflag(flags, "lyric") { infotext = infotext + "，并顺带下载歌词" }
+            // 并行度走引擎那一处口径（任务少就少开 ✓，上限来自**设置** ✓）—— 顺带让用户看得见"是并行在下" ✓
+            int nw = eng.dl_workers(jobs.len(), maxw)
+            infotext = "共 " + _str(jobs.len()) + " 首"
+            if nw > 1 { infotext = infotext + "，" + _str(nw) + " 个线程并行下" }
+            if lyriconly {
+                infotext = infotext + "，点「开始下载歌词」开始（只抓 .lrc，不碰音频）"
+            } else {
+                infotext = infotext + "，点「开始下载」开始（合计约 " + strings.fmt_size(totalExp) + "）"
+                if hasflag(flags, "lyric") { infotext = infotext + "，并顺带下载歌词" }
+            }
         }
         info = SDL3.dialogLabel(infotext, 12)
-        droot.add(info, {grow: 0, shrink: 0, align: 0})
-        stat = SDL3.dialogLabel("下载中会实时显示每一首的进度；暂停/取消随时可用", 12)
-        droot.add(stat, {grow: 0, shrink: 0, align: 0})
+        page0.add(info, {grow: 0, shrink: 0, align: 0})
+        stat = SDL3.dialogLabel(stattext, 12)
+        page0.add(stat, {grow: 0, shrink: 0, align: 0})
 
         startBtn = SDL3.createButton({w: 130, h: 32, text: (if lyriconly then "开始下载歌词" else "开始下载"), type: "primary", font_size: 13})
         pauseBtn = SDL3.createButton({w: 90, h: 32, text: "暂停", type: "dark", font_size: 13})
         cancelBtn = SDL3.createButton({w: 90, h: 32, text: "取消", type: "dark", font_size: 13})
+        // ★ 「清空」按钮（2026-10-09，用户口径）：把**任务表整表**清掉 —— 已完成的、以及**正在下载的**
+        //   都能删；有下载在跑时**先提示**（确认框里说清"会取消它们"⇒ 见 askClearTasks ✓）
+        //   ⚠ 与「取消」不同：取消只停下载、行还留着（状态写"已取消"✓）；清空是把行也抹掉 ✓
+        clearBtn = SDL3.createButton({w: 96, h: 32, text: "清空", type: "dark", font_size: 13})
+        clearBtn.set_tip("清空任务列表（含正在下载的 —— 会先取消它们；**不动**已下载的文件）")
         openBtn = SDL3.createButton({w: 110, h: 32, text: "打开目录", type: "dark", font_size: 13})
         closeBtn = SDL3.createButton({w: 90, h: 32, text: "关闭", type: "dark", font_size: 13})
         pauseBtn.set_enabled(false)
         cancelBtn.set_enabled(false)
+        clearBtn.set_enabled(jobs.len() > 0)     // 空表没什么可清 ⇒ 灰着（点不动 ≠ 点了没反应 ✓）
         if jobs.len() == 0 {
             // 空任务（正常走不到：主界面两个入口都先检查 jobs.len() ✓）—— 但真到了也别让"开始"点了没反应 ✗
             startBtn.set_enabled(false)
         }
-        droot.add(SDL3.dialogButtonRow([startBtn, pauseBtn, cancelBtn, openBtn, closeBtn], 10), {grow: 0, shrink: 0, align: 3})
+        page0.add(SDL3.dialogButtonRow([startBtn, pauseBtn, cancelBtn, clearBtn, openBtn, closeBtn], 10), {grow: 0, shrink: 0, align: 3})
+
+        // ---- 页签：0 = 下载（上面那整套）/ 1 = 历史（见 buildHistoryPage ✓）----
+        tabs = SDL3.createTabControl({x: 0, y: 0, w: dw - 32, h: dh - 30, tabs: ["下载", "历史"], active: 0,
+                                      show_header: true, border: false, bg_color: #F5F6F8FF})
+        tabs.setPageLayout(0, page0)
+        tabs.setPageLayout(1, buildHistoryPage())
+        droot.add(tabs, {grow: 1, shrink: 1, align: 3})
 
         startBtn.on_click(func() {
             if started { return }
@@ -286,6 +338,7 @@ export struct DlWindow {
             stat.set_text("正在取消…")
             SDL3.markFrameRedraw()
         })
+        clearBtn.on_click(func() { askClearTasks() })
         openBtn.on_click(func() {
             if not openfolder(outdir) {
                 stat.set_text("打开目录失败：" + outdir)
@@ -345,6 +398,33 @@ export struct DlWindow {
     // 排空下载通道 + 刷新控件（主界面每 120ms 调一次 ✓）
     func tick() {
         if not open { return }
+        // ★ 「清空」遗留的线程（见 clearstate 的注释）：谁停了就 join 掉；收干净后连通道一起收 ✓
+        //   ⚠ 不 join 会让线程句柄一直挂着（清空是"不要结果"，但不是"可以不管资源" ✗）
+        if orphan.len() > 0 {
+            int orphanErrors = 0          // 被取消的 worker 退出时多半会带异常 ⇒ 只计数不打扰用户 ✓
+            Array[Thread] keep = []
+            for orphan to t {
+                if t is Thread {
+                    if t.state() == "running" {
+                        keep.add(t)
+                    } else {
+                        try {
+                            t.join()
+                        } catch e {
+                            // 这一轮已经作废 ⇒ 返回值/异常都不再关心（异常多半就是"取消"引起的 ✓）
+                            // ⚠ 语言不允许空 catch（会静默吞异常 ✗）⇒ 记个数；这里既不显示也不上报 ✓
+                            orphanErrors = orphanErrors + 1
+                        }
+                    }
+                }
+            }
+            orphan = keep
+            if orphan.len() == 0 {
+                if ch is Channel { ch.close() }
+                ch = null
+                cmds = []
+            }
+        }
         if ch is Channel {
             var m = ch.try_receive()
             int n = 0
@@ -418,6 +498,8 @@ export struct DlWindow {
             setstatus(idx, "下载中…")
             int e = _int(mv[3])
             if e > 0 and idx >= 0 and idx < exp.len() { exp[idx] = e }
+            // 落盘路径（消息第 5 段 ✓ 见 dl_engine 的 start/done 两条）先缓存起来 ⇒ 失败也能记下它 ✓
+            if idx >= 0 and idx < paths.len() { paths[idx] = _str(mv[4]) }
             if idx >= 0 and idx < jobs.len() {
                 info.set_text("正在下载：" + eng.songlabel(jobs[idx]))
             }
@@ -443,12 +525,22 @@ export struct DlWindow {
             if idx >= 0 and idx < got.len() { got[idx] = gotb }
             setstatus(idx, "完成 " + strings.fmt_size(gotb))
             done = done + 1
+            // 落盘路径优先取消息里的（权威 ✓）；消息没带就退回 start 时缓存的
+            string outp = _str(mv[4])
+            if outp == "" and idx >= 0 and idx < paths.len() { outp = paths[idx] }
+            notehistory(idx, "完成", outp, gotb)      // ★ 记历史（终态才记 ✓ 见 notehistory）
         } else if kind == "fail" {
             setstatus(idx, "失败：" + _str(mv[4]))
             fail = fail + 1
+            string fp = ""
+            if idx >= 0 and idx < paths.len() { fp = paths[idx] }
+            notehistory(idx, "失败：" + _str(mv[4]), fp, -1)
         } else if kind == "cancelled" {
             setstatus(idx, "已取消")
             info.set_text("已取消剩余任务（已下完的文件保留）")
+            string cp = ""
+            if idx >= 0 and idx < paths.len() { cp = paths[idx] }
+            notehistory(idx, "已取消", cp, -1)
         } else if kind == "fatal" {
             stat.set_text("下载器出错：" + _str(mv[4]))
         }
@@ -456,6 +548,154 @@ export struct DlWindow {
 
     func setstatus(int idx, string text) {
         if idx >= 0 and idx < status.len() { status[idx] = text }
+    }
+
+    // ==================== ★ 「历史」页签（2026-10-09）====================
+    //   · 记录存在 %APPDATA%\LenoMusicDl\history.json —— 纯逻辑在 dl_history.leno（可单测 ✓）
+    //   · 本页就三件事：表格 + 右键（复制 / 定位 / 删这一条）+ 工具行（刷新 / 清空 / 打开目录）
+    //   · 表格行与 `histItems` **一一对应**（右键按行号取记录 ✓；过滤/排序一律不开 ✗ 免得错位）
+
+    func buildHistoryPage(): VBox {
+        // 口径与下载页一致：padY 12（页签头与工具行拉开）/ spacing 10 ✓
+        var page = SDL3.createVBox({padX: 0, padY: 12, spacing: 10})
+
+        // 工具行：按钮**同高同距**（30/8 太挤 ⇒ 32/10），宽度按文字长短给（96 / 116 / 116 ✓）
+        var row = SDL3.createHBox({h: 32, padX: 0, padY: 0, spacing: 10})
+        Button refreshBtn = SDL3.createButton({w: 96, h: 32, text: "刷新", type: "dark", font_size: 13})
+        refreshBtn.set_tip("重新从磁盘读一遍历史（在别处改过文件时用）")
+        refreshBtn.on_click(func() { reloadHistory(); SDL3.markFrameRedraw() })
+        row.add(refreshBtn, {grow: 0, shrink: 0, basis: 96, align: 3})
+
+        Button clearBtn = SDL3.createButton({w: 116, h: 32, text: "清空历史", type: "dark", font_size: 13})
+        clearBtn.set_tip("删掉全部历史记录（**不动**已经下载好的文件）")
+        clearBtn.on_click(func() { askClearHistory() })
+        row.add(clearBtn, {grow: 0, shrink: 0, basis: 116, align: 3})
+
+        Button openDirBtn = SDL3.createButton({w: 116, h: 32, text: "打开目录", type: "dark", font_size: 13})
+        openDirBtn.set_tip("打开下载目录（历史里的文件都在那儿）")
+        openDirBtn.on_click(func() { if not openfolder(outdir) { stat.set_text("打开目录失败：" + outdir) } })
+        row.add(openDirBtn, {grow: 0, shrink: 0, basis: 116, align: 3})
+
+        row.add(SDL3.createLabel({text: ""}), {grow: 1, shrink: 0, align: 1})
+        page.add(row, {grow: 0, shrink: 0, align: 3})
+
+        // 5 列：注意「完成时间」是**格式化后的文本**（记录里存的是 Unix 秒 ⇒ 见 hist.htime_text ✓）
+        // 列宽合计 = **824**，页内容区实宽 = 窗口 860 − 根容器 padX 16×2 − 页签 0 = **828**
+        //   ⇒ 留 4px 余量：既铺满（旧账 300+60+90+218+130 = 798 ⇒ 右侧空 30px 一条灰带 ✗）又不出横向滚动条 ✓
+        //   ⚠ 旧账还有一处观感问题：「大小」右对齐、「状态」左对齐，两者**紧贴** ⇒ 看着像同一列 ✗
+        //     ⇒ 现在「状态」改**居中**、宽度收到 134 ⇒ 与「大小」之间有明确分界 ✓
+        histTable = SDL3.createTable({
+            headers: ["歌曲", "格式", "大小", "状态", "完成时间"],
+            col_widths: [380.0, 64.0, 96.0, 134.0, 150.0],
+            aligns: [0, 1, 2, 1, 1],
+            header_aligns: [0, 1, 2, 1, 1],
+            zebra: true, row_h: 26, header_h: 28, font_size: 13,
+            sortable: false, col_reorder: false, resizable: false,
+            empty_text: "还没有下载记录 —— 下完一首就会自动记在这儿"
+        })
+        histTable.on_context_will_open(func(int r) { buildHistMenu(r) })
+        histTable.on_context_select(func(int r, string id) { onHistMenu(r, id) })
+        histTable.get_context_menu().set_image_size(18)
+        page.add(histTable, {grow: 1, shrink: 1, align: 3})
+
+        //   ⚠ 不要再给 `truncate:1 + max_w`（2026-10-09 实测）：那组合让 Label 的盒子只剩几十像素宽
+        //     ⇒ 页面底部会显示成"共 0 记…" ✗（这行文本长度本来就固定、约 400px）⇒ 自然展开最省事 ✓
+        histLbl = SDL3.createLabel({text: "正在读历史…", font_size: 12})
+        page.add(histLbl, {grow: 0, shrink: 0, align: 1})
+
+        reloadHistory()          // 建页时先读一次（窗口每次打开都是最新的 ✓）
+        return page
+    }
+
+    // 从磁盘重读 + 重刷表格
+    func reloadHistory() {
+        histItems = hist.load()
+        Array[Array[string]] rows = []
+        for histItems to r {
+            rows.add([hist.hlabel(r), hist.hext(r), hist.hsize(r), hist.hstatus(r), hist.htime_text(r)])
+        }
+        histTable.set_rows(rows)
+        histLbl.set_text("共 " + _str(histItems.len()) + " 条记录（新的在前；右键某行可复制 / 定位 / 删这一条）")
+    }
+
+    // 记一条历史（每首任务到**终态**时调一次：完成 / 失败 / 已取消 ✓ —— 中间态不记）
+    //   ⚠ 每次追加都**重读并重刷表**：一条记录只有几十字节 ⇒ 这点 IO 可忽略，
+    //     换来"历史页永远是最新的"（省掉一套脏标记 ✓）
+    func notehistory(int idx, string statusText, string path, int bytes) {
+        if idx < 0 or idx >= jobs.len() { return }
+        string label = eng.songlabel(jobs[idx])
+        string ext = ""
+        if lyriconly {
+            ext = "lrc"
+        } else if jobs[idx].len() > eng.F_EXT {
+            ext = jobs[idx][eng.F_EXT]
+        }
+        string size = "-"
+        if bytes > 0 { size = strings.fmt_size(bytes) }
+        Array[Array[string]] one = [hist.mkrow(label, ext, size, statusText, path, times.now())]
+        hist.append(one)
+        reloadHistory()
+    }
+
+    // 清空历史：**先问一句**（不可撤销，但对已下载文件没有任何影响 ✓）
+    func askClearHistory() {
+        if histItems.len() == 0 {
+            stat.set_text("历史本来就是空的")
+            SDL3.markFrameRedraw()
+            return
+        }
+        SDL3.msgBox("清空下载历史", [
+            "会删掉全部 " + _str(histItems.len()) + " 条记录。",
+            "已经下载好的文件**不受影响**（历史只是个记录本）"
+        ], "清空", "取消", true, func() {
+            if hist.clear() {
+                reloadHistory()
+                stat.set_text("历史已清空（文件没动）")
+            } else {
+                stat.set_text("清空失败：历史文件不可写？")
+            }
+            SDL3.markFrameRedraw()
+        })
+    }
+
+    func buildHistMenu(int r) {
+        histTable.clearContextItems()
+        if r < 0 or r >= histItems.len() { return }
+        histTable.addContextItem({label: "复制文件名", id: "hcopy", image: wicon("copyname.png")})
+        bool hasFile = hist.hpath(histItems[r]) != ""
+        histTable.addContextItem({label: "在资源管理器里定位", id: "hreveal", image: wicon("open_folder.png")})
+        histTable.setContextItemEnabled("hreveal", hasFile)   // 失败/取消的记录没有文件 ⇒ 置灰 ✓
+        histTable.addContextSeparator()
+        histTable.addContextItem({label: "删除这一条记录", id: "hdel", image: wicon("delete_file.png")})
+    }
+
+    func onHistMenu(int r, string id) {
+        if r < 0 or r >= histItems.len() { return }
+        Array[string] rec = histItems[r]
+        if id == "hcopy" {
+            string nm = hist.hlabel(rec)
+            string e = hist.hext(rec)
+            if e != "" { nm = nm + "." + e }
+            SDL3.setClipboardText(nm)
+            stat.set_text("已复制文件名：" + nm)
+            SDL3.markFrameRedraw()
+            return
+        }
+        if id == "hreveal" {
+            string p = hist.hpath(rec)
+            if not reveal(p) { stat.set_text("找不到这个文件：" + p) }
+            return
+        }
+        if id == "hdel" {
+            if hist.remove_at(r) {
+                reloadHistory()
+                stat.set_text("已删除 1 条历史记录")
+            } else {
+                stat.set_text("删除失败（历史文件不可写？）")
+            }
+            SDL3.markFrameRedraw()
+            return
+        }
     }
 
     // ==================== 任务表右键菜单（2026-10-08 ✓）====================
@@ -553,7 +793,91 @@ export struct DlWindow {
         startBtn.set_enabled(not running and jobs.len() > 0)
         pauseBtn.set_enabled(running)
         cancelBtn.set_enabled(running)
+        clearBtn.set_enabled(jobs.len() > 0)     // 有行才可清（空表 ⇒ 灰 ✓ 与"点了没反应"划清界限 ✓）
         if not running { pauseBtn.set_text("暂停") }
+    }
+
+    // ==================== ★ 任务表「清空」（2026-10-09）====================
+    // 用户口径原话："清空可以删除【已完成】和【下载中】的，但清空前要提示当前有下载" ✓
+    //   · 有 worker 在跑 ⇒ 确认框第一句就点明"还有 N 首未完成，清空会取消它们" ✓
+    //   · 已经下好的文件**一律不动**（与历史页「清空历史」同一口径 ✓ 见 askClearHistory）
+    //   · 清空只动**本窗口的任务表**；历史页那些记录还在（已经落盘了 ✓）
+
+    func askClearTasks() {
+        if jobs.len() == 0 {
+            stat.set_text("任务列表本来就是空的")
+            SDL3.markFrameRedraw()
+            return
+        }
+        int pending = 0
+        for status to s {
+            if not istaskdone(s) { pending = pending + 1 }
+        }
+        bool busy = started and not finished
+        Array[string] lines = []
+        if busy {
+            lines.add("⚠ 当前还有下载在跑（" + _str(pending) + " 首未完成）—— 清空会**取消**它们。")
+            lines.add("已经下完的部分文件会保留在磁盘上（不删除、不回退）。")
+        } else {
+            lines.add("列表里 " + _str(jobs.len()) + " 条任务会从表里移除。")
+            lines.add("已经下载好的文件**不受影响**（「历史」页签里仍能查到这些记录）。")
+        }
+        SDL3.msgBox("清空任务列表", lines, "清空", "取消", true, func() { doClearTasks() })
+    }
+
+    // 状态是不是**终态**（完成 / 失败 / 已取消）—— 关键词与 refresh 里那套保持同一口径 ✓
+    func istaskdone(string s): bool {
+        if strings.has(s, "完成") { return true }
+        if strings.has(s, "失败") { return true }
+        if strings.has(s, "取消") { return true }
+        return false
+    }
+
+    // 清空（确认后走这里）：数据先归零，再刷控件
+    func doClearTasks() {
+        bool busy = clearstate()
+        table.set_rows([])
+        bar.set_value(0.0)
+        setRunningUi(false)                       // 「清空」自身这时也会变灰（jobs 已空 ✓ 见 setRunningUi）
+        if busy {
+            info.set_text("已清空任务列表 —— 正在下载的已取消（已下完的文件保留在 " + outdir + "）")
+        } else {
+            info.set_text("已清空任务列表（已下载的文件保留在 " + outdir + "）")
+        }
+        stat.set_text("任务列表已清空 —— 「历史」页签里仍能查到以前的记录")
+        SDL3.markFrameRedraw()
+    }
+
+    // 清空里的**纯逻辑**部分（不碰任何控件 ⇒ 没建窗口也能单测 ✓ 见 test/test_dl_window_open.leno）
+    //   返回"清空前是不是还在下载"（调用方据此选提示语 ✓）
+    //   ⚠ 还在跑时：先 `sendcmd("cancel")` 让 worker 自己退出，再把它们挪进 `orphan`（tick 负责 join ✓）
+    //     —— 为什么不用现成那套收尾：那套会等 join、还会回写"下载结束：成功 x 首" ✗
+    //     （表都清了，用户不想再看这一轮的结果 ✓）
+    func clearstate(): bool {
+        bool busy = started and not finished
+        if busy {
+            cancelling = true
+            sendcmd("cancel")
+            for threads to t {
+                if t is Thread { orphan.add(t) }
+            }
+        }
+        threads = []
+        started = false
+        finished = false
+        paused = false
+        cancelling = false
+        wantStart = false            // ⚠ 主界面看的就是它 ⇒ 不复位会立刻又起一轮（刚清空就被填回来 ✗）
+        retryList = []               // 重试下标同理（不清就会去起线程下那些已删掉的行 ✗）
+        done = 0
+        fail = 0
+        lrc = 0
+        jobs = []
+        status = []
+        got = []
+        exp = []
+        paths = []
+        return busy
     }
 
     // 刷新任务表 + 总进度条（每 120ms 一次）

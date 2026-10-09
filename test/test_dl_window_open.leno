@@ -25,30 +25,76 @@ main() {
     print("=== 下载窗口：防重复打开 ===")
     DlWindow d = new DlWindow()
 
-    check("传 null ⇒ false（没有可复用的窗口 ✓）", not dlw.reuse_if_open(null))
-    check("没开过 ⇒ false（调用方该去开一个 ✓）", not dlw.reuse_if_open(d))
+    check("传 null -> false（没有可复用的窗口）", not dlw.reuse_if_open(null))
+    check("没开过 -> false（调用方该去开一个）", not dlw.reuse_if_open(d))
 
     d.open = false
-    check("已关掉 ⇒ false（还能再开 ✓）", not dlw.reuse_if_open(d))
+    check("已关掉 -> false（还能再开）", not dlw.reuse_if_open(d))
 
     d.open = true
-    check("开着 ⇒ true（不许再开第二个 ✓）", dlw.reuse_if_open(d))
-    check("幂等：连问两次都是 true ✓", dlw.reuse_if_open(d) and dlw.reuse_if_open(d))
-    check("复用不碰未创建的窗口 ⇒ 不崩 ✓", true)
+    check("开着 -> true（不许再开第二个）", dlw.reuse_if_open(d))
+    check("幂等：连问两次都是 true ", dlw.reuse_if_open(d) and dlw.reuse_if_open(d))
+    check("复用不碰未创建的窗口 -> 不崩 ", true)
 
     // 换模式（只下歌词）也走同一条规则：**同一个窗口**，不因为模式不同就再开一个 ✓
     d.lyriconly = true
-    check("只下歌词模式同样复用（不抢正在跑的那批 ✓）", dlw.reuse_if_open(d))
+    check("只下歌词模式同样复用（不抢正在跑的那批）", dlw.reuse_if_open(d))
 
     // "关掉 → 再开"的正常回路：关掉之后必须允许开新的一批 ✓
     d.open = false
     d.lyriconly = false
-    check("关掉后 ⇒ false（可以开新的一批 ✓）", not dlw.reuse_if_open(d))
+    check("关掉后 -> false（可以开新的一批）", not dlw.reuse_if_open(d))
+
+    // ==================== ★ 任务表「清空」（2026-10-09）====================
+    //   用户口径："清空可以删除【已完成】和【下载中】的，但清空前要提示当前有下载" ✓
+    //   ⇒ 这里钉住 `clearstate()` 的两件事：
+    //     ① 返回的 `busy` 准不准（**它就是"要不要提示有下载在跑"的判据** ✓ 见 askClearTasks）
+    //     ② 该清的字段有没有清干净（jobs / 每任务进度 / 计数 / wantStart / retryList ✓）
+    //   ⚠ 正在下载的那一支会 `sendcmd("cancel")` 并把线程挪进 `orphan` —— 这里线程/通道都是空数组
+    //      ⇒ 顺带证明"没建窗口、没起线程时调它也不崩" ✓（纯逻辑那部分真的纯 ✓）
+    DlWindow c = new DlWindow()
+    c.jobs = [["歌 A", "mp3", "3 MB", "3000000"], ["歌 B", "mp3", "4 MB", "4000000"]]
+    c.status = ["下载中…", "完成 3.2 MB"]
+    c.got = [100, 3000000]
+    c.exp = [3000000, 4000000]
+    c.paths = ["a.mp3", "b.mp3"]
+    c.started = true
+    c.finished = false
+    c.retryList = [1]
+    c.done = 1
+    c.fail = 1
+    c.lrc = 2
+    check("清空前还在下 -> busy=true（据此提示：会取消它们）", c.clearstate())
+    check("清空后 jobs 空（表里一行不剩）", c.jobs.len() == 0)
+    check("清空后每任务进度都空", c.status.len() == 0 and c.got.len() == 0 and c.exp.len() == 0 and c.paths.len() == 0)
+    check("清空后 started/finished/cancelling 复位", (not c.started) and (not c.finished) and (not c.cancelling))
+    check("清空后 wantStart=false（不然主界面立刻又起一轮 ✗）", not c.wantStart)
+    check("清空后 retryList 空（重试下标不能留着 ✗）", c.retryList.len() == 0)
+    check("清空后计数归零", c.done == 0 and c.fail == 0 and c.lrc == 0)
+
+    // 空闲（还没点开始 / 或上一轮已跑完）⇒ busy=false ⇒ 提示语走"已完成那批"的分支 ✓
+    DlWindow c2 = new DlWindow()
+    c2.jobs = [["歌 A", "mp3", "3 MB", "3000000"]]
+    c2.status = ["完成 3.2 MB"]
+    check("没在跑 -> busy=false（不该吓唬用户说有下载在跑）", not c2.clearstate())
+    check("没在跑也能清掉已完成的行", c2.jobs.len() == 0)
+
+    DlWindow c3 = new DlWindow()
+    c3.jobs = [["歌 A", "mp3", "3 MB", "3000000"]]
+    c3.status = ["失败：超时"]
+    c3.started = true
+    c3.finished = true
+    check("上一轮已跑完（started 且 finished）-> busy=false", not c3.clearstate())
+
+    // 空表再清一次：不该崩、也不该报"在下"（按钮此时是灰的，但逻辑得自己站得住 ✓）
+    DlWindow c4 = new DlWindow()
+    check("空表 -> busy=false 且不崩", not c4.clearstate())
+    check("空表清完还是空", c4.jobs.len() == 0)
 
     print("")
     if fails > 0 {
         print($"共 {fails} 项失败")
         _exit(1)
     }
-    print("全部通过（已开着就复用、关了才能再开 ✓）")
+    print("全部通过（已开着就复用、关了才能再开；清空的 busy 判定与状态归零 ✓）")
 }

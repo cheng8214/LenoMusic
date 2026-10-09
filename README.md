@@ -44,6 +44,11 @@
 > 双击自检：`DSEARCH=<关键词> DDBL=1` ⇒ 往搜索表第 0 行注入**真双击**；`DBANG=1 DDBL=2` ⇒ 往榜单表第 0 行注入；
 > 断言"起的是试听（`gPreviewCh` + 试听行）、**没**开下载窗口"⇒ 打印 `[ddbl] 通过 / **不通过**` ✓
 > 「关于」弹窗自检：`DABOUT=1` ⇒ 第 3 拍自动打开它 ✓
+> 下载窗口自检：`DDLOPEN=1` ⇒ 第 3 拍点一次标题栏那个「下载」入口，断言**没勾选也真的开出了窗口**
+> （任务 0 首）⇒ 打印 `[ddlopen] 通过 / **不通过**` ✓；
+> `DDL=<关键词>` ⇒ 搜索 → 下第一首**可下**的 → 等跑完 → 切「历史」页，打印
+> `[ddl] 通过：历史 N 条　最新=歌名 - 歌手 | 大小 | 完成` ✓（这条同时钉住"下完了有没有写进历史"；
+> ⚠ 关键词要用**免费曲**的，否则会如实记成"失败"——那是另一回事 ✓）
 > ⚠ **DSHOT 截不到这个弹窗**：DSHOT 读的是**主窗口渲染器**的像素，而模态是**另一个窗口** ✗
 > ⇒ 想看它的样子得用**系统截屏**（`Win32.captureScreen` / 截图工具）✓
 
@@ -95,6 +100,20 @@
   （下载勾选项、复制「歌名-歌手」、在资源管理器里定位、删除本地文件、打开下载目录）
 - **下载**：`Range` 分片（1 MB/片）+ **断点续传**（重下同一首走 `416` 快路径，秒回）
   + 暂停 / 继续 / 取消 + 多首并行；音频落盘时顺带下同名 `.lrc`
+- **下载窗口**（非模态；一个应用只开一个）：**两个页签** —— `下载`（任务表：歌名 / 格式 / 大小 /
+  进度条 / 状态 + 总进度 + 开始/暂停/取消/**清空**/打开目录/关闭；右键 = 重试这一首 / 重试全部失败项 /
+  复制文件名 / 打开下载目录）与 `历史`（★ 2026-10-09 加：落在 `%APPDATA%\LenoMusicDl\history.json`，
+  每首到**终态**（完成 / 失败 / 取消）时自动记一条 —— 歌名、格式、大小、状态、路径、完成时间；
+  右键 = 复制文件名 / 在资源管理器里定位 / 删除这一条记录；工具行 = 刷新 / 清空历史 / 打开目录）✓
+  - ★ 标题栏那个「下载」图标**没勾选也开窗**（2026-10-09 改，用户口径）：空任务的长相由窗口自己表达
+    （开始按钮禁用 + 表格空文案 + 说明"怎么加任务"）—— 原先会弹"还没有要下载的歌"把人拦在门外 ✗
+  - 自检：`DDLOPEN=1`（空任务开窗）/ `DDL=<免费曲关键词>`（搜索 → 下 1 首 → 查历史）✓ 见上面那段
+  - ⚠ 清空历史**不动已下载的文件**（历史只是记录本）；上限 500 条，超出丢最旧的 ✓
+  - ★ 「清空」（任务表那个按钮，2026-10-09 用户口径）：**连正在下载的也能清** ——
+    有 worker 在跑时，确认框第一句就点明"还有 N 首未完成，清空会**取消**它们"（`askClearTasks`）；
+    已下好的文件一律不动（与历史页清空同口径）。清空走 `clearstate()`：发取消 → 把线程挪进 `orphan`
+    （tick 里悄悄 join，**不再**等这一轮的"成功 x 首"结论 ✗）→ jobs/进度/计数/`wantStart`/`retryList` 全归零。
+    清完之后那个空窗口若再点主界面下载，直接**换一个新窗口**（不必先手动关掉 ✓ 见 `reuseDlIfOpen`）
 - **播放**：播放条（转盘 / 图标 / 点击快进）+ 歌词浮层（自绘画布、当前句高亮放大、
   邻近句按距离淡出、随播放平滑上滚、边缘渐隐、滚轮手翻、点句跳转、
   **逐字时间轴**（有逐字就用，没有退回标准 LRC）、译文行）
@@ -111,7 +130,7 @@
 | 协议 | 官方 mobi 接口 + **DES 变体**加密 | **weapi**：AES-128-CBC 两轮 + 1024 位 RSA（`netease_crypto.leno`）| 移动端搜索 + CDN 取链：`key = md5(hash + "kgcloudv2")`，**免签名**|
 | 歌词 | `newlyric.lrc`（zlib + gb18030；译文行混在原文里）| `weapi/song/lyric`（译文**单独一份** ⇒ 按时间戳并回原文）| `krcs` 搜 ID → `lyrics.kugou.com/download`（base64 LRC，自带 BOM）|
 | 列表体积来源 | `MINFO` 字段 | 搜索后再发**一次批量**请求补齐 | 搜索响应**直接带三档体积**（不用额外请求 ✓）|
-| 最高音质 | 接口给到什么就是什么（含 flac）| 官方只有 320k mp3；**flac 走第三方聚合接口**（实测 113 MB / 3.5 Mbps ✓）| **免费曲直接给 flac**（实测 52.8 MB ✓）；付费曲走第三方兜底 |
+| 最高音质 | 接口给到什么就是什么（含 flac）| 官方只有 320k mp3；**flac 走第三方聚合接口**（实测 113 MB / 3.5 Mbps ✓）| 免费曲直接给 flac，**还能升到 Res 母带**（★ 2026-10-09 加：再多发一次 Web 搜索按 hash 对齐，实测 26.8 / 34.2 / 45.5 MB ✓）；付费曲走第三方兜底 |
 | 拿不到直链时 | 有第三方兜底接口 | 付费/原唱曲 `code=404` ⇒ **第三方兜底**（至少可下 ✓）| 付费曲 CDN 回 `status=2` ⇒ **第三方兜底** |
 | 金标回归 | `kuwo_des.leno` 文件内向量 | `test/test_netease_crypto.leno` | `test/test_kugou_cdn.leno` |
 
@@ -149,7 +168,8 @@
 | `songrow.leno` | **歌曲行的字段契约**：10 个下标常量（`F_*`）+ 具名存取（`rowname` / `rowext` / `rowbytes` …）。全仓唯一事实来源 —— 引擎转发一份 `eng.F_*` 保兼容，GUI/下载窗口零改动 |
 | `parsing.leno` | **严格解析**工具（纯逻辑）：`parse_secs` / `parse_millis` / `parse_word_span` / `parse_uint` 一律用**多返回值**`(值, 是否成功)`，不用 -1 哨兵；外加越界安全取值 `at` / `at_int` / `tail_from` |
 | `dl_engine.leno` | **引擎层**（无 UI、无 print、无 main）：音源注册表 + 分片下载（进度 / 续传 / 暂停取消）+ 跨线程 worker 入口；对外一律传「纯字符串数组行」（struct 不能跨线程 ✗） |
-| `dl_window.leno` | 下载窗口（非模态、不重复打开：任务表 + 总进度 + 按钮 + 120ms 刷新） |
+| `dl_window.leno` | 下载窗口（非模态、不重复打开）：**两个页签** —— `下载`（任务表 + 总进度 + 按钮 + 清空 + 120ms 刷新）/ `历史`（记录表 + 右键复制/定位/删记录 + 刷新/清空/打开目录）|
+| `dl_history.leno` | 下载历史**纯逻辑**（不 import SDL3 ⇒ 可单测 ✓）：`%APPDATA%\LenoMusicDl\history.json`、上限 500 条、坏文件一律回空表 |
 | `player.leno` | 播放器**纯逻辑**：扫目录 / 播放索引 / 循环三态 / 歌词解析（标准 LRC + 逐字时间轴） |
 | `player_bar.leno` | 播放条 UI（嵌在主界面表格下方、状态栏上方） |
 | `dl_settings.leno` | 设置**纯逻辑**（读写配置 + 取值钳位；不 import SDL3 ⇒ 可单测 ✓） |
@@ -160,7 +180,7 @@
 | `netease_core.leno` | 网易核心：`weapi/search/get` 搜索 + 批量取直链（顺带补齐体积与"能不能下"）|
 | `netease_crypto.leno` | 网易 weapi 参数加密：AES-128-CBC 两轮 + 1024 位 RSA（用任意精度 `int` 直接做模幂）|
 | `netease_lyric.leno` | 网易歌词：`weapi/song/lyric` + 译文按时间戳并回原文 + 落盘补 BOM |
-| `kugou_core.leno` | 酷狗核心：移动端搜索（三档体积 + 付费标记一次带回）+ CDN 取链（`kgcloudv2`，免签名）|
+| `kugou_core.leno` | 酷狗核心：移动端搜索（三档体积 + 付费标记一次带回）+ **Res 母带档**（再发一次 Web 搜索按 `FileHash` 对齐补上，四档顺序 母带→SQ→320→128）+ CDN 取链（`kgcloudv2`，免签名）|
 | `kugou_lyric.leno` | 酷狗歌词：`krcs` 搜 ID → `lyrics.kugou.com/download`（base64 LRC）；**入口收整行**（命中需要歌名+时长 ✓）|
 | `qq_core.leno` / `qq_crypto.leno` | QQ 核心（`musicu.fcg` 搜索 + vkey 取链，需设备指纹 QIMEI36）/ 指纹注册与兜底值 |
 | `thirdparty.leno` | **第三方聚合接口取直链**（无损的唯一通路）：网易 `qinglvai` / QQ `vkeys` / 酷狗 `baka meting` + 体积探测（HEAD ⇒ `Range: 0-0`）+ 302 只读 `Location`；对外只有 `resolve(client, src, id)` |
@@ -197,7 +217,7 @@ leno.exe musicdl.leno --help
 
 ## 五、跑测试
 
-12 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
+14 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
 
 ```bat
 <发行包>\leno.exe test\test_player_state.leno      :: 播放器规则：认哪些扩展名 / 下一首是谁 / 循环三态 / 失败要安全
@@ -206,10 +226,12 @@ leno.exe musicdl.leno --help
 <发行包>\leno.exe test\test_lrc_parse.leno         :: 歌词解析金标：标准 LRC / 逐字时间轴 / 译文行 / 非法标签（22 项断言 ✓）
 <发行包>\leno.exe test\test_parallel_dl.leno       :: 多首歌并行下载（离线服务端）
 <发行包>\leno.exe test\test_settings.leno          :: 设置的真文件读写与钳位
-<发行包>\leno.exe test\test_dl_window_open.leno    :: 下载窗口「不重复打开」的规则
+<发行包>\leno.exe test\test_dl_window_open.leno    :: 下载窗口「不重复打开」的规则 + 任务表「清空」的 busy 判定与状态归零
+<发行包>\leno.exe test\test_history.leno          :: 下载历史真文件读写：新的在前 / 删一条 / 上限 500 / 坏文件回空表（真写%APPDATA%并还原 ✓）
 <发行包>\leno.exe test\test_titlebar_actions.leno  :: 标题栏动作按钮：解析 + 内置图标名判定
 <发行包>\leno.exe test\test_netease_crypto.leno  :: 网易 weapi 加密金标回归（AES 两轮 + RSA，8 项断言 ✓）
 <发行包>\leno.exe test\test_kugou_cdn.leno       :: 酷狗 CDN 取链配方回归（key 算式 + URL 形态 + 大小写敏感，6 项断言 ✓）
+<发行包>\leno.exe test\test_kugou_search.leno    :: 酷狗 Res 母带档：三档 hash 建索引 + 升级判据 + 清旧直链（28 项断言 ✓）
 <发行包>\leno.exe test\test_thirdparty.leno      :: 第三方聚合接口：URL 配方 + 档位顺序 + 四类响应解析（25 项断言 ✓）
 <发行包>\leno.exe test\test_yinyueku.leno       :: 音乐库配方：复合 id 拼拆 / `\uXXXX` 还原 / 响应解析（55 项断言 ✓）
 ```

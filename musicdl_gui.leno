@@ -51,6 +51,7 @@ import "./dl_settings.leno" as dlset        // 设置：读/写/钳位（纯逻�
 import "./dl_settings_win.leno" as dlswin    // "设置"弹窗（SDL3）—— 标题栏右侧 ⚙ 打开 ✓
 import "./dl_about_win.leno" as dlabout     // "关于"弹窗（SDL3）—— 标题栏右侧那个 ⓘ 打开 ✓
 import "./player_bar.leno" as pb             // 播放条（嵌在主界面里 ✓ 见它的文件头）
+import "./dl_history.leno" as hist           // 下载历史（`DDL` 自检要读它的访问器 ✓；窗口那边也用它 ✓）
 
 use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, CheckBox, Table, ProgressBar, HBox, VBox, Edit, SpinBox, Separator, Scancode, ComboBox, ImageView, TabControl)
 use dlw.DlWindow
@@ -571,6 +572,98 @@ struct MusicDlApp {
       // ★ 榜单页的两条线程也要在这儿收（菜单 → 歌曲，顺序有依赖 ⇒ 菜单先收 ✓）
         pollBangMenu()
         pollBang()
+        // ★ 空任务开窗 自检（`DDLOPEN=1`，见 gDlOpenCheck 注释 ✓）：第 3 拍调一次标题栏那个入口
+        if gDlOpenCheck {
+            gDlOpenTick = gDlOpenTick - 1
+            if gDlOpenTick <= 0 {
+                onDownloadAction()                    // ← 就是标题栏那个「下载」图标做的事
+                bool opened = false
+                int n = -1
+                if dl is DlWindow => w {
+                    opened = w.open
+                    n = w.jobs.len()
+                    if gDlOpenHist {
+                        w.tabs.set_active(1)      // 切到「历史」页签（只为看图 ✓）
+                        SDL3.markFrameRedraw()
+                    }
+                }
+                bool pass = opened and n == 0
+                print("[ddlopen] " + (if pass then "通过" else "**不通过**") + "：窗口开着=" + _str(opened)
+                      + " 任务=" + _str(n) + "\n")
+                gDlOpenCheck = false
+                if dlShot != "" {
+                    dlShotAt = dlFrames + 3
+                } eif not gDlOpenStay {
+                    _exit(0)
+                }
+            }
+        }
+        // ★ 下载 + 历史 自检（`DDL=<关键词>`）：搜索 → 下第 1 首 → 等跑完 → 切「历史」页 → 打印断言
+        //   为什么要它：这条链是"联网 × 线程 × 落盘 × 写历史" —— "下完了但历史没记上"这种问题
+        //   光看代码发现不了（notehistory 挂在消息分支上 ✗），必须真跑一遍 ✓
+        //   ⚠ 挑**免费曲**的关键词（付费曲会因取直链失败而记成"失败"，那是另一回事 ✗）
+        if gAutoDl != "" {
+            if gDlStep == 0 {
+                keywordEdit.set_text(gAutoDl)
+                onSearch()
+                gDlStep = 1
+                gDlWait = 0
+            } else if gDlStep == 1 {
+                gDlWait = gDlWait + 1
+                if not searching and songs.len() > 0 {
+                    // 挑**第一首可下的**（有体积 = 拿得到直链 ✓）：否则撞上付费曲会记成"失败"，
+                    //   那测的就不是"历史有没有记上"了 ✗
+                    Array[Array[string]] pick = []
+                    for songs to s {
+                        if pick.len() == 0 and eng.has_size(s) { pick.add(s) }
+                    }
+                    if pick.len() > 0 {
+                        startDownload(pick, downloadflags())      // 只下 1 首（可控、快 ✓）
+                        gDlStep = 2
+                        gDlWait = 0
+                    } else if gDlWait > 500 {
+                        print("[ddl] **不通过**：这一页没有可下的行（换关键词，或等接口恢复）\n")
+                        gAutoDl = ""
+                        _exit(1)
+                    }
+                } else if gDlWait > 500 {
+                    print("[ddl] **不通过**：等不到搜索结果（" + gAutoDl + "）\n")
+                    gAutoDl = ""
+                    _exit(1)
+                }
+            } else if gDlStep == 2 {
+                gDlWait = gDlWait + 1
+                bool fin = false
+                if dl is DlWindow => w { if w.finished { fin = true } }
+                if fin {
+                    gDlStep = 3
+                    gDlWait = 0
+                } else if gDlWait > 1000 {
+                    print("[ddl] **不通过**：下载没跑完（超时）\n")
+                    gAutoDl = ""
+                    _exit(1)
+                }
+            } else if gDlStep == 3 {
+                int n = 0
+                string first = ""
+                string st = ""
+                string sz = ""
+                if dl is DlWindow => w {
+                    w.tabs.set_active(1)              // 切到「历史」页（顺便验证页签可用 ✓）
+                    n = w.histItems.len()
+                    if n > 0 {
+                        first = hist.hlabel(w.histItems[0])
+                        st = hist.hstatus(w.histItems[0])
+                        sz = hist.hsize(w.histItems[0])
+                    }
+                }
+                bool ok = n > 0 and st == "完成"
+                print("[ddl] " + (if ok then "通过" else "**不通过**") + "：历史 " + _str(n) + " 条　最新="
+                      + first + " | " + sz + " | " + st + "\n")
+                gAutoDl = ""
+                if dlShot == "" { _exit(0) } else { dlShotAt = dlFrames + 2 }
+            }
+        }
         // 退出路径自检（见 gExitTicks 注释 ✓）
         // 「关于」弹窗自检（见 gAboutTick 注释 ✓）：第 N 拍自动打开它 ✓
         if gAboutTick > 0 {
@@ -616,7 +709,7 @@ struct MusicDlApp {
                     print("[dpclick] 注入点歌单第 3 行 ok=" + _str(ok) + "\n")
                 } eif st == 8 {
                     gClickRow3 = b.cur_index()
-                    print("[dpclick] 点歌单第 3 行 ⇒ 下标=" + _str(gClickRow3) + "（期望 2）\n")
+                    print("[dpclick] 点歌单第 3 行 -> 下标=" + _str(gClickRow3) + "（期望 2）\n")
                     // 再点**当前正在播的那一行**（第 1 行）：这里最容易"看着没反应" ✗
                     //   （`ListBox` 单选模式下点已选中行**不回调** ✓ ⇒ 靠 on_event 自己算行号 ✓）
                     SDL3.testMoveAt(wid, b.lb.x + 40.0, b.lb.y + 4.0 + 11.0)
@@ -625,8 +718,8 @@ struct MusicDlApp {
                 } eif st == 12 {
                     bool pass = gClickRow3 == 2 and b.cur_index() == 0
                     print("[dpclick] " + (if pass then "通过" else "**不通过**")
-                          + "：点第 3 行 ⇒ 下标 " + _str(gClickRow3) + "（期望 2）；"
-                          + "再点当前行 ⇒ 下标 " + _str(b.cur_index()) + "（期望 0）\n")
+                          + "：点第 3 行 -> 下标 " + _str(gClickRow3) + "（期望 2）；"
+                          + "再点当前行 -> 下标 " + _str(b.cur_index()) + "（期望 0）\n")
                     SDL3.requestExit()
                 }
             }
@@ -645,7 +738,7 @@ struct MusicDlApp {
                     SDL3.testMoveAt(wid, bx, by)
                     bool ok = SDL3.testRightClickAt(wid, bx, by)
                     print("[dctx] 注入右键到搜索表空白处 ok=" + _str(ok)
-                          + (if gCtxTarget == 4 then "（目标 4：接着会切页 ✓）" else "") + "\n")
+                          + (if gCtxTarget == 4 then "（目标 4：接着会切页）" else "") + "\n")
                 } else if gCtxTarget == 3 {
                     // 目标 3 = **只测动作**（不点鼠标）：榜单第 0 行 ⇒ 「搜索这首歌（跳到搜索页）」
                     //   ⚠ 要配 DBANG=1 跑：否则当前页已经是搜索页，set_active(0) 不会触发切页回调 ✗
@@ -654,7 +747,7 @@ struct MusicDlApp {
                     } else {
                         menuCtx = 1
                         onMenu(0, "searchthis")
-                        print("[dctx] 目标 3：已调用菜单动作 searchthis ✓\n")
+                        print("[dctx] 目标 3：已调用菜单动作 searchthis\n")
                     }
                 } else if bangSongs.len() == 0 {
                     gCtxStep = 1            // 榜单行还没拉回来（联网）⇒ 下一拍再试 ✓
@@ -673,12 +766,12 @@ struct MusicDlApp {
                 if gCtxTarget == 2 {
                     pass = gCtxSeen == 0 and gCtxRowSeen < 0
                     print("[dctx] " + (if pass then "通过" else "**不通过**")
-                          + "：目标=2 ⇒ buildMenu(menuCtx=" + _str(gCtxSeen) + ", row=" + _str(gCtxRowSeen) + ")\n")
+                          + "：目标=2 -> buildMenu(menuCtx=" + _str(gCtxSeen) + ", row=" + _str(gCtxRowSeen) + ")\n")
                 } else if gCtxTarget == 3 {
                     // 期望：切到搜索页（curPage=0）+ 关键词填成"歌名 歌手" + 真的起了搜索 ✓
                     pass = curPage == 0 and keywordEdit.get_text().trim() != "" and searching
                     print("[dctx] " + (if pass then "通过" else "**不通过**")
-                          + "：目标=3 ⇒ 切页后 curPage=" + _str(curPage)
+                          + "：目标=3 -> 切页后 curPage=" + _str(curPage)
                           + "  关键词=\"" + keywordEdit.get_text() + "\""
                           + "  搜索中=" + _str(searching) + "\n")
                 } else if gCtxTarget == 4 {
@@ -693,13 +786,13 @@ struct MusicDlApp {
                     bool nowOpen4 = table.get_context_menu().isOpen()
                     pass = gCtxWasOpen and not nowOpen4 and curPage == 1
                     print("[dctx] " + (if pass then "通过" else "**不通过**")
-                          + "：目标=4 ⇒ 切页前菜单开着=" + _str(gCtxWasOpen)
+                          + "：目标=4 -> 切页前菜单开着=" + _str(gCtxWasOpen)
                           + "  切页后开着=" + _str(nowOpen4) + "（期望 false）"
                           + "  当前页=" + _str(curPage) + "（期望 1）\n")
                 } else {
                     pass = gCtxSeen == 1 and gCtxRowSeen == 0
                     print("[dctx] " + (if pass then "通过" else "**不通过**")
-                          + "：目标=1 ⇒ buildMenu(menuCtx=" + _str(gCtxSeen) + ", row=" + _str(gCtxRowSeen) + ")\n")
+                          + "：目标=1 -> buildMenu(menuCtx=" + _str(gCtxSeen) + ", row=" + _str(gCtxRowSeen) + ")\n")
                 }
                 // ⚠ 开着 DSHOT 时**别抢着退**：让截图钩子先截到"菜单正开着"的样子 ✓（与 DHOVER 同一套 ✓）
                 if dlShot == "" { SDL3.requestExit() }
@@ -720,7 +813,7 @@ struct MusicDlApp {
                     gDblWait = gDblWait + 1
                     // ⚠ 不能无限等：接口被限流 / 关键词无匹配时表会一直空 ⇒ 约 36 秒后报"没等到行"收摊 ✓
                     if gDblWait > 300 {
-                        print("[ddbl] **不通过**：等了 " + _str(gDblWait) + " 拍还没有行（搜索/榜单没回来）⇒ 没法注入\n")
+                        print("[ddbl] **不通过**：等了 " + _str(gDblWait) + " 拍还没有行（搜索/榜单没回来）-> 没法注入\n")
                         gDblStep = 0
                         SDL3.requestExit()
                     }
@@ -745,7 +838,7 @@ struct MusicDlApp {
                 string what = ""
                 if gPrevRow.len() > eng.F_ARTIST { what = eng.songlabel(gPrevRow) }
                 print("[ddbl] " + (if ok then "通过" else "**不通过**")
-                      + "：目标=" + _str(gDblTarget) + " ⇒ 试听行=\"" + what + "\""
+                      + "：目标=" + _str(gDblTarget) + " -> 试听行=\"" + what + "\""
                       + "  试听通道=" + _str(gPreviewCh is Channel)
                       + "  下载窗口=" + _str(dl != null) + "（期望 false）"
                       + "  状态栏=\"" + stateLbl.get_text() + "\"\n")
@@ -779,7 +872,7 @@ struct MusicDlApp {
                     onDownloadLyricOnly([gPrevRow])
                     stateLbl.set_text("去下这首的歌词：" + nowTag)
                 } else {
-                    stateLbl.set_text("这首不在搜索结果里（" + nowTag + "）⇒ 到搜索结果里右键「下载歌词」")
+                    stateLbl.set_text("这首不在搜索结果里（" + nowTag + "）-> 到搜索结果里右键「下载歌词」")
                 }
                 SDL3.markFrameRedraw()
             }
@@ -821,7 +914,7 @@ struct MusicDlApp {
                                 if pbar is PlayerBar => bb { bb.rescan() }   // 列表跟着刷新（删的是正在播的那首 ⇒ 它也会停 ✓）
                                 stateLbl.set_text("已删除：" + qq)
                             } else {
-                                stateLbl.set_text("删除失败：" + qq + "（若正在播放它 ⇒ 先切到别的歌再删 ✓）")
+                                stateLbl.set_text("删除失败：" + qq + "（若正在播放它 -> 先切到别的歌再删）")
                             }
                             SDL3.markFrameRedraw()
                         })
@@ -920,6 +1013,13 @@ struct MusicDlApp {
     //   ★ 2026-10-07 改非模态后必须有：主窗口能继续点，而原先每点一次都会 `new` 一个新窗口 ✗
     //   ⚠ 已有窗口在下**另一批**任务时不抢（抢掉 = 中断正在下的 ✗）⇒ 只置前 + 说明"先关掉它"
     func reuseDlIfOpen(): bool {
+        // ★ 2026-10-09：窗口开着、但任务已被「清空」（空表 + 没在跑）⇒ **关掉它**，让新一批开新窗口 ✓
+        //   为什么：清空之后用户多半就是"再下一批"，此时若还按"已开着 ⇒ 只置前"处理，
+        //   他会被告知"先关掉下载窗口"（而窗口明明是空着的 ✗）；这一条把那个死角补掉 ✓
+        //   `close()` 只置 `open=false / closing=true`（空任务时它也不会发取消 ✓）⇒ 主循环下一帧销毁 ✓
+        if dl is DlWindow => e {
+            if e.open and e.jobs.len() == 0 and not e.started { e.close() }
+        }
         if not dlw.reuse_if_open(dl) { return false }
         string what = "下载窗口"
         if dl is DlWindow => w {
@@ -932,13 +1032,15 @@ struct MusicDlApp {
 
     func startDownload(Array[Array[string]] jobs, Array[string] flags) {
         if reuseDlIfOpen() { return }          // ★ 一个应用只留一个下载窗口 ✓（非模态 ⇒ 必须自己管）
-        if jobs.len() == 0 {
-            stateLbl.set_text("先勾选（或右键选中）要下载的歌曲")
-            SDL3.markFrameRedraw()
-            return
-        }
+        // ★ 2026-10-09 改（用户口径）：**空任务也开窗** —— 原先这里 `jobs.len() == 0` 直接 return，
+        //   于是标题栏那个下载图标只能弹一句"还没有要下载的歌" ✗（想先看看窗口 / 看看「历史」都进不去）
+        //   空任务的长相由窗口自己表达：开始按钮禁用 + 表格空文案 + info 说明怎么加任务（见 dl_window.build ✓）
         if not ensuredir() { return }
         dl = dlw.open_download(jobs, flags, outdir, stateLbl, cfg.workers)   // 并行上限来自**设置** ✓
+        if jobs.len() == 0 {
+            stateLbl.set_text("下载窗口已打开（还没有任务 —— 勾选歌曲后点「下载勾选」）")
+            SDL3.markFrameRedraw()
+        }
     }
 
     // ★ 试听（2026-10-07 改）：**两条腿一起走** ✓
@@ -975,7 +1077,7 @@ struct MusicDlApp {
                 int i = 0
                 while i < w.jobs.len() {
                     if eng.songlabel(w.jobs[i]) == tag {
-                        stateLbl.set_text("这首已经在下载窗口里下着了 —— 试听照听，不再重复下 ✓")
+                        stateLbl.set_text("这首已经在下载窗口里下着了 —— 试听照听，不再重复下 ")
                         return
                     }
                     i = i + 1
@@ -1018,9 +1120,9 @@ struct MusicDlApp {
                         bool adopted = false
                         if pbar is PlayerBar => b { adopted = b.on_downloaded(path, gBgDlTag) }
                         if adopted {
-                            stateLbl.set_text("整首下载完成：" + gBgDlTag + " —— 已切到本地完整文件（可拖进度 ✓）")
+                            stateLbl.set_text("整首下载完成：" + gBgDlTag + " —— 已切到本地完整文件（可拖进度）")
                         } else {
-                            stateLbl.set_text("整首下载完成：" + gBgDlTag + "（已并入播放列表 ✓）")
+                            stateLbl.set_text("整首下载完成：" + gBgDlTag + "（已并入播放列表）")
                         }
                         gBgDlRunning = false
                     } else if kind == "fail" {
@@ -1046,27 +1148,16 @@ struct MusicDlApp {
         startDownload(jobs, downloadflags())
     }
 
-    // 标题栏「下载」图标（2026-10-07）：**"打开下载窗口"的入口**，点了必须有明确结果 ✓
+    // 标题栏「下载」图标（2026-10-07）：**"打开下载窗口"的入口** ✓
     //   · 已开着 ⇒ 只置前（不重复开 ✓，见 reuseDlIfOpen）
-    //   · 有勾选/选中 ⇒ 与工具栏「下载勾选」同一条路：判定 → 开窗 → 起线程 ✓
-    //   · **一首都没勾 ⇒ 弹个提示框说清怎么办** —— 原先只在状态栏写一句，
-    //     看起来就是"点了没反应" ✗（实测反馈就是它 ✓）
-    //     ⚠ 工具栏那个按钮在同样情况下是**禁用**的（updateCount 里 set_enabled ✓）⇒ 那里保持原样：
-    //       "灰着点不动"比"能点但没反应"清楚 ✓；而图标是入口，得能进得去 ✓
+    //   · 有勾选/选中 ⇒ 判定 → 开窗 → 起线程 ✓
+    //   ★ 2026-10-09 改（用户口径）：**一首都没勾也照开窗** —— 原先弹"还没有要下载的歌"把人拦在门外 ✗，
+    //     而"打开窗口看看（任务表 / 历史页签）"本身就是合理需求 ✓
+    //     空任务由窗口自己表达（见 startDownload 与 dl_window.build 的注释 ✓）
+    //     ⚠ 工具栏「下载勾选」那个按钮仍保持"没勾就灰"（点不动 ≠ 点了没反应 ✓ 见 updateCount）
     func onDownloadAction() {
         if reuseDlIfOpen() { return }
-        Array[Array[string]] jobs = pickchecked()
-        if jobs.len() == 0 {
-            stateLbl.set_text("还没勾选歌曲 —— 下载窗口需要先有任务")
-            SDL3.markFrameRedraw()
-            SDL3.msgBox("还没有要下载的歌", [
-                "下载窗口是给「要下的那一批歌」用的，现在是空的。",
-                "① 先在搜索框里搜索；② 在结果表里勾选（或右键某行「下载这一首」）。",
-                "然后再点标题栏这个下载图标"
-            ], "知道了", "", false, null)
-            return
-        }
-        startDownload(jobs, downloadflags())
+        startDownload(pickchecked(), downloadflags())
     }
 
     func onDownloadSelected() {
@@ -1301,13 +1392,13 @@ struct MusicDlApp {
             if hasRow {
                 string kw = searchkw(ctx_row(row))
                 if kw == "" {
-                    stateLbl.set_text("这一行没有歌名/歌手，没法去搜（榜单接口少数行会缺 ✓）")
+                    stateLbl.set_text("这一行没有歌名/歌手，没法去搜（榜单接口少数行会缺）")
                 } else {
                     keywordEdit.set_text(kw)
                     tab.set_active(0)        // 跳到搜索页（会触发 tab.on_change ⇒ onTabChanged ✓）
                     if searching {
                         // ⚠ `onSearch` 开头就有"已在搜就返回"的守卫（见它 ✓）⇒ 这条**不能**假装搜过了 ✗
-                        stateLbl.set_text("关键词已填好：" + kw + " —— 上一次搜索还在跑，等它完再回车 ✓")
+                        stateLbl.set_text("关键词已填好：" + kw + " —— 上一次搜索还在跑，等它完再回车 ")
                     } else {
                         onSearch()               // 状态栏由它自己写"正在搜索「…」"（别在这里覆盖 ✗）
                     }
@@ -1336,7 +1427,7 @@ struct MusicDlApp {
             if hasRow {
                 string p = eng.find_local(ctx_row(row), outdir)
                 if p == "" {
-                    stateLbl.set_text("本地还没有这首（" + eng.songlabel(ctx_row(row)) + "）⇒ 先下载它 ✓")
+                    stateLbl.set_text("本地还没有这首（" + eng.songlabel(ctx_row(row)) + "）-> 先下载它 ")
                 } else if dlw.reveal(p) {
                     stateLbl.set_text("已在资源管理器里定位：" + p)
                 } else {
@@ -1372,7 +1463,7 @@ struct MusicDlApp {
                             stateLbl.set_text("已删除：" + q)
                         } else {
                             // 最常见的原因：正在播它（占着文件句柄 ✗）⇒ 说清怎么办 ✓
-                            stateLbl.set_text("删除失败：" + q + "（若正在播放它 ⇒ 先切到别的歌再删 ✓）")
+                            stateLbl.set_text("删除失败：" + q + "（若正在播放它 -> 先切到别的歌再删）")
                         }
                         SDL3.markFrameRedraw()
                     })
@@ -1448,7 +1539,7 @@ struct MusicDlApp {
             CheckBox box = SDL3.createCheckBox({text: name, checked: want, enabled: avail, font_size: 13, tip: note})
             // 勾选变化：落盘记住（点搜索时仍会现取一遍 ⇒ 两不冲突 ✓）
             box.on_change(func(bool v) {
-                stateLbl.set_text("音源勾选已记住（下次启动照旧 ✓）")
+                stateLbl.set_text("音源勾选已记住（下次启动照旧）")
                 persist_settings()
                 SDL3.markFrameRedraw()
             })
@@ -1490,7 +1581,7 @@ struct MusicDlApp {
         bool iconsOk = true
         for needIcons to ic { if not files.exists(ic) { iconsOk = false } }
         if not iconsOk {
-            print("[musicdl] 图标资源缺失：" + imgDir + "（打包请声明 resource.toml 的 [pack] resources ✓）\n")
+            print("[musicdl] 图标资源缺失：" + imgDir + "（打包请声明 resource.toml 的 [pack] resources）\n")
         }
         if dlShot != "" { print("[musicdl] 图标目录（自检）：" + imgDir + "\n") }
         titleBar = SDL3.createTitleBar({
@@ -1547,7 +1638,7 @@ struct MusicDlApp {
         //   它是**彩色**图（绿色音符 + 透明底 ✓）⇒ 不用 tint ✓；不给 `image_mode` ⇒ 走默认
         //   `MODE_ASPECT_FIT`（保持比例、完整显示 ✓）—— 给了 1（拉伸）就会被拉变形 ✗
         var logo = SDL3.createImageView({w: 26, h: 26, image_path: rowIcon})
-        logo.set_tip("音乐下载器：搜歌 → 勾选 → 下载（下载目录可在下面改）")
+        logo.set_tip("音乐下载器：搜歌 -> 勾选 -> 下载（下载目录可在下面改）")
         row1.add(logo, {grow: 0, shrink: 0, basis: 26, align: 1})
         keywordEdit = SDL3.createEdit({
             text: "", w: 380, h: 32, font_size: 14,
@@ -1578,7 +1669,7 @@ struct MusicDlApp {
         // ★ 条数记忆（2026-10-08 ✓）：初值取设置里的（读盘时已钳到 LIMIT_MIN..LIMIT_MAX ✓）；
         //   范围也直接引 dl_settings 的常量 ⇒ 控件与钳位**只有一处口径**（不会对不上 ✗）
         limitSpin = SDL3.createSpinBox({w: 86, h: 32, min: dlset.LIMIT_MIN, max: dlset.LIMIT_MAX, step: 5, value: cfg.limit, int_mode: true, font_size: 13})
-        limitSpin.set_tip("每个音源最多取多少条（酷我接口的 rn 参数；改了会记住 ✓）")
+        limitSpin.set_tip("每个音源最多取多少条（酷我接口的 rn 参数；改了会记住）")
         limitSpin.on_change(func(float v) { persist_settings() })
         row1.add(limitSpin, {grow: 0, shrink: 0, basis: 86, align: 3})
         // 设置入口已移到**标题栏右侧的齿轮按钮**（上面的 actions: [{id:"settings", icon:"gear"}] ✓）
@@ -1618,7 +1709,7 @@ struct MusicDlApp {
         lyricBox = SDL3.createCheckBox({text: "同时下载歌词", checked: true, font_size: 13})
         lyricBox.set_tip("下载音频时顺带存一份同名 .lrc（酷我官方歌词，含译文行）")
         lyricBox.on_change(func(bool v) {
-            stateLbl.set_text(if v then "下载时将同时保存 .lrc 歌词（已记住 ✓）" else "下载时不再保存歌词（已记住 ✓；右键菜单仍可单独下歌词）")
+            stateLbl.set_text(if v then "下载时将同时保存 .lrc 歌词（已记住）" else "下载时不再保存歌词（已记住；右键菜单仍可单独下歌词）")
             persist_settings()      // ★ 改了就存（2026-10-08 ✓ 先前改了不存 ⇒ 退出就白改 ✗）
             SDL3.markFrameRedraw()
         })
@@ -1741,7 +1832,7 @@ struct MusicDlApp {
                                       background: true, bg_color: #F2D33CFF, text_color: #1F1F1FFF,
                                 image_path: iconNavSearch, image_size: 20, image_gap: 8,
                                 image_tint: #1F1F1FFF})
-                                navSearch.set_tip("搜索页：关键词 → 勾选 → 下载")
+                                navSearch.set_tip("搜索页：关键词 -> 勾选 -> 下载")
                              navSearch.on_click(func() { tab.set_active(0) })
                            side.add(navSearch, {grow: 0, shrink: 0, basis: 36, align: 0})
                                          navBang = SDL3.createButton({w: 92, h: 36, text: "榜单", font_size: 14, padding: 0,
@@ -1826,18 +1917,18 @@ struct MusicDlApp {
     //   ⇒ 只提示、不改表；意图由补完时的 applyBangFilter 兑现 ✓（注释见 finishBangFill ✓）
     func onBangOnlyChanged(bool v) {
         if bangFilling {
-            bangLbl.set_text("正在补格式/大小 ⇒ " + (if v then "勾选" else "取消勾选")
-                             + "会在补完后自动生效（有文件大小 = 基本可以下载 ✓）")
+            bangLbl.set_text("正在补格式/大小 -> " + (if v then "勾选" else "取消勾选")
+                             + "会在补完后自动生效（有文件大小 = 基本可以下载）")
         } else if bangRawSongs.len() == 0 {
-            bangLbl.set_text("列表还是空的 ⇒ 先等这个榜取到歌（勾选会在有数据后生效 ✓）")
+            bangLbl.set_text("列表还是空的 -> 先等这个榜取到歌（勾选会在有数据后生效）")
         } else {
             applyBangFilter()
             int have = 0
             for bangRawSongs to r { if eng.has_size(r) { have = have + 1 } }
             if v {
-                bangLbl.set_text("只看有大小：共 " + _str(bangRawSongs.len()) + " 首 ⇒ 列表里留 "
+                bangLbl.set_text("只看有大小：共 " + _str(bangRawSongs.len()) + " 首 -> 列表里留 "
                                  + _str(bangSongs.len()) + " 首（有大小 = 基本可以下载；其余的是没探到大小，"
-                                 + "取消勾选即可看到 ✓）")
+                                 + "取消勾选即可看到）")
             } else {
                 bangLbl.set_text("已显示全部 " + _str(bangSongs.len()) + " 首（其中探到文件大小的有 "
                                  + _str(have) + " 首）")
@@ -1907,7 +1998,7 @@ struct MusicDlApp {
         if bangLoading { return }         // 上一票还在跑 ⇒ 等它收尾（切榜太快会丢结果 ✗）
         // ★ 补格式/大小还在跑时也不许换榜：那批线程的结果会写回 bangSongs（换榜就写串了 ✗）
         if bangFilling {
-            bangLbl.set_text("正在补上一榜的格式/大小，等它收尾再切 ✓")
+            bangLbl.set_text("正在补上一榜的格式/大小，等它收尾再切 ")
             return
         }
         bangLoading = true
@@ -2038,7 +2129,7 @@ struct MusicDlApp {
         for bangRawSongs to r { if eng.has_size(r) { have = have + 1 } }
         string only = ""
         if bangOnlyDl.is_checked() {
-            only = "　·　只看有大小 ⇒ 列表里 " + _str(bangSongs.len()) + " 首"
+            only = "　·　只看有大小 -> 列表里 " + _str(bangSongs.len()) + " 首"
         }
         bangLbl.set_text(srcname(bangCurSrc) + "：「" + bangBox.get_selected_text() + "」共 " + _str(bangRawSongs.len())
                          + " 首　·　已补到格式/大小 " + _str(have) + " 首" + only + "　·　双击某行 = 试听（后台同时下整首）")
@@ -2054,12 +2145,12 @@ struct MusicDlApp {
             if bangRawSongs.len() > 0 { first = srow.rowname(bangRawSongs[0]) }
             print("[dbangsize] 补到 " + _str(have) + " / " + _str(bangRawSongs.len()) + " 首　耗时 " + _str(dt) + " ms　"
                   + "首行=" + first + "（补前 " + bangFillFirst + "，顺序"
-                  + (if first == bangFillFirst then "未变 ✓" else "**变了 ✗**") + "）\n")
+                  + (if first == bangFillFirst then "未变 " else "**变了 **") + "）\n")
             if gBangOnlyCheck {
                 bool each = true
                 for bangSongs to r { if not eng.has_size(r) { each = false } }
-                print("[dbangonly] 勾上「只看有大小」⇒ 列表 " + _str(bangSongs.len()) + " 首 / 有大小 "
-                      + _str(have) + " 首　每行都有大小：" + (if each then "是 ✓" else "**否 ✗**") + "\n")
+                print("[dbangonly] 勾上「只看有大小」-> 列表 " + _str(bangSongs.len()) + " 首 / 有大小 "
+                      + _str(have) + " 首　每行都有大小：" + (if each then "是 " else "**否 **") + "\n")
                 gBangOnlyCheck = false
             }
             gBangSizeCheck = false
@@ -2099,7 +2190,7 @@ struct MusicDlApp {
         bangSrcBox = SDL3.createComboBox({
             w: 110, h: 30, font_size: 13, item_h: 26, selected: 0,
             items: ["酷我", "网易云", "酷狗", "QQ音乐"],
-            tip: "选哪个站的榜（换站 ⇒ 榜单菜单重新拉）"
+            tip: "选哪个站的榜（换站 -> 榜单菜单重新拉）"
         })
         bangSrcBox.on_change(func(int idx) { onBangSrcChanged(idx) })
         brow.add(bangSrcBox, {grow: 0, shrink: 0, basis: 110, align: 3})
@@ -2107,7 +2198,7 @@ struct MusicDlApp {
         bangBox = SDL3.createComboBox({
             w: 230, h: 30, font_size: 13, item_h: 26, selected: 0,
             items: ["（切到本页自动加载）"],
-            tip: "选一个榜单（选项按所选站点动态生成 ✓）"
+            tip: "选一个榜单（选项按所选站点动态生成）"
         })
         bangBox.on_change(func(int idx) { onBangPicked(idx) })
         brow.add(bangBox, {grow: 0, shrink: 0, basis: 230, align: 3})
@@ -2121,7 +2212,7 @@ struct MusicDlApp {
         //   = 基本可下载 ✓（探不到的**照样留着** —— 榜单页与搜索页有意的差别：先让你看见，
         //   真下的时候按 Range 头报真话 ✓）。所以过滤是**用户可选的**，不是默认行为 ✓
         bangOnlyDl = SDL3.createCheckBox({text: "只看有大小", checked: false, font_size: 13,
-            tip: "勾上 ⇒ 列表里只留**已探到文件大小**的曲目（有大小 = 基本可下载 ✓）；正在补格式/大小时要等补完才生效"})
+            tip: "勾上 -> 列表里只留**已探到文件大小**的曲目（有大小 = 基本可下载）；正在补格式/大小时要等补完才生效"})
         bangOnlyDl.on_change(func(bool v) { onBangOnlyChanged(v) })
         brow.add(bangOnlyDl, {grow: 0, shrink: 0, align: 1})
         brow.add(SDL3.createLabel({text: "（有文件大小出现 = 基本可以下载）", font_size: 12}), {grow: 0, shrink: 0, align: 1})
@@ -2155,7 +2246,7 @@ struct MusicDlApp {
 
         // ---- 状态行 ----
         var bstatus = SDL3.createHBox({h: 24, padX: 0, padY: 0, spacing: 12})
-        bangLbl = SDL3.createLabel({text: "切到本页会自动加载所选站点的第 1 个榜单（免登录 ✓）", font_size: 12, truncate: 1, max_w: 1040.0})
+        bangLbl = SDL3.createLabel({text: "切到本页会自动加载所选站点的第 1 个榜单（免登录）", font_size: 12, truncate: 1, max_w: 1040.0})
         bstatus.add(bangLbl, {grow: 1, shrink: 1, align: 1})
         page1.add(bstatus, {grow: 0, shrink: 0, align: 3})
 
@@ -2284,7 +2375,7 @@ struct MusicDlApp {
                     _exit(0)
                 }
                 if dlAuto > 0 and dlFrames >= dlAuto {
-                    print("[musicdl] DAUTO=" + _str(dlAuto) + " 帧跑完 ⇒ 退出 ✓\n")
+                    print("[musicdl] DAUTO=" + _str(dlAuto) + " 帧跑完 -> 退出\n")
                     _exit(0)
                 }
             })
@@ -2384,6 +2475,23 @@ int gDblStep = 0
 int gDblTarget = 1
 int gDblWait = 0        // 等行回来的拍数（超时就报"没等到行"⇒ 不挂死 ✓）
 
+// 下载 + 历史 自检（`DDL=<关键词>`）：搜索 → 下第 1 首 → 等跑完 → 切「历史」页 → 打印
+//   `[ddl] 通过/不通过：历史 N 条　最新=<歌名 - 歌手> | <大小> | <状态>`
+//   为什么要它：下载窗口那个「历史」页签是"消息驱动 + 每次都落盘"的 —— 有没有真记上、
+//   是不是**完成**（而不是"失败/取消"），光看代码看不出来 ⇒ 必须真下一首 ✓（见 onTick 那段 ✓）
+string gAutoDl = ""
+int gDlStep = 0
+int gDlWait = 0
+
+// 空任务开窗 自检（`DDLOPEN=1`）：不搜索、不勾选 ⇒ 直接调标题栏那个「下载」入口
+//   `[ddlopen] 通过/不通过：窗口开着=true 任务=0`
+//   为什么要它：2026-10-09 改了口径 —— 原先没勾选会**弹提示把窗口拦在外面**，
+//   改完必须验证"真的开出了空窗口"（而不是又回到弹窗 / 点了没反应 ✗）
+bool gDlOpenCheck = false
+int gDlOpenTick = 3
+bool gDlOpenStay = false        // `DDLOPEN=stay` ⇒ 断言完**不退出**，留着窗口给人肉眼/截图看布局 ✓
+bool gDlOpenHist = false        // `DDLOPEN=hist` ⇒ 顺带切到「历史」页签（同上，为了看那一页 ✓）
+
 // 「关于」弹窗自检（`DABOUT=1` ⇒ 第 3 拍自动打开它 ✓）
 //   为什么要它：这个弹窗是"固定高度 + 多行文案" ⇒ 文案一长就可能被裁 ✗（画面之外看不出来）
 //   ⚠ **DSHOT 截不到它**：DSHOT 读的是**主窗口渲染器**的像素，而模态是**另一个窗口** ✗
@@ -2421,6 +2529,19 @@ main() {
     }
     var ab = _env("DABOUT")
     if ab != null { gAboutTick = 3 }        // 第 3 拍开「关于」（见 gAboutTick 注释 ✓）
+    var ddl = _env("DDL")
+    if ddl != null { gAutoDl = _str(ddl) }  // 搜索→下第 1 首→查历史（见 gAutoDl 注释 ✓）
+    var ddo = _env("DDLOPEN")
+    if ddo != null {
+        gDlOpenCheck = true                  // 空任务开窗（见 gDlOpenCheck 注释 ✓）
+        string mode = _str(ddo)
+        if mode == "stay" { gDlOpenStay = true }
+        // `hist` / `histstay`：开完窗再切到「历史」页签（配 stay 用来肉眼 / 截图核对历史页布局 ✓）
+        if mode == "hist" or mode == "histstay" {
+            gDlOpenHist = true
+            gDlOpenStay = true
+        }
+    }
     MusicDlApp app = new MusicDlApp()
     app.run()
 }
