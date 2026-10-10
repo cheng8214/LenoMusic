@@ -348,6 +348,22 @@ main() {
     pq.set_queue(["C - c"], [""], ["C - c"], "D:/x")
     check("换队后流式状态清干净", not pq.is_streaming() and not pq.is_waiting() and pq.buf_ratio() == 1.0 and pq.take_stream_request() == -1)
 
+    // ==================== ★ 守卫：`streamOpened`（2026-10-10 修的"进度条不动" ✓）====================
+    //   背景（用户实测）：**先播了一首本地**（已下载）⇒ 再点一首**没下载**的（边下边播）⇒ 进度条钉死。
+    //   根因：换歌时上一首的 Sound **只 stop 不销毁**（为了别把音频引擎关了 ⇒ 见 swap_sound ✓），
+    //     于是字段 `sound` 非空但**不是这一首的** ✗；而 `try_open_stream()` 拿 `sound != null` 当
+    //     "已经有声了" ⇒ 流的对象永远建不起来，`position()` / `duration()` 读的都是上一首 ⇒ 进度条不动 ✗
+    //   修法：另立 `streamOpened`（"**本次这条流**的声建起来了没"），凡是判"有没有声"一律用它 ✓
+    //   ⚠ 下面这几条就是那个判据的**离线守卫**（不需要音频设备 ✓；谁把这套规则删了就会挂 ✓）
+    check("初始 / 换队后：streamOpened=false（还没这条流的声 ✓）", not pq.streamOpened)
+    check("流的声没建起来 ⇒ duration 报 0（**不能**退回读上一首那个 Sound 的时长 ✗）", pq.duration() == 0.0)
+    check("流的声没建起来 ⇒ position 用影子位置（同上，不能读上一首 ✗）", pq.position() == pq.shadowPos)
+    pq.streaming = true
+    pq.streamOpened = true
+    pq.reset_stream()
+    check("reset_stream 必须把 streamOpened 一起清掉（否则下一首会被当成'已经有声'⇒ 又钉死 ✗）",
+          not pq.streamOpened and not pq.streaming)
+
     print("")
     if fails > 0 {
         print($"共 {fails} 项失败")

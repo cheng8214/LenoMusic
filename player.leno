@@ -555,6 +555,15 @@ export struct Player {
     int lastGot = 0                  // 上次探测时的已下字节（用来判"有没有长" ✓）
     int openTicks = 0                // 自愈节流：无声时约 1 秒重开一次（见 tick ✓）
     float shadowPos = 0.0            // 影子位置：声一没（等缓冲 / 重建中）也能显示"听到哪儿了" ✓
+    // ★★ 2026-10-10 修（用户实测："先播了本地、再点网络播放 ⇒ **进度条不动**"）：
+    //   `sound` 这个字段**不代表"这一首的声"** —— 换歌时我们**故意只 `stop()` 不销毁**
+    //   （销毁会让 miniaudio 引擎引用归 0、下次播放要重开音频设备 ⇒ 见 swap_sound ✓）
+    //   ⇒ 播过一首本地之后再切"边下边播"，`sound` 里躺着的还是**上一首那个已停的对象** ✗
+    //   而 `try_open_stream()` 原先拿 `if sound != null { return }` 当"已经有声了" ⇒ 流的对象
+    //   **永远建不起来**：`position()` / `duration()` 读的都是上一首 ⇒ 进度条钉死在原地 ✗✗
+    //   ⇒ 用下面这个标志明确回答"**本次这条流**的声建起来了没"，凡是判"有没有声"的地方一律用它 ✓
+    //     （`sound` 只当"有没有对象"，不再当"是不是这一首" ✓）
+    bool streamOpened = false        // 本次边下边播的 Sound 建起来了吗（见上面那段 ⚠ ✓）
 
     // ---- 歌词（2026-10-08 ✓）：**懒加载** —— 换歌才重读一次，其它时候零开销 ✓ ----
     Lrc lrc
@@ -843,7 +852,8 @@ export struct Player {
             playing = true
             return true
         }
-        if sound != null {
+        // ⚠ 同理：边下边播里"字段里那个对象"不是这一首的 ⇒ 不能拿它 resume（会给上一首续播 ✗）
+        if sound != null and (not streaming or streamOpened) {
             sound?.resume()
             playing = true
             return true
@@ -885,7 +895,8 @@ export struct Player {
             begin_wait(s, true)
             return true
         }
-        if sound == null { return false }
+        // ⚠ 声没建起来（流还在等首片）⇒ 拦下来：别去 seek 上一首那个对象 ✗（见字段处 ⚠）
+        if sound == null or (streaming and not streamOpened) { return false }
         bool ok = sound.seek(s)
         if ok {
             sound?.resume()
@@ -930,7 +941,14 @@ export struct Player {
 
     // 总时长（秒）——★ 边下边播：优先用**文件头声明的总时长**（进度条分母 ⇒ 停声期间也得留着 ✓）
     func duration(): float {
-        if streaming and streamDur > 0.0 { return streamDur }
+        if streaming {
+            if streamDur > 0.0 { return streamDur }
+            // ★ 声还没建起来 ⇒ 返回 0（"还不知道"）——**绝不能**退回读 `sound`：那是**上一首**的时长
+            //   ⇒ 用户看到的正是"时长还是上一首那个 243s、进度条一动不动" ✗（2026-10-10 修 ✓）
+            if not streamOpened { return 0.0 }
+            if sound == null { return 0.0 }
+            return sound.getDuration()
+        }
         if sound == null { return 0.0 }
         return sound.getDuration()
     }
@@ -939,6 +957,9 @@ export struct Player {
     //   ★ 声一没（正重建 / 失败）也**不能归零** ✗ —— 用影子位置顶住（见 tick ✓）
     func position(): float {
         if waiting { return waitPos }
+        // ★ 边下边播：声**没建起来**（等首片 / 建失败）⇒ 一律走影子位置 ——
+        //   绝不能读 `sound`：那里面可能躺着**上一首**（只 stop 不销毁 ✓）⇒ 位置就钉死在上一首了 ✗
+        if streaming and not streamOpened { return shadowPos }
         if sound == null {
             if streaming { return shadowPos }
             return 0.0
@@ -1142,7 +1163,8 @@ export struct Player {
         streamGot = got
         if total > 0 { streamTotal = total }
         // 还没出声、也没在等待 ⇒ 文件够建 Sound 了就先开（首片到时从这条进来 ✓）
-        if sound == null and not waiting { try_open_stream() }
+        // ★ 判据同上：要的是"**这一条流**的声建起来了没"，不是"字段里有没有对象" ✗（见字段处 ⚠）
+        if not streamOpened and not waiting { try_open_stream() }
     }
 
     // 整首下完（path = 最终文件全路径 ✓）
@@ -1154,7 +1176,9 @@ export struct Player {
             if index >= 0 and index < qLocal.len() { qLocal[index] = path }   // 记成本地已有 ✓
         }
         streamGot = streamTotal
-        if waiting { resume_at(waitPos) }        // 等待中 ⇒ 缓冲肯定够了 ⇒ 立刻续播 ✓
+        if waiting { resume_at(waitPos); return }   // 等待中 ⇒ 缓冲肯定够了 ⇒ 立刻续播 ✓
+        // ★ 声还没建起来就下完了（首片迟迟没到 / 建声失败过）⇒ 立刻开，不必等 tick 的自愈那 1 秒 ✓
+        if playing and not streamOpened and streamPath != "" { resume_at(shadowPos) }
     }
 
     // 下失败（网断了 / 取不到直链 ✓）⇒ 写明原因；★ **不能**把播放状态清空 ✗
@@ -1166,7 +1190,7 @@ export struct Player {
         if streaming and streamGot > 0 {
             waiting = false
             streamDone = true                    // ⚠ 置真：否则播到边界会再等 ⇒ 永远等不到新数据 ✗
-            if playing and sound == null and streamPath != "" { resume_at(shadowPos) }
+            if playing and not streamOpened and streamPath != "" { resume_at(shadowPos) }
             return
         }
         streaming = false
@@ -1201,11 +1225,16 @@ export struct Player {
     func try_open_stream() {
         if not streaming { return }
         if streamPath == "" { return }
-        if sound != null { return }
+        // ⚠ 这里判的是 **streamOpened**（不是 `sound != null` ✗）—— 换歌时上一首的 Sound
+        //   还躺在字段里（只 stop 不销毁 ✓）⇒ 用 `sound != null` 会把"这一首还没声音"误判成
+        //   "已经有声了"⇒ 流的对象永远建不起来、进度条钉死（2026-10-10 用户实测的 bug ✓）
+        if streamOpened { return }
         if waiting { return }
         var s = audio.createSound(streamPath)
         if not s.isInit() {
-            sound = null
+            // ⚠ 这里**别动 `sound` 字段**（2026-10-10 修）：它可能躺着**上一首**那个对象
+            //   （换歌只 stop 不销毁 ✓ 见字段处 ⚠）—— 置 null 就再没人 uninit 它（丢句柄 ✗）
+            //   而"这一首还没声"这件事**由 streamOpened 表达** ⇒ 字段留着无妨 ✓
             return                              // 还太短 ⇒ 等下一次 feed_buffer 再试 ✓
         }
         float d = s.getDuration()
@@ -1213,7 +1242,9 @@ export struct Player {
         s.setVolume(effective_volume())
         s.setLooping(false)
         s.play()
-        swap_sound(s)                            // ★ 先建后销（见 swap_sound ✓）
+        swap_sound(s)                            // ★ 先建后销（见 swap_sound ✓）——这里会顺手销毁
+                                                 //   上一首那个已停的 Sound ✓（引擎引用始终 ≥1 ✓）
+        streamOpened = true                      // ★ 本次流的声**建起来了**（后面都用它判 ✓）
         playing = true
         err = ""
         openTicks = 0
@@ -1258,6 +1289,7 @@ export struct Player {
     // 重建 Sound 并跳到 pos 续播（等待结束的统一出口 ✓）
     func resume_at(float pos) {
         close_sound()
+        streamOpened = false                     // ★ 声先没了 ⇒ 建回来之前一律按"没声"算 ✓
         waiting = false
         waitPos = pos                            // ★ 失败退回等待时也用它（不沿用陈旧位置 ✗）
         shadowPos = pos
@@ -1275,6 +1307,7 @@ export struct Player {
         if pos > 0.0 { s.seek(pos) }
         s.play()
         swap_sound(s)                            // ★ 先建后销：引擎在切换中始终活着（见 swap_sound ✓）
+        streamOpened = true                      // ★ 声重建好了（见字段处 ⚠ ✓）
         playing = true
         err = ""
         openTicks = 0
@@ -1286,9 +1319,11 @@ export struct Player {
     func stream_pause_for_rename(): float {
         if not streaming { return -1.0 }
         // 本来就没声、也没在等缓冲 ⇒ 播放器**没占着文件**（改名不会失败）⇒ 报 -1，宿主直接改 ✓
-        if sound == null and not waiting { return -1.0 }
+        // ⚠ 判"播放器占不占着这个文件"：流的声没建起来 ⇒ 没占着（哪怕字段里躺着上一首的 ✗）
+        if (sound == null or (streaming and not streamOpened)) and not waiting { return -1.0 }
         float pos = position()
         close_sound()
+        streamOpened = false                     // ★ 一句"声没了"的实情：标志跟着一起落（见字段处 ⚠ ✓）
         waiting = false
         lastGot = streamGot
         return pos
@@ -1320,6 +1355,7 @@ export struct Player {
     // 清掉"边下边播 / 等待"的一切状态（换首 / 换队 / 停止时调 ✓）
     func reset_stream() {
         streaming = false
+        streamOpened = false
         streamPath = ""
         streamGot = 0
         streamTotal = 0
@@ -1347,7 +1383,8 @@ export struct Player {
         // ★ 等缓冲中 ⇒ 走等待循环（探测缓冲 ✓），不推进
         if waiting { tick_wait(); return }
         if not playing { return }
-        if sound == null {
+        // ⚠ 判"声还在不在"：边下边播时**字段里有对象 ≠ 这一首有声**（那可能是上一首的 ✗ 见字段处 ⚠）
+        if sound == null or (streaming and not streamOpened) {
             // ★★ 自愈：边下边播里"声没了"绝不能就此僵住 ✗
             //   （症状就是用户报的：时间 / 时长归零、点播放与拖进度全失效 ✓）
             //   约每 1 秒按**影子位置**重开一次：文件还在长、以及已经下完两种都能救回来 ✓

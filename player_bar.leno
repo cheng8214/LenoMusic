@@ -1181,6 +1181,18 @@ export struct PlayerBar {
         }
     }
 
+    // 自检用：当前播放位置 / 总时长（秒；0 = 没有 ✓）
+    //   为什么要这两个小口子：进度条画的就是 `q.ratio()` = 位置 ÷ 时长（见 seekBar.on_draw ✓）——
+    //   "进度条不动"的现场只能从这两个数看出来（画布本身没法断言 ✓）
+    func pos_secs(): float {
+        if p is Player => q { return q.position() }
+        return 0.0
+    }
+    func dur_secs(): float {
+        if p is Player => q { return q.duration() }
+        return 0.0
+    }
+
     // 队列第 i 首的本地路径（"" = 还没下载 ⇒ 宿主据此决定要不要起"边下边播" ✓）
     func queue_local(int i): string {
         if p is Player => q { return q.local_at(i) }

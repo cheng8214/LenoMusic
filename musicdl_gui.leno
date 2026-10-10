@@ -563,7 +563,8 @@ struct MusicDlApp {
             gAutoSearch = ""
             // ⚠ 配了双击自检就先**别退**（`DSEARCH=… DDBL=1`）：行刚进表、本拍马上要退 ⇒ 注入根本没机会 ✗
             //   由双击自检那道钩子在自己断言完再 requestExit ✓（见 gDblTarget 注释 ✓）
-            if gDblStep == 0 { SDL3.requestExit() }
+            //   ★ 同理：`DPLAY=1` 也要接着跑（它等搜索结果回来后开播 ✓）
+            if gDblStep == 0 and gPlayStep == 0 { SDL3.requestExit() }
         }
         SDL3.markFrameRedraw()
     }
@@ -674,6 +675,111 @@ struct MusicDlApp {
             }
         }
         // 退出路径自检（见 gExitTicks 注释 ✓）
+        // 播放自检（见 gPlayStep 注释 ✓）：先播一首**本地**、再切一首**没下载**的（复现"进度条不动" ✓）
+        //   全**离线**：A/B 两首都拿下载目录里已有的音频 ⇒ 不需要联网（只有声音需要一个音频设备 ✓）
+        if gPlayStep > 0 {
+            gPlayTick = gPlayTick + 1
+            if gPlayStep == 1 {
+                // ① 扫一遍下载目录，拿两首真音频（A = 当"本地那首"、B = 当"边下边播那首"）
+                if pbar is PlayerBar => b {
+                    b.rescan()
+                    if b.p is Player => q {
+                        int need = 2                       // 离线版要 A/B 两个文件；联网版只用 A ✓
+                        if gPlayMode == 2 { need = 1 }
+                        if q.list.len() >= need {
+                            gPlayFileA = q.list[0]
+                            if q.list.len() >= 2 { gPlayFileB = q.list[1] }
+                            q.set_volume(0.0)        // 自检**不出声**（音量不写盘 ✓ 见 set_volume 的注释 ✓）
+                            print("[dplay] 先播本地：" + dirs.basename(gPlayFileA)
+                                  + (if gPlayMode == 2 then "（联网版：待会儿播搜索结果里没下载的那首 ✓）"
+                                     else "　B=" + dirs.basename(gPlayFileB) + "（离线版：B 当「流」顶一手 ✓）") + "\n")
+                            b.set_queue(gPlayNames, [gPlayFileA, ""], gPlayNames, outdir, 0)
+                            gPlayStep = 2
+                            gPlayTick = 0
+                        } else {
+                            print("[dplay] 跳过：下载目录里音频太少（离线版要 2 首 / 联网版要 1 首 ✓）\n")
+                            gPlayStep = 0
+                            if dlShot == "" { SDL3.requestExit() }
+                        }
+                    }
+                }
+            } eif gPlayStep == 2 and gPlayTick >= 20 {
+                // ② 本地那首播了约 2.4 秒 ⇒ 记下它的"位置 / 时长"（等会儿和流那边对照 ✓）
+                if pbar is PlayerBar => b {
+                    gPlayLocalPos = b.pos_secs()
+                    gPlayLocalDur = b.dur_secs()
+                    print("[dplay] 本地态：位置=" + _str(_int(gPlayLocalPos)) + "s　时长=" + _str(_int(gPlayLocalDur))
+                          + "s　在流=" + _str(b.is_streaming()) + "\n")
+                    if gPlayLocalPos <= 0.0 {
+                        print("[dplay] 跳过：本地那首没放起来（本机没音频设备？）⇒ 这条自检要真播才行\n")
+                        gPlayStep = 0
+                        if dlShot == "" { SDL3.requestExit() }
+                    } else {
+                        if gPlayMode == 2 {
+                            gPlayStep = 4                  // 联网版：先去等搜索结果（见下 ✓）
+                            gPlayTick = 0
+                        } else {
+                            // ③ 切到**没有本地文件**的那一行 ⇒ 播放器走"边下边播"分支（= 用户点网络播放 ✓）
+                            b.set_queue(gPlayNames, [gPlayFileA, ""], gPlayNames, outdir, 1)
+                            // ④ 再手动喂"首片落盘"这一步 —— 宿主收到 dl_engine 的 "start" 消息时调的就是它 ✓
+                            //    （离线复现的关键：真正的流是文件一路变大，这里用 B 这个完整文件顶上，
+                            //      只验"**流的音频对象到底建没建起来**"这一个点 ✓）
+                            b.begin_stream(gPlayFileB)
+                            gPlayStep = 3
+                            gPlayTick = 0
+                        }
+                    }
+                }
+            } eif gPlayStep == 4 {
+                // 联网版：等搜索结果（配 `DSEARCH=<词>` ✓）⇒ 挑**第一首没下载的**，走真链路 ✓
+                if songs.len() > 0 {
+                    Array[string] lls2 = eng.resolve_locals(songs, outdir)
+                    int i3 = 0
+                    int pick = -1
+                    while i3 < songs.len() {
+                        if lls2[i3] == "" and pick < 0 { pick = i3 }
+                        i3 = i3 + 1
+                    }
+                    if pick < 0 {
+                        print("[dplay] 跳过：这批搜索结果**全都已下载**（联网版要一首没下过的 ✓）\n")
+                        gPlayStep = 0
+                        if dlShot == "" { SDL3.requestExit() }
+                    } else {
+                        print("[dplay] 联网版：播搜索结果第 " + _str(pick) + " 行（没下载 ⇒ 真边下边播 ✓）\n")
+                        playFrom(0, pick)
+                        gPlayStep = 3
+                        gPlayTick = 0
+                    }
+                } eif gPlayTick > 400 {
+                    print("[dplay] 跳过：等了 400 拍搜索结果还没回来（联网自检，网络不通就算了 ✓）\n")
+                    gPlayStep = 0
+                    if dlShot == "" { SDL3.requestExit() }
+                }
+            } eif gPlayStep == 3 {
+                if pbar is PlayerBar => b {
+                    if gPlayTick == 8 or gPlayTick == 24 or gPlayTick == 40 or gPlayTick == 56
+                       or gPlayTick == 88 or gPlayTick == 120 {
+                        print("[dplay] 流 t=" + _str(_int(gPlayTick)) + "：位置=" + _str(_int(b.pos_secs()))
+                              + "s　时长=" + _str(_int(b.dur_secs())) + "s　在流=" + _str(b.is_streaming())
+                              + "　已下=" + _str(_int(b.buf_ratio() * 100.0)) + "%\n")
+                    }
+                    // 联网版要等首片落盘（下载起线程 + 拉第一片）⇒ 判定的时间点给宽一点 ✓
+                    int due = if gPlayMode == 2 then 120 else 64
+                    if gPlayTick >= due {
+                        float p2 = b.pos_secs()
+                        float d2 = b.dur_secs()
+                        // 期望：位置自己在走（>1s ✓）＋ 时长是**这一首**的（≠ 上一首本地那首 ✓）
+                        bool okp = p2 > 1.0 and d2 > 0.0 and _int(d2) != _int(gPlayLocalDur)
+                        print("[dplay] " + (if okp then "通过" else "**不通过**")
+                              + "：切到边下边播后 位置=" + _str(_int(p2)) + "s　时长=" + _str(_int(d2)) + "s"
+                              + "（上一首本地=" + _str(_int(gPlayLocalDur)) + "s"
+                              + " ⇒ 时长对上上一首 = 流的声**没建起来** ✗）\n")
+                        gPlayStep = 0
+                        if dlShot == "" { SDL3.requestExit() }
+                    }
+                }
+            }
+        }
         // 「关于」弹窗自检（见 gAboutTick 注释 ✓）：第 N 拍自动打开它 ✓
         if gAboutTick > 0 {
             gAboutTick = gAboutTick - 1
@@ -2564,6 +2670,23 @@ bool gDlOpenHist = false        // `DDLOPEN=hist` ⇒ 顺带切到「历史」�
 //     ⇒ 用桌面截屏（`Win32.captureScreen` / 系统截图）看，见 README 的自检那一节 ✓
 int gAboutTick = 0
 
+// 播放自检：`DSEARCH=<关键词> DPLAY=1` ⇒ 走一遍"① 先播一首本地（已下载）→ ② 再点一首没下载的（边下边播）"，
+//   每约 1 秒打印一次"位置 / 时长 / 在流 / 已下%"，8 秒后断言"位置在走 + 时长是这首的" ✓
+//   为什么要它：2026-10-10 用户报"先播了本地、再点网络播放 ⇒ **进度条不动**"。根因是
+//   `try_open_stream()` 那句 `if sound != null { return }` —— 播过本地后 `sound` 一直非空
+//   （`play_index` 只 stop 不销毁，为的是别把音频引擎也关掉 ⇒ 见 swap_sound ✓）⇒ 流的音频对象
+//   **永远建不起来**，`position()` 取的是上一首那个已停的 Sound ⇒ 进度条钉死、时长也是上一首的 ✓
+//   ⚠ 这条自检要**真出声**才有意义（没声卡 ⇒ 本地那首放不起来 ⇒ 会打印"跳过" ✓）
+int gPlayStep = 0
+int gPlayTick = 0
+int gPlayMode = 1            // 1 = 离线版（A/B 两个本地文件 ✓ 不依赖联网）/ 2 = 联网版（走真下载链路 ✓）
+string gPlayFileA = ""       // 当"本地那首"的音频（= 用户那句"播放了本地" ✓）
+string gPlayFileB = ""       // 当"边下边播那首"的音频（文件已完整 ⇒ 只为验"声建起来了没" ✓）
+float gPlayLocalPos = 0.0
+float gPlayLocalDur = 0.0
+// 队列显示名（两行同长同序 ✓ 第 2 行的本地路径给 "" ⇒ 播放器走"边下边播"分支 ✓）
+Array[string] gPlayNames = ["A - 自检", "B - 自检"]
+
 main() {
     var ex = _env("DEXIT")
     if ex != null { gExitTicks = _int(_str(ex)) }
@@ -2595,6 +2718,11 @@ main() {
     }
     var ab = _env("DABOUT")
     if ab != null { gAboutTick = 3 }        // 第 3 拍开「关于」（见 gAboutTick 注释 ✓）
+    var dp = _env("DPLAY")
+    if dp != null {
+        int dpn = _int(_str(dp))
+        if dpn > 0 { gPlayStep = 1; gPlayMode = dpn }   // 1 = 离线版 / 2 = 联网版（见 gPlayStep 注释 ✓）
+    }
     var ddl = _env("DDL")
     if ddl != null { gAutoDl = _str(ddl) }  // 搜索→下第 1 首→查历史（见 gAutoDl 注释 ✓）
     var ddo = _env("DDLOPEN")
