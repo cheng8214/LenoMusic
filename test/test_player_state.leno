@@ -364,6 +364,25 @@ main() {
     check("reset_stream 必须把 streamOpened 一起清掉（否则下一首会被当成'已经有声'⇒ 又钉死 ✗）",
           not pq.streamOpened and not pq.streaming)
 
+    // ==================== ★ 守卫：`streamBuiltBytes`（2026-10-10 修的"播一会儿自己跳下一首" ✓）====
+    //   背景（用户实测）：**边下边播**时，播一会儿会莫名其妙切到下一首。
+    //   根因：Sound 是**建的那一刻**按文件内容建的，后来追加 / 改名的数据它看不见 ✗ ⇒
+    //     "整首已经下完、但手里这个 Sound 还是**半截文件**建的"时，播到**旧末尾**就 `isAtEnd()`，
+    //     而 `streamDone` 已经是 true ⇒ tick 把它当成"整首放完" ⇒ 切下一首 ✗✗
+    //   修法：记 `streamBuiltBytes`（建声时的 streamGot）⇒ tick 见"文件比建声时长"就先重建 Sound ✓
+    //   ⚠ 真正"播到旧末尾"那一刻要真文件 + 真解码（见 DPLAY 那种带声音的自检 ✗ 离线测不到）；
+    //     这里钉住的是**那条判据依赖的字段语义**（默认值 / 判据本身 / 复位 ✓）
+    check("新播放器 / 换队后：建声字节快照为 0", pq.streamBuiltBytes == 0)
+    pq.streamGot = 4000
+    pq.streamBuiltBytes = 2500
+    check("判据：文件比建声时长 ⇒ 只是播到了旧末尾（该重建，**不是**放完 ✗）",
+          pq.streamGot > pq.streamBuiltBytes)
+    pq.streamBuiltBytes = 4000
+    check("判据：一样长 ⇒ 这才算真放完（可以放心切下一首 ✓）", not (pq.streamGot > pq.streamBuiltBytes))
+    pq.reset_stream()
+    check("reset_stream 必须把 streamBuiltBytes 一起清掉（否则下一首会被误判成'文件在变长' ✗）",
+          pq.streamBuiltBytes == 0 and pq.streamGot == 0)
+
     print("")
     if fails > 0 {
         print($"共 {fails} 项失败")
