@@ -389,7 +389,7 @@ export func bangrows(HttpClient client, string bid, int limit): Array[Array[stri
             // 回退：filename 形如 "歌手 - 歌名" ⇒ 取 " - " 之前那段
             string fn = jsons.get_str(s, "filename", "")
             int dash = strings.find(fn, " - ")
-            if dash > 0 { artist = fn.slice(0, dash) }
+            if dash > 0 { artist = fn.slice(0, dash - 1) }
         }
         // 档位：与搜索同口径（高到低取第一档"可下"的）
         string id = ""

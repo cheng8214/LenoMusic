@@ -82,7 +82,7 @@ export func parseid(string songid): Array[string] {
     while n < 3 {
         int p = strings.find(rest, SEP)
         if p < 0 { break }
-        out.add(rest.slice(0, p))
+        out.add(rest.slice(0, p - 1))
         rest = rest.slice(p + 1, rest.len())
         n = n + 1
     }
@@ -98,7 +98,7 @@ export func parseid(string songid): Array[string] {
 export func extfromurl(string link): string {
     string low = link.to_lower()
     int query = strings.find(low, "?")
-    if query >= 0 { low = low.slice(0, query) }
+    if query >= 0 { low = low.slice(0, query - 1) }
     if low.ends_with(".flac") { return "flac" }
     if low.ends_with(".mp3") { return "mp3" }
     if low.ends_with(".m4a") { return "m4a" }

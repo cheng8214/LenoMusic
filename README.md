@@ -168,7 +168,7 @@
 | 列表体积来源 | `MINFO` 字段 | 搜索后再发**一次批量**请求补齐 | 搜索响应**直接带三档体积**（不用额外请求 ✓）|
 | 最高音质 | 接口给到什么就是什么（含 flac）| 官方只有 320k mp3；**flac 走第三方聚合接口**（实测 113 MB / 3.5 Mbps ✓）| 免费曲直接给 flac，**还能升到 Res 母带**（★ 2026-10-09 加：再多发一次 Web 搜索按 hash 对齐，实测 26.8 / 34.2 / 45.5 MB ✓）；付费曲走第三方兜底 |
 | 拿不到直链时 | 有第三方兜底接口 | 付费/原唱曲 `code=404` ⇒ **第三方兜底**（至少可下 ✓）| 付费曲 CDN 回 `status=2` ⇒ **第三方兜底** |
-| 金标回归 | `kuwo_des.leno` 文件内向量 | `test/test_netease_crypto.leno` | `test/test_kugou_cdn.leno` |
+| 金标回归 | `kuwo_des.leno` 文件内向量 | `test/test_netease_crypto.leno`（加密）· `test/test_netease_lyric_merge.leno`（译文合并）| `test/test_kugou_cdn.leno` |
 
 > **无损（flac）统一走 `thirdparty.leno`**（网易 `music.qinglvai.top` / QQ `api.vkeys.cn` /
 > 酷狗 `api.baka.plus`）—— 官方接口在**未登录 / 未开会员**时一档无损都拿不到，这是实测结论
@@ -253,13 +253,14 @@ leno.exe musicdl.leno --help
 
 ## 五、跑测试
 
-14 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
+15 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
 
 ```bat
 <发行包>\leno.exe test\test_player_state.leno      :: 播放器规则：认哪些扩展名 / 下一首是谁 / 循环三态 / 失败要安全
 <发行包>\leno.exe test\test_bang_recipe.leno        :: 榜单配方金标：31/9 榜常量表 + 酷我 URL 配方 + formats→ext + 脏行丢弃（38 项 ✓）
 <发行包>\leno.exe test\test_parsing.leno           :: parsing/songrow 的边界：at_int 脏数据**不抛** / 解析严格性 / 老行兼容（43 项断言 ✓）
 <发行包>\leno.exe test\test_lrc_parse.leno         :: 歌词解析金标：标准 LRC / 逐字时间轴 / 译文行 / 非法标签（22 项断言 ✓）
+<发行包>\leno.exe test\test_netease_lyric_merge.leno :: 网易云译文合并金标：切片两套口径自检 + 按时间戳并译文 / 元信息行跳过 / 空行与 CRLF（11 项断言 ✓）
 <发行包>\leno.exe test\test_parallel_dl.leno       :: 多首歌并行下载（离线服务端）
 <发行包>\leno.exe test\test_settings.leno          :: 设置的真文件读写与钳位
 <发行包>\leno.exe test\test_dl_window_open.leno    :: 下载窗口「不重复打开」的规则 + 任务表「清空」的 busy 判定与状态归零

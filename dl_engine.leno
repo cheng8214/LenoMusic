@@ -816,9 +816,9 @@ export func find_local(Array[string] job, string outdir): string {
     var names = dirs.listdir(outdir)
     for names to nm {
         string s = _str(nm)
-        if s.slice(0, 1) == "@" { continue }     // ★ `@` = 还没下完的半截文件 ⇒ **不算"已有"** ✓（见落盘处）
+        if s.slice(0, 0) == "@" { continue }     // ★ `@` = 还没下完的半截文件 ⇒ **不算"已有"** ✓（见落盘处）
         if s.len() > base.len() + 1 {
-            if s.slice(0, base.len()) == base {
+            if s.take(0, base.len()) == base {
                 if s.slice(s.len() - 4, s.len()) != ".lrc" {
                     string full = dirs.join(outdir, s)
                     if files.exists(full) { return full }
@@ -842,7 +842,7 @@ export func resolve_locals(Array[Array[string]] rows, string outdir): Array[stri
         var ls = dirs.listdir(outdir)
         for ls to nm {
             string s = _str(nm)
-            if s.slice(0, 1) == "@" { continue }   // ★ `@` = 还没下完 ⇒ 不算"本地已有"（否则双击会播半截 ✗）
+            if s.slice(0, 0) == "@" { continue }   // ★ `@` = 还没下完 ⇒ 不算"本地已有"（否则双击会播半截 ✗）
             if s.len() > 4 and s.slice(s.len() - 4, s.len()) != ".lrc" { names.add(s) }
         }
     }
@@ -854,7 +854,7 @@ export func resolve_locals(Array[Array[string]] rows, string outdir): Array[stri
             int k = 0
             while k < names.len() {
                 string s = names[k]
-                if s.len() > base.len() + 1 and s.slice(0, base.len()) == base {
+                if s.len() > base.len() + 1 and s.take(0, base.len()) == base {
                     string full = dirs.join(outdir, s)
                     if files.exists(full) {
                         hit = full

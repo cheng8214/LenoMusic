@@ -55,7 +55,7 @@ export func wrap_units(string text, int maxUnits): Array[string] {
             cur = ""
             w = 0
         }
-        cur = cur + text.sub_str(i, 1)
+        cur = cur + text.take(i, 1)
         w = w + cw
         i = i + 1
     }
@@ -88,7 +88,7 @@ export func strip_ext(string name): string {
         q = name.find(".", q + 1)
     }
     if dot <= 0 { return name }
-    return name.slice(0, dot)
+    return name.slice(0, dot - 1)
 }
 
 // 最后一处 `" - "` 的下标（没有 ⇒ -1 ✓）
@@ -110,7 +110,7 @@ export func split_artist(string filename): string {
     if q <= 0 { return "" }
     int rest = n.len() - q - 3
     if rest <= 0 { return "" }
-    return n.sub_str(q + 3, rest)
+    return n.take(q + 3, rest)
 }
 
 // 歌名 = **最后**一个 " - " **之前**那段（拆不出 ⇒ 整条 ✓）
@@ -119,7 +119,7 @@ export func split_title(string filename): string {
     string n = strip_ext(filename)
     int q = last_sep(n)
     if q <= 0 { return n }
-    return n.slice(0, q)
+    return n.slice(0, q - 1)
 }
 
 // ==================== 歌词（.lrc）解析（纯逻辑 ✓ 能离线单测）====================
@@ -608,7 +608,7 @@ export struct Player {
     func is_audio(string name): bool {
         // ★ 未下完的半截文件带 `@` 前缀 ⇒ **不是**能播的成品（扫目录时不该列出来 ✓ 对齐二创 ✓）
         //   ⚠ 与 dl_engine 的 find_local / resolve_locals 同一口径：三处都排 `@` ✓
-        if name.slice(0, 1) == "@" { return false }
+        if name.slice(0, 0) == "@" { return false }
         string e = dirs.extname(name)
         for ext_cases() to x {
             if e == x { return true }

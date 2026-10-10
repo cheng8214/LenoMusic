@@ -58,9 +58,9 @@ export func reveal(string path): bool {
         string dir = path
         int i = path.len() - 1
         while i >= 0 {
-            string ch = path.slice(i, i + 1)
+            string ch = path.slice(i, i)
             if ch == "/" or ch == "\\" {
-                dir = path.slice(0, i)
+                dir = path.slice(0, i - 1)
                 i = -1
             } else {
                 i = i - 1

@@ -1274,7 +1274,7 @@ struct MusicDlApp {
                         //   但边下边播时它改不动 —— Windows 下文件正被播放器读着 ✗
                         //   ⇒ 这里由宿主补做，且必须按这个顺序：**先让播放器松手 → 改名 → 用新文件续播** ✓
                         string bp = dirs.basename(p)
-                        if bp != "" and bp.slice(0, 1) == "@" {
+                        if bp != "" and bp.slice(0, 0) == "@" {
                             float pos = -1.0
                             if pbar is PlayerBar => b { pos = b.stream_pause_for_rename() }
                             string fin = dirs.join(outdir, bp.slice(1, bp.len()))

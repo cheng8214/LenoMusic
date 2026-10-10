@@ -36,7 +36,12 @@ func tagof(string line): string {
     int j = i
     while j < s.len() and s[j] != "]" { j = j + 1 }
     if j >= s.len() { return "" }
-    string tag = s[i:(j + 1)]
+    // ⚠ 切片口径坑（2026-10-10 修，原先这里写成 `s[i:(j + 1)]` ⇒ 静默失效）：
+    //   `s[a:b]` 是**闭区间（含 b）**，j 已经是 ']' 的下标 ⇒ 要"含 ']' 的标签"就写 `s[i:j]`。
+    //   写成 `(j + 1)` 是**半开**口径的心算 ⇒ 会多咬一个字（"[00:12.34]你好"）⇒
+    //   下面那段"只认数字/:/."的数字校验必然失败 ⇒ tagof 恒返回 "" ⇒
+    //   mergetranslation 里两处 `if tag == "" { continue }` 全中 ⇒ 译文永远并不进去（不报错，只是没译文）✗
+    string tag = s[i:j]
     // 只认时间戳（排除 [ti:]/[ar:]/[al:]/[by:]/[offset:] 这些元信息标签）
     if tag.has(":") and tag.len() >= 6 {
         int k = 1
@@ -53,8 +58,11 @@ func tagof(string line): string {
 // 去掉行首时间戳后的文本
 func aftertag(string line, string tag): string {
     int i = 0
+    // ⚠ 同款口径坑的另一半（2026-10-10 修）：这里是**按长度**取子串（要 tag.len() 个字符），
+    //   闭区间下标会写成 `line[i:(i + tag.len())]` ⇒ 多一个字符 ⇒ 永远不等于 tag ⇒ 恒返回 ""。
+    //   ⇒ 按长度取子串一律走 `slice(a, b)`（左闭右开），别再自己 ±1 ✓
     while i + tag.len() <= line.len() {
-        if line[i:(i + tag.len())] == tag { return line[(i + tag.len()):] }
+        if line.slice(i, (i + tag.len()) - 1) == tag { return line.slice(i + tag.len(), line.len()) }
         i = i + 1
     }
     return ""
@@ -80,6 +88,10 @@ export func mergetranslation(string lrc, string tlyric): string {
     Array[string] lines = lrc.lines()
     for lines to ln {
         string s = ln
+        // 结尾那个空元素（`lines()` 对尾部 "\n" 会多给一项）⇒ 跳过：
+        //   否则落盘的 .lrc 末尾会多一个空行（无害但脏 ✓）；空行在 LRC 里本来就没有语义
+        //   （解析侧同款：player.leno 的 lrc_add_line 见空行直接 return ✓）
+        if s == "" { continue }
         out = out + s + "\r\n"
         string tag = tagof(s)
         if tag == "" { continue }

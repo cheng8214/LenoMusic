@@ -134,7 +134,7 @@ export func parseid(string songid): Array[string] {
         out.add("M500")
         return out
     }
-    out.add(songid.slice(0, h))
+    out.add(songid.slice(0, h - 1))
     string p = songid.slice(h + 1, songid.len())
     if p == "" { p = "M500" }
     out.add(p)

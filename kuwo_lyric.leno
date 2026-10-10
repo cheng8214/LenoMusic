@@ -74,7 +74,7 @@ export func decodelyricbody(string raw): string {
     int n = raw.byte_len()
     if n < 16 { return "" }
     // 典型失败体：15 字节的 "TP=DENY REQUEST"
-    if raw.byte_slice(0, 10) != "tp=content" { return "" }
+    if raw.byte_slice(0, 9) != "tp=content" { return "" }
     int idx = strings.byte_find(raw, "\r\n\r\n")
     int skip = 4
     if idx < 0 {
@@ -84,7 +84,7 @@ export func decodelyricbody(string raw): string {
     if idx < 0 { return "" }
     int start = idx + skip
     if start + 2 >= n { return "" }
-    string zbody = raw.byte_slice(start, n)
+    string zbody = raw.byte_slice(start, n - 1)
     // zlib 头两字节：CMF(0x78) FLG(0x9C/0x01/0xDA...) ⇒ 剥掉再按裸 deflate 解
     int cmf = _byteAt(zbody, 0)
     if (cmf & 0x0F) != 8 { return "" }
@@ -159,7 +159,7 @@ func looks_like_lyric(string t): bool {
 func unzlib(string raw): string {
     int n = raw.byte_len()
     if n < 16 { return "" }
-    if raw.byte_slice(0, 10) != "tp=content" { return "" }
+    if raw.byte_slice(0, 9) != "tp=content" { return "" }
     int idx = strings.byte_find(raw, "\r\n\r\n")
     int skip = 4
     if idx < 0 {
@@ -169,7 +169,7 @@ func unzlib(string raw): string {
     if idx < 0 { return "" }
     int start = idx + skip
     if start + 2 >= n { return "" }
-    string zbody = raw.byte_slice(start, n)
+    string zbody = raw.byte_slice(start, n - 1)
     int cmf = _byteAt(zbody, 0)
     if (cmf & 0x0F) != 8 { return "" }
     GzipResult r = gzip.inflateRaw(zbody.byte_slice(2, zbody.byte_len()))
@@ -199,13 +199,13 @@ export func lrcpath(string audiopath): string {
     int dot = -1
     int i = audiopath.len() - 1
     while i >= 0 {
-        string ch = audiopath.slice(i, i + 1)
+        string ch = audiopath.slice(i, i)
         if ch == "." { dot = i; break }
         if ch == "\\" or ch == "/" { break }
         i = i - 1
     }
     if dot < 0 { return audiopath + ".lrc" }
-    return audiopath.slice(0, dot) + ".lrc"
+    return audiopath.slice(0, dot - 1) + ".lrc"
 }
 
 // 取歌词并写到 targetpath（返回写入字节数；0 = 这首歌没有歌词/取失败/写不进去）

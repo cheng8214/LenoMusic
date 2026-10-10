@@ -23,7 +23,7 @@ const BOM = "\uFEFF"
 func songmid(string songid): string {
     int h = strings.find(songid, "#")
     if h < 0 { return songid }
-    return songid.slice(0, h)
+    return songid.slice(0, h - 1)
 }
 
 // 取歌词文本（已补 BOM；失败/无歌词 ⇒ ""）
