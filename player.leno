@@ -504,6 +504,10 @@ export const LOOP_OFF = 0        // 放完列表就停
 export const LOOP_ALL = 1        // 放完回到第一首
 export const LOOP_ONE = 2        // 单曲循环
 
+// 等缓冲时的探测间隔（**拍**；主循环 120ms 一拍 ✓）—— 见 tick_wait
+//   ★ 2026-10-11：由 2 改成 **1**（= 每拍都探），见 tick_wait 的注释
+const int WAIT_PROBE_TICKS = 1
+
 export struct Player {
     Array[string] list               // 播放列表（**文件全路径**，已按文件名排序 ✓）—— 宿主没喂队列时的老口径
     // ===== ★ 播放队列（2026-10-09，移植自二创 LenoMusic-main ✓）=====
@@ -551,7 +555,7 @@ export struct Player {
     bool waiting = false             // 缓冲不足，正停下等（界面无感 ✓）
     float waitPos = 0.0              // 等够之后要跳到的秒数
     bool waitForSeek = false         // true = 用户拖到未下区；false = 播到了已下边界 ✓
-    int waitTicks = 0                // 重试计时（120ms 一拍 ⇒ 8 拍 ≈ 1 秒 ✓）
+    int waitTicks = 0                // 探测计时（拍；每 `WAIT_PROBE_TICKS` 拍探一次 ✓ 见 tick_wait）
     int lastGot = 0                  // 上次探测时的已下字节（用来判"有没有长" ✓）
     int openTicks = 0                // 自愈节流：无声时约 1 秒重开一次（见 tick ✓）
     // ★★ 2026-10-10 修（用户实测："边下边播时，播一会儿**自己跳到下一首**"）：
@@ -1274,22 +1278,23 @@ export struct Player {
         sound?.stop()                            // 停止发声（进度条位置由 position() 返回 waitPos ✓）
     }
 
-    // 等待循环：每 2 拍探一次（120ms 一拍 ⇒ 约 240ms ✓ 比原先 8 拍（约 1 秒）灵敏得多，
-    //   用户对"播到边界后停多久"是很敏感的；探测本身只是比两个整数，代价可忽略 ✓）
+    // 等待循环：按 `WAIT_PROBE_TICKS` 拍探一次（**现在是每拍都探** ⇒ 最多 120ms 就接上 ✓）
+    //   ★ 2026-10-11 改（用户实测："时不时卡顿一下" ✓）：原先写死每 **2** 拍才探一次 ⇒ 白白多静音
+    //   120ms ✗（而探测本身只是比两个整数，代价可忽略 ✓）；配合 resume_at 的"先建后销"
+    //   ⇒ "播到已下边界 → 接上"的静音从"240ms + 重开音频设备"降到"≤120ms + 一次解码寻址" ✓
+    //   ⚠ 不会因此变频繁重建：下面那句 `streamGot <= lastGot` 要求**真的长了新数据**才续播 ✓
+    //     （边下边播的进度按 1MB 一片回灌 ⇒ 一片 = 好几秒音频，不可能被 120ms 一拍探成抖动 ✓）
     func tick_wait() {
         if not playing { return }                // 用户暂停了 ⇒ 别自作主张续播 ✓
         if streamPath == "" { waiting = false; return }
-        if streamDone {
-            waitTicks = waitTicks + 1
-            if waitTicks < 2 { return }
-            waitTicks = 0
+        waitTicks = waitTicks + 1
+        if waitTicks < WAIT_PROBE_TICKS { return }
+        waitTicks = 0
+        if streamDone {                          // 整首已下完 ⇒ 直接接上（缓冲肯定够了 ✓）
             resume_at(waitPos)
             return
         }
-        waitTicks = waitTicks + 1
-        if waitTicks < 2 { return }
-        waitTicks = 0
-        if streamGot <= lastGot { return }       // 这一秒没长 ⇒ 接着等 ✓
+        if streamGot <= lastGot { return }       // 还没长新数据 ⇒ 接着等 ✓
         lastGot = streamGot
         // 拖到未下区的情形：目标秒要落在**已下范围**里才续播（留 0.5 秒余量 ✓）
         if waitForSeek and waitPos > avail_seconds() - 0.5 { return }
@@ -1297,16 +1302,24 @@ export struct Player {
     }
 
     // 重建 Sound 并跳到 pos 续播（等待结束的统一出口 ✓）
+    // ★★ 2026-10-11 修（用户实测："实时播放（边下边播）时**时不时卡顿一下**"✗✗）：
+    //   原先这里是 `close_sound()` **先销旧的、再建新的** ✗ —— 它把引擎引用计数打到 0
+    //   ⇒ Music 模块在那一句里 `ma_dll_engine_uninit()` **把音频设备关了** ✓，紧接着的 createSound
+    //   又得 `ma_dll_engine_init()` **重新打开音频设备**（实测几百毫秒）⇒ 每轮"等缓冲 → 续播"
+    //   都静音一下 ✓（这正是 swap_sound 那条纪律唯一漏掉的一处 —— 它自己那段注释点名要治
+    //   "停下等缓冲 → 重建"的停顿，可续播这条路当时没改成先建后销 ✗）
+    //   ⇒ 现在与 `open_local` / `try_open_stream` 同口径：**新声建好之后**才销旧的 ✓
+    //   ⚠ 建不起来（文件还太小）⇒ **别动当前那个**（同 try_open_stream 的做法 ✓）：它已经 stop 过，
+    //     正占着这个文件（改名那条路本来就要求它松手 ✓）⇒ 回到等待循环下一拍再试 ✓
     func resume_at(float pos) {
-        close_sound()
         streamOpened = false                     // ★ 声先没了 ⇒ 建回来之前一律按"没声"算 ✓
         waiting = false
         waitPos = pos                            // ★ 失败退回等待时也用它（不沿用陈旧位置 ✗）
         shadowPos = pos
-        if streamPath == "" { return }
-        var s = audio.createSound(streamPath)
+        if streamPath == "" { close_sound(); return }
+        var s = audio.createSound(streamPath)     // ★ 先建新的（引擎引用全程 ≥1 ⇒ 设备不重开 ✓）
         if not s.isInit() {
-            waiting = true                       // 还打不开 ⇒ 回到等待（约 1 秒后再试 ✓）
+            waiting = true                       // 还打不开 ⇒ 回到等待（下一拍再试 ✓）
             waitTicks = 0
             return
         }
