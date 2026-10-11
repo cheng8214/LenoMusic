@@ -178,6 +178,9 @@ export struct PlayerBar {
     string imgDir = ""           // 图标目录（宿主给：`dirs.join(dirs.res_dir(), "images")` ✓）
     Player? p = null
     Label? hostLbl = null        // 主界面状态栏（"正在播 xxx" / 出错都写这里 ✓）
+    // ★ 2026-10-11：宿主回调 —— 用户动了"要记住"的东西（音量 / 循环档）就喊一声，让宿主落盘 ✓
+    //   （写法与 sdl_canvas.onClick 同款：声明不给初值、用前判 null ✓）
+    pri func():void stateChanged
 
     // ==================== 构建（宿主 create 时调一次 ✓）====================
     func build() {
@@ -336,11 +339,14 @@ export struct PlayerBar {
                     eif w.loopMode == pl.LOOP_ALL { w.loopMode = pl.LOOP_ONE }
                     else { w.loopMode = pl.LOOP_OFF }
                 }
+                notify_state()          // ★ 用户换了循环档 ⇒ 让宿主记住（见 set_on_state_change ✓）
                 SDL3.markFrameRedraw()
             })
             right.add(btnLoop, {grow: 0, shrink: 0, basis: 32, align: 1})
 
-            volLbl = SDL3.createLabel({text: "60%", font_size: 12})
+            // ⚠ 初值别写死 "60%" ✗（那是老文案，和 Player.volume 默认的 0.8 对不上 ✓）
+            //   一律按**当前音量**显示；宿主启动套初值也走同一个口子（见 set_volume_pct ✓）
+            volLbl = SDL3.createLabel({text: _str(_int(q.volume * 100.0)) + "%", font_size: 12})
             right.add(volLbl, {grow: 0, shrink: 0, align: 1})
             // ⚠ 滑块的"滑块"尺寸取自**字高**（sdl_slider.leno:235 `float th = fontH` ✓）⇒
             //   默认 font_size=15 会让它变成一个大黑球 ✗ ⇒ 压到 11 才像样 ✓；配色也显式给 ✓
@@ -468,6 +474,7 @@ export struct PlayerBar {
             volSld.on_change(func(float v) {
                 if p is Player => w { w.set_volume(v / 100.0) }
                 volLbl.set_text(_str(_int(v)) + "%")
+                notify_state()          // ★ 用户改了音量 ⇒ 让宿主记住（见 set_on_state_change ✓）
             })
             sync_icons(q)
         }
@@ -1208,6 +1215,61 @@ export struct PlayerBar {
     func cur_index(): int {
         if p is Player => q { return q.index }
         return -1
+    }
+
+    // ==================== ★★ 2026-10-11：音量 / 循环档的**读写口子**（宿主"记住上次用的"要用 ✓）====================
+    //   为什么要有这两个口子：这两个值在**本文件**里（滑块的 value / `q.loopMode` ✓），而"记住"
+    //   是宿主的事（设置文件归 dl_settings.leno ✓）—— 与 shutdown / queue_local 是同一条纪律：
+    //   **宿主只碰 PlayerBar，不直接摸 Player/控件** ✓
+    //   ⚠ 通知回调**只在用户动作里调**（拖音量、点循环 ✓ 见 notify_state 的调用点）；
+    //     启动套初值走 `set_volume_pct`（直接写滑块字段 ⇒ 不触发 on_change ⇒ 不会平白写盘 ✗ ✓）
+
+    // 播放器状态变了 ⇒ 通知宿主去落盘（宿主没给回调就什么也不做 ✓）
+    func set_on_state_change(func():void cb) { stateChanged = cb }
+
+    // 喊一声（用户动作里调 ✓ 见 build 里的音量滑块 / 循环按钮）
+    pri func notify_state() { if stateChanged != null { stateChanged() } }
+
+    // 音量（0..100 **整数**，与设置文件 / 滑块同一套口径 ✓ 不在这两个口子上做浮点换算 ✗）
+    func volume_pct(): int {
+        if p is Player => q { return _int(q.volume * 100.0) }
+        return 80
+    }
+
+    // 套初值：改音量 + **滑块显示**
+    //   ⚠⚠ 这里**不能**写成 `volSld.value = _float(v)` ✗✗（2026-10-11 实测，编译器原话）：
+    //      「字段 'volSld' 类型不匹配: 期望 'struct Slider'，实际 'float'」
+    //      —— 本语言**不支持**给"**本 struct 的 struct 型字段**"做嵌套赋值：它把 `volSld.value = x`
+    //      当成"给字段 volSld 赋 x" ⇒ 类型对不上 ✗（**不是** `value` 这个名字的问题 ✓ ——
+    //      `value` 当字段名/读/写都正常 ✓；换成别的名字一样报 ✓）
+    //      **局部变量 / 参数**没这个限制：`Inner c = inner; c.value = 3.0; inner = c` 能跑通 ✓
+    //      （控件这边没必要绕那一手 ⇒ 直接调它自己的 `set_value()` 更清楚 ✓）
+    //   ⚠ 另一个坑：**`--check` 不检查被 import 的模块里的函数体** ⇒ 这句当初"检查通过"、
+    //      真编译却报错 ✗（改完必须**真编译/真跑一次** ✓ 见 README 的约定 ✓）
+    //   ⚠ `set_value()` 只在**值真的变了**时才回调 on_change（见 sdl_slider:92 ✓）
+    //     ⇒ 宿主套初值请在 `set_on_state_change` **之前**调：万一回调了也不会置脏 ⇒ 不白写盘 ✓
+    func set_volume_pct(int v) {
+        if v < 0 { v = 0 }
+        if v > 100 { v = 100 }
+        if p is Player => q { q.set_volume(_float(v) / 100.0) }
+        volSld.set_value(_float(v))          // ⇒ 变了的话 on_change 会把音量/文案再对一遍（幂等 ✓）
+        volLbl.set_text(_str(v) + "%")
+    }
+
+    // 循环档（0=关 / 1=列表 / 2=单曲 —— 与 player.leno 的 LOOP_* 同一套数 ✓）
+    func loop_mode(): int {
+        if p is Player => q { return q.loopMode }
+        return 1
+    }
+
+    // 套初值（顺带把图标/底色同步过去 ✓ 见 sync_icons）
+    func set_loop_mode(int m) {
+        if m < 0 { m = 0 }
+        if m > 2 { m = 2 }
+        if p is Player => q {
+            q.loopMode = m
+            sync_icons(q)
+        }
     }
 
     // 退出前收摊（宿主在 `win.run` 返回后调 ✓）：停播 + **释放音频设备** ✓

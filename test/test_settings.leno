@@ -81,6 +81,67 @@ main() {
     assert_eq(fb.sourcesSet, false)              // 仍是"没存过" ⇒ 应用会走默认全勾 ✓
     assert_eq(fb.sources.len(), 0)
 
+    // ---- ★ 2026-10-11：音量 / 循环 / 输出目录 / 格式过滤 / 榜单页 / 窗口尺寸 ----
+    //   用户实测："音量这些居然没有保存，二次打开就归 0" ⇒ 这几项也必须过一遍**真文件** ✓
+    DlSettings ex = new DlSettings()
+    ex.volume = 35
+    ex.loop = 2
+    ex.outdir = "D:\\音乐\\我的下载"
+    ex.fmt = "flac"
+    ex.bangSrc = "netease"
+    ex.bangId = "3778678"
+    ex.bangOnly = true
+    ex.winW = 1280
+    ex.winH = 800
+    assert_eq(cfg.save(ex), true)
+    DlSettings eb = cfg.load()
+    assert_eq(eb.volume, 35)
+    assert_eq(eb.loop, 2)
+    assert_eq(eb.outdir, "D:\\音乐\\我的下载")      // 中文路径也要原样过一遍（UTF-8 ✓）
+    assert_eq(eb.fmt, "flac")
+    assert_eq(eb.bangSrc, "netease")
+    assert_eq(eb.bangId, "3778678")
+    assert_eq(eb.bangOnly, true)
+    assert_eq(eb.winW, 1280)
+    assert_eq(eb.winH, 800)
+
+    // 越界值同样"落盘前钳住"（一个口径 ✓）
+    DlSettings ew = new DlSettings()
+    ew.volume = 999
+    ew.loop = 7
+    ew.winW = 10          // 比 setMinSize(780,460) 还小 ⇒ 拽回下限 ✓
+    ew.winH = 10
+    cfg.save(ew)
+    DlSettings ebw = cfg.load()
+    assert_eq(ebw.volume, cfg.VOLUME_MAX)
+    assert_eq(ebw.loop, cfg.LOOP_MAX)
+    assert_eq(ebw.winW, cfg.WIN_W_MIN)
+    assert_eq(ebw.winH, cfg.WIN_H_MIN)
+    DlSettings el = new DlSettings()
+    el.volume = -5
+    el.loop = -1
+    cfg.save(el)
+    DlSettings ebl = cfg.load()
+    assert_eq(ebl.volume, cfg.VOLUME_MIN)
+    assert_eq(ebl.loop, cfg.LOOP_MIN)
+
+    // ⚠ 窗口尺寸 0 = "**没存过**"（不是"钳成 780" ✗）：应用据此用出厂 1060×680 ✓
+    DlSettings e0 = new DlSettings()
+    assert_eq(e0.winW, 0)
+    cfg.save(e0)
+    assert_eq(cfg.load().winW, 0)
+    assert_eq(cfg.load().winH, 0)
+
+    // 出厂默认：音量 80 / 列表循环 / 其余空（与 player.leno 的 Player 默认值对得上 ✓）
+    DlSettings ed = cfg.load()                    // e0 刚落盘 ⇒ 文件里没这几项的值
+    assert_eq(ed.volume, cfg.VOLUME_DEF)
+    assert_eq(ed.loop, cfg.LOOP_DEF)
+    assert_eq(ed.outdir, "")
+    assert_eq(ed.fmt, "")
+    assert_eq(ed.bangSrc, "")
+    assert_eq(ed.bangId, "")
+    assert_eq(ed.bangOnly, false)
+
     // 还原用户原来的设置（字段级 ✓；因为不补写 sources 键，默认行为也不会被改掉 ✓）
     cfg.save(keep)
     DlSettings fin = cfg.load()

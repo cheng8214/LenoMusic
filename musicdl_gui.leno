@@ -159,6 +159,17 @@ struct MusicDlApp {
     // ===== 数据 =====
     Array[Array[string]] songs       // 搜索结果（歌曲行）
     string outdir = ""
+    // ===== ★ 2026-10-11：可记忆状态的"攒批落盘"与窗口尺寸快照（见 mark_dirty / persist_all）=====
+    bool settingsDirty = false       // 有改动还没落盘
+    int settingsIdle = 0             // 连着几拍没人再动（凑够 8 拍才写盘 ✓）
+    int winW = 0                     // 主窗口尺寸的**快照**（退出前落盘用；别在退出时现问窗口 ✗）
+    int winH = 0
+    // ★ 2026-10-11：格式过滤的**用户选择**（"" = 全部格式）—— ⚠ 与 `fmtBox` 的当前值**不是一回事** ✗：
+    //   每次搜索都会**程序化**重填下拉（`refreshFmtItems`：选项 = 搜到的那些格式）⇒ 用户上次选的
+    //   "flac" 只要这次没搜到 flac 就会掉回「全部格式」⇒ 直接存 `fmt_want()` 会**把偏好抹掉** ✗✗
+    //   ⇒ 偏好只在**用户真动了下拉**时更新（`fmtProg` 区分程序化 vs 用户 ✓）
+    string fmtPref = ""
+    bool fmtProg = false             // 正在程序化设 fmtBox（这段时间的 on_change 不算用户动作 ✓）
 
     // ===== 搜索线程状态（2026-10-08 拆两阶段并行 ⇒ 线程是**一批**而不是一条 ✓）=====
     //   阶段 A：每个音源一条（官方搜索）；阶段 B：每片行一条（补第三方无损直链）
@@ -336,20 +347,39 @@ struct MusicDlApp {
         its.add("全部格式")
         for sorted to e3 { its.add(e3) }
         fmtBox.set_items(its)                  // 会把越界的 sel 复位成 -1 ✓（那也当"全部" ✓）
+        // ⚠ 下面到 `onFmtChanged()` 为止全是**程序化**设置（不是用户选的）⇒ 用 fmtProg 标上 ✓
+        fmtProg = true
         int want = 0
         int i = 0
         while i < its.len() {
             if keep != "" and its[i] == keep { want = i }
             i = i + 1
         }
+        // ★ 2026-10-11：没保住（**刚启动**的第一次搜索 / 上次选的那项这次没搜到）⇒
+        //   用**记住的那个格式**（`fmtPref`；"" = 全部格式 ✓）⇒ "上次只下 flac"就不用每次重选 ✓
+        if want == 0 and fmtPref != "" {
+            i = 0
+            while i < its.len() {
+                if strings.to_lower(its[i]) == fmtPref { want = i }
+                i = i + 1
+            }
+        }
         fmtBox.set_selected(want)
         fmtBox.set_enabled(its.len() > 1)      // 只有一种格式 ⇒ 没得选（禁用更清楚 ✓ 仍可见 ✓）
         onFmtChanged()
+        fmtProg = false
     }
 
     // 换格式 ⇒ 状态栏说清"这一选会下几首"（避免"以为全下、其实只下了 3 首" ✗）
     func onFmtChanged() {
         string want = fmt_want()
+        // ★ 2026-10-11：格式过滤也记住 —— 但**只有用户真动了下拉**才更新偏好 ✗：
+        //   本函数每次搜索完都会被 `refreshFmtItems` **程序化**调一遍（那时是"自动选/退回全部"，
+        //   不是用户改主意 ✓）⇒ 记进去就会把"上次只下 flac"的偏好抹掉 ✗✗（见 fmtPref 的注释 ✓）
+        if not fmtProg and want != fmtPref {
+            fmtPref = want
+            mark_dirty()
+        }
         if want == "" {
             stateLbl.set_text("格式：全部 —— 勾选的都会下")
         } else {
@@ -365,12 +395,13 @@ struct MusicDlApp {
     }
 
     // 勾选的音源 id（跳过不可用/未勾选）
-    // ==================== 界面上"可记忆项"的落盘（2026-10-08 ✓）====================
-    //   记什么：**每源条数** + **音源勾选** + **「同时下载歌词」勾选**（2026-10-08 ✓）
-    //   ⚠ 先 `load()` 再只改这几项 ⇒ 不会把设置窗口刚写的（并行线程数）覆盖掉 ✗
-    //   ⚠ 只有用户**真动了控件**才调它（启动套初值时**不**调 ⇒ 不会平白写盘 ✗）
-    //   ⚠ 歌词这项漏过一次（用户实测：主窗口取消勾选、退出后没保存 ✗）⇒ 现在也归这里 ✓
-    func persist_settings() {
+    // ==================== 界面上"可记忆项"的落盘（2026-10-08 ✓ / 2026-10-11 扩面 ✓）====================
+    //   ★ 记什么（全部在这里现取一遍界面状态 ✓）：每源条数 / 音源勾选 / 「同时下载歌词」勾选
+    //     + **音量 / 循环档 / 输出目录 / 格式过滤 / 榜单页（站点+榜单+只看有大小）/ 窗口尺寸** ✓
+    //   ⚠ 2026-10-11 用户实测："音量这些居然没有保存，二次打开就归 0" —— 后 6 项原先**一项都没记** ✗
+    //   ⚠ 先 `load()` 再覆盖本文件的这几项 ⇒ 不会把设置弹窗刚写的（并行线程数）抹掉 ✗
+    //   ⚠ **别在 tick 里每拍直接调**：它会真写盘 ⇒ 统一走 mark_dirty() 的攒批（见那儿 ✓）
+    func persist_all() {
         DlSettings s = dlset.load()
         s.limit = _int(limitSpin.get_value())
         s.lyric = lyricBox.is_checked()     // 主窗口那个勾选框 = 同一份设置（设置弹窗也是它 ✓）
@@ -382,7 +413,41 @@ struct MusicDlApp {
         }
         s.sources = ids     // 直接存数组：全不勾就是空数组 ✓（"存过没"另用 sourcesSet 标 ✓）
         s.sourcesSet = true
+        // ---- ★ 播放条：音量 / 循环档（走 PlayerBar 的口子 ⇒ 不直接摸 Player/控件 ✓）----
+        if pbar is PlayerBar => b {
+            s.volume = b.volume_pct()
+            s.loop = b.loop_mode()
+        }
+        // ---- ★ 输出目录 / 格式过滤 ----
+        s.outdir = outdir
+        s.fmt = fmtPref                     // ⚠ 存的是**用户偏好**，不是 fmtBox 现值 ✗（见 fmtPref ✓）
+        // ---- ★ 榜单页：上次看的站点 / 榜单 / 「只看有大小」----
+        s.bangSrc = bangCurSrc
+        s.bangId = bangCurId
+        s.bangOnly = bangOnlyDl.is_checked()
+        // ---- ★ 窗口尺寸（用 resize 事件里的**快照**，不是现问窗口 ✓ 见 winW ✓）----
+        s.winW = winW
+        s.winH = winH
         if dlset.save(s) { cfg = s }        // 存成功就把内存里的 cfg 跟上（状态栏/搜索都读它 ✓）
+    }
+
+    // ===== ★★ 2026-10-11：落盘的**攒批** =====
+    //   为什么必须有：拖一次音量滑块会连发几十次 on_change、拖一次窗口边框更是几十条 resize
+    //   ⇒ 每次都写盘就是几十次文件写（本仓"别做无谓的活"的同一条纪律 ✓ 见文件头 ⚠①）
+    //   做法：用户一动就置脏；120ms 一拍里数拍，**连续 8 拍（≈1 秒）没人再动**才写一次 ✓
+    //   ⚠ 退出前必须 flush（`flush_settings`）：攒着的那一拍不落就丢了 ✗（✕ / ESC 那两条路要调 ✓）
+    //   （两个计数器是**字段**：`settingsDirty` / `settingsIdle` ✓ 声明在"数据"那一段里 ✓）
+    func mark_dirty() {
+        settingsDirty = true
+        settingsIdle = 0
+    }
+
+    // 立刻落盘（退出路径调 ✓；没脏就什么也不做 ✓）
+    func flush_settings() {
+        if not settingsDirty { return }
+        settingsDirty = false
+        settingsIdle = 0
+        persist_all()
     }
 
     func picksources(): Array[string] {
@@ -1139,6 +1204,16 @@ struct MusicDlApp {
             // 播放条：同一拍推进（放完自动下一首 + 刷进度/时间/按钮态 ✓）
             if pbar is PlayerBar => b { b.tick() }
             pulseBusy()
+            // ★ 设置落盘的攒批（见 mark_dirty ✓）：连续 8 拍（≈1 秒）没人再动 ⇒ 写一次盘
+            //   （拖音量滑块 / 拖窗口边框都会连发几十次 ⇒ 不攒批就是几十次文件写 ✗）
+            if settingsDirty {
+                settingsIdle = settingsIdle + 1
+                if settingsIdle >= 8 {
+                    settingsDirty = false
+                    settingsIdle = 0
+                    persist_all()
+                }
+            }
         } catch e {
             stateLbl.set_text("刷新出错：" + eng.errmsg(e))
             SDL3.markFrameRedraw()
@@ -1705,7 +1780,9 @@ struct MusicDlApp {
             if paths != null and paths.len() > 0 {
                 outdir = paths[0]
                 dirLbl.set_text(outdir)
-                stateLbl.set_text("输出目录已改为：" + outdir)
+                dirLbl.set_tip(outdir)                    // ⚠ 注记也要跟着换（截断时悬停看全路径 ✓）
+                mark_dirty()                              // ★ 输出目录也记住（下次开机还是它 ✓）
+                stateLbl.set_text("输出目录已改为（已记住）：" + outdir)
                 SDL3.markFrameRedraw()
             }
         }, {default_location: outdir})
@@ -1758,7 +1835,7 @@ struct MusicDlApp {
             // 勾选变化：落盘记住（点搜索时仍会现取一遍 ⇒ 两不冲突 ✓）
             box.on_change(func(bool v) {
                 stateLbl.set_text("音源勾选已记住（下次启动照旧）")
-                persist_settings()
+                mark_dirty()                    // ★ 改了记下来（攒批落盘 ✓ 见 mark_dirty）
                 SDL3.markFrameRedraw()
             })
             srcRow.add(box, {grow: 0, shrink: 0, align: 1})
@@ -1888,7 +1965,7 @@ struct MusicDlApp {
         //   范围也直接引 dl_settings 的常量 ⇒ 控件与钳位**只有一处口径**（不会对不上 ✗）
         limitSpin = SDL3.createSpinBox({w: 86, h: 32, min: dlset.LIMIT_MIN, max: dlset.LIMIT_MAX, step: 5, value: cfg.limit, int_mode: true, font_size: 13})
         limitSpin.set_tip("每个音源最多取多少条（酷我接口的 rn 参数；改了会记住）")
-        limitSpin.on_change(func(float v) { persist_settings() })
+        limitSpin.on_change(func(float v) { mark_dirty() })     // ★ 改了记下来（攒批落盘 ✓）
         row1.add(limitSpin, {grow: 0, shrink: 0, basis: 86, align: 3})
         // 设置入口已移到**标题栏右侧的齿轮按钮**（上面的 actions: [{id:"settings", icon:"gear"}] ✓）
         page0.add(row1, {grow: 0, shrink: 0, align: 3})
@@ -1929,7 +2006,7 @@ struct MusicDlApp {
         lyricBox.set_tip("下载音频时顺带存一份同名 .lrc（酷我官方歌词，含译文行）")
         lyricBox.on_change(func(bool v) {
             stateLbl.set_text(if v then "下载时将同时保存 .lrc 歌词（已记住）" else "下载时不再保存歌词（已记住；右键菜单仍可单独下歌词）")
-            persist_settings()      // ★ 改了就存（2026-10-08 ✓ 先前改了不存 ⇒ 退出就白改 ✗）
+            mark_dirty()            // ★ 改了就记（攒批落盘 ✓ 2026-10-08 修过"改了不存"、2026-10-11 改成攒批）
             SDL3.markFrameRedraw()
         })
         row3.add(lyricBox, {grow: 0, shrink: 0, align: 1})
@@ -2105,6 +2182,19 @@ struct MusicDlApp {
         return "kuwo"
     }
 
+    // ★ 2026-10-11：**记住的站点**在"站点下拉"里排第几（没存过 / 存的不认识 ⇒ 0 = 第 0 项 ✓）
+    //   ⚠ 站点下拉就 4 项（`["酷我","网易云","酷狗","QQ音乐"]` ✓ 见 buildBangPage），
+    //     与上面 `bangsrcid` 的映射**一一对应** ✓ —— 两边都加站点时记得一起改 ✗
+    func bang_src_index(): int {
+        if cfg.bangSrc == "" { return 0 }
+        int i = 0
+        while i < 4 {
+            if bangsrcid(i) == cfg.bangSrc { return i }
+            i = i + 1
+        }
+        return 0
+    }
+
     // 榜单歌曲行 → 表格行（列比搜索页少一个「来源」：榜单本身就是单一音源 ✓）
     func bangtablerow(Array[string] s): Array[string] {
         return ["", s[eng.F_NAME], s[eng.F_ARTIST], s[eng.F_ALBUM],
@@ -2136,6 +2226,7 @@ struct MusicDlApp {
     //   为什么补的期间不生效：那批线程的结果要按**原下标**写回全量行，而且"哪些有大小"此刻还没定
     //   ⇒ 只提示、不改表；意图由补完时的 applyBangFilter 兑现 ✓（注释见 finishBangFill ✓）
     func onBangOnlyChanged(bool v) {
+        mark_dirty()              // ★ 勾选态也记住（下次开机照旧 ✓ 攒批落盘 ✓）
         if bangFilling {
             bangLbl.set_text("正在补格式/大小 -> " + (if v then "勾选" else "取消勾选")
                              + "会在补完后自动生效（有文件大小 = 基本可以下载）")
@@ -2178,7 +2269,20 @@ struct MusicDlApp {
               navBang.set_image_tint(#1F1F1FFF)
               navSearch.set_image_tint(#5A5A5AFF)
                     }
-       if idx == 1 and bangLoadedFor < 0 { loadBangMenu() }
+       // ★ 2026-10-11：首次进本页 ⇒ 先套上"**上次看的站点**"（没存过 / 存的不认识 ⇒ 第 0 个 ✓）
+       //   ⚠ `set_selected` **会触发 on_change**（sdl_combobox ✓）⇒ `onBangSrcChanged` 自己会去拉菜单
+       //     ⇒ 那条路只走一次（这里就别再拉一遍 ✗ —— 两条线程抢同一个 bangMenuThread ✓）
+       //   （选中的站点本来就是第 0 个时，set_selected 可能不回调 ⇒ 那就走老路自己拉 ✓）
+       if idx == 1 and bangLoadedFor < 0 {
+           int bsi = bang_src_index()
+           if bsi > 0 {
+               bangSrcBox.set_selected(bsi)
+               // 兜底：万一 set_selected 没回调（值没变等）⇒ 自己拉一次（否则进页什么也没有 ✗）
+               if bangMenuThread == null { loadBangMenu() }
+           } else {
+               loadBangMenu()
+           }
+       }
           SDL3.markFrameRedraw()
       }
 
@@ -2207,8 +2311,21 @@ struct MusicDlApp {
             return
         }
         bangBox.set_items(names)
-        bangCurId = bangIds[0]
-        bangLbl.set_text(srcname(bangCurSrc) + "：" + names[0] + "（共 " + _str(names.len()) + " 个榜，正在取歌…）")
+        // ★ 2026-10-11：套上"**上次看的榜单**"（`cfg.bangId`；菜单里没有它 ⇒ 退回第 0 个 ✓ —
+        //   换站后可见榜单会变 ⇒ 找不到是常态，不是错 ✓）
+        //   ⚠ `set_selected` 会触发 on_change ⇒ `onBangPicked` 把 bangCurId 设好并拉歌曲 ✓；
+        //     下面那句 `loadBangRows()` 是**幂等**的（`bangLoading` 守卫 ✓）⇒ 不会拉两遍 ✓
+        int pick = 0
+        if cfg.bangId != "" {
+            int k = 0
+            while k < bangIds.len() {
+                if bangIds[k] == cfg.bangId { pick = k }
+                k = k + 1
+            }
+        }
+        bangBox.set_selected(pick)
+        bangCurId = bangIds[pick]
+        bangLbl.set_text(srcname(bangCurSrc) + "：" + names[pick] + "（共 " + _str(names.len()) + " 个榜，正在取歌…）")
         loadBangRows()
     }
 
@@ -2234,12 +2351,14 @@ struct MusicDlApp {
         bangRawSongs = []
         bangSongs = []
         bangTable.set_rows([])
+        mark_dirty()              // ★ 站点也记住（下次开机还看这一站 ✓ 攒批落盘 ✓）
         loadBangMenu()
     }
 
     func onBangPicked(int idx) {
         if idx < 0 or idx >= bangIds.len() { return }
         bangCurId = bangIds[idx]
+        mark_dirty()              // ★ 榜单也记住（下次开机还看这一榜 ✓；换站后找不到就退回第 0 ✓）
         loadBangRows()
     }
 
@@ -2431,7 +2550,9 @@ struct MusicDlApp {
         //   榜单接口**不给体积** ⇒ 一行"有文件大小"意味着"直链取到了、真实字节数也探到了"
         //   = 基本可下载 ✓（探不到的**照样留着** —— 榜单页与搜索页有意的差别：先让你看见，
         //   真下的时候按 Range 头报真话 ✓）。所以过滤是**用户可选的**，不是默认行为 ✓
-        bangOnlyDl = SDL3.createCheckBox({text: "只看有大小", checked: false, font_size: 13,
+        // ★ 2026-10-11：勾选态也记住（`checked: cfg.bangOnly` 走 opts ⇒ 不触发 on_change ✓
+        //   与"音源勾选框"同一个初值套法 ✓）
+        bangOnlyDl = SDL3.createCheckBox({text: "只看有大小", checked: cfg.bangOnly, font_size: 13,
             tip: "勾上 -> 列表里只留**已探到文件大小**的曲目（有大小 = 基本可下载）；正在补格式/大小时要等补完才生效"})
         bangOnlyDl.on_change(func(bool v) { onBangOnlyChanged(v) })
         brow.add(bangOnlyDl, {grow: 0, shrink: 0, align: 1})
@@ -2496,6 +2617,18 @@ struct MusicDlApp {
     }
 
     func handleEvent(Event ev): bool {
+        // ★ 2026-10-11：窗口大小跟着记住（窗口是 Resizable 的 ⇒ 下次开机还是这个大小 ✓）
+        //   ⚠ 只记**尺寸**：SDL3 模块有 getSize/setSize，但**没有"取窗口位置"的接口** ✗ ⇒ 位置不记
+        //   ⚠ 只在事件里取**快照**存字段（`winW/winH`）：退出路径里窗口可能已经销毁 ⇒ 那时别碰窗口 ✗
+        //   ⚠ 拖边框会连发几十条 ⇒ 走 mark_dirty 攒批（见那儿 ✓）
+        if ev.isWindowResized() {
+            //   ⚠ `win` 是**值类型**（struct）⇒ 别写 `if win != null`（编译器会警告"比较无意义"✗）；
+            //     本回调只可能在窗口活着时进来 ✓
+            var sz0 = win.getSize()
+            winW = sz0.w
+            winH = sz0.h
+            mark_dirty()
+        }
         // ★ 播放条的浮层先看事件：它开着时，点别处 / 按 ESC 由它收起（= 失去焦点即收 ✓）
         //   ⚠ 必须排在下面"ESC 关窗口"**之前**：否则开着歌单按 ESC 会直接退程序 ✗
         if pbar is PlayerBar => pb2 { if pb2.on_event(ev) { return true } }
@@ -2512,17 +2645,20 @@ struct MusicDlApp {
             return true
         }
         if ev.isQuit() or ev.isWindowClose() {
+            flush_settings()                         // ★ 攒批的改动先落盘（此刻控件还在 ✓）
             shutdownAudio()                          // ★ 先停声（见 shutdownAudio 的注释 ✓）
             return false
         }
         if titleBar.is_close_requested() {
             titleBar.clear_close_request()
+            flush_settings()                         // ★ 同上：退出前把攒着的那一拍落下去 ✓
             shutdownAudio()                          // ★ 点 ✕ = 退出程序：立刻停声 + 把剩下的窗口一起收掉 ✓
             SDL3.requestExit()
             return false
         }
         if ev.isKeyDown() and ev.scancode() == Scancode.ESCAPE {
-            shutdownAudio()                          // ★ ESC 同口径（见上 ✓）
+            flush_settings()                         // ★ ESC 同口径（见上 ✓）
+            shutdownAudio()
             SDL3.requestExit()
             return false
         }
@@ -2540,12 +2676,24 @@ struct MusicDlApp {
         if dirs.res_dir() != dirs.script_dir() { _console(false) }
         SDL3.ttfInit()
         SDL3.setTheme(SDL3.lightTheme())
-        win = SDL3.createWindow({title: "Leno 音乐下载器", w: 1060, h: 680, flags: 0x20})
+        // 读设置（文件不存在 / 坏了 ⇒ 出厂默认 ✓，见 dl_settings.load）——**建窗口之前**读：
+        //   ① "默认带歌词"要能直接套到工具栏那个勾选框上（setupUI 之前 ✓ 老口径 ✓）
+        //   ② ★ 2026-10-11：**窗口尺寸**也要在这儿定（createWindow 就得给 w/h ✓）
+        cfg = dlset.load()
+        // ★ 窗口尺寸：记住上次的（0 = 没存过 ⇒ 出厂 1060×680 ✓；下限已在 load 里钳到 780×460 ✓）
+        int w0 = dlset.WIN_W_DEF
+        int h0 = dlset.WIN_H_DEF
+        if cfg.winW > 0 { w0 = cfg.winW }
+        if cfg.winH > 0 { h0 = cfg.winH }
+        win = SDL3.createWindow({title: "Leno 音乐下载器", w: w0, h: h0, flags: 0x20})
         if not win.ok {
             SDL3.ttfQuit()
             return
         }
         win.setMinSize(780, 460)
+        // 尺寸**快照**（退出前落盘用 ✓ 见 handleEvent 的 resize 分支）：别在退出时现问窗口 ✗
+        winW = w0
+        winH = h0
 
         // 窗口 / 任务栏图标（运行时）：**PNG 直接可用** ✓（`win.setIcon` 内部会把像素拷进窗口
         //   ⇒ 拷完即可释放 surface ✓）
@@ -2560,12 +2708,12 @@ struct MusicDlApp {
             }
         }
 
-        // 默认输出目录 = 脚本目录/downloads（与 CLI 版一致，两边的下载文件放一处）
+        // 输出目录：★ 2026-10-11 起**记住上次选的**（用户实测：每次开机都要重选一遍 ✗）
+        //   没存过 / 存的是空串 ⇒ 出厂默认 = 脚本目录/downloads（与 CLI 版一致，两边的下载文件放一处）
         outdir = dirs.script_dir() + _sep() + "downloads"
-
-        // 读设置（文件不存在 / 坏了 ⇒ 出厂默认 ✓，见 dl_settings.load）—— **setupUI 之前**读，
-        //   这样"默认带歌词"能直接套到工具栏那个勾选框上 ✓
-        cfg = dlset.load()
+        if cfg.outdir != "" { outdir = cfg.outdir }
+        // 格式过滤的**用户偏好**也接上（下拉的选项要等搜完才填 ⇒ 先记着，见 refreshFmtItems ✓）
+        fmtPref = cfg.fmt
 
         setupUI()
         // ★ 自检钩子：DBANG=1 ⇒ 启动就切到「榜单」页（照数据看板 dashboard 的 DPAGE 约定 ✓）
@@ -2586,6 +2734,17 @@ struct MusicDlApp {
                 }
         // ⚠ setupUI 之后才能碰控件：套上设置里的"默认带歌词"，并在状态栏报一下并行度 ✓
         lyricBox.set_checked(cfg.lyric)
+        // ★★ 2026-10-11：**上次用的**也套回来（用户实测："音量这些居然没有保存，二次打开就归 0" ✓）
+        //   音量/循环走 PlayerBar 的口子（宿主不直接摸 Player/控件 ✓ 见 set_volume_pct 的注释）；
+        //   套初值**不置脏** ⇒ 不会"开机就平白写一次盘" ✗（set_volume_pct 直接写滑块字段 ⇒ 不触发回调 ✓）
+        if pbar is PlayerBar => pb0 {
+            // ⚠ 顺序要紧：**先套初值、后装回调** —— 套初值时控件可能回调 on_change（值变了才会 ✓
+            //   见 sdl_slider:92），此刻回调还没装 ⇒ 不会置脏 ⇒ 不会"开机就平白写一次盘" ✓
+            pb0.set_volume_pct(cfg.volume)
+            pb0.set_loop_mode(cfg.loop)
+            // 用户动了"要记住"的东西（拖音量 / 点循环）⇒ 宿主攒批落盘 ✓
+            pb0.set_on_state_change(func() { mark_dirty() })
+        }
         stateLbl.set_text("就绪（并行 " + _str(cfg.workers) + " 线程；标题栏右上「下载 / 设置」两个图标）")
         // 全局 120ms 一拍：搜索进度、下载进度、"忙"指示（定时器是模块级全局的 ⇒ 模态对话框
         // 打开期间照样触发，所以下载进度条能在模态窗里动起来 ✓）
@@ -2631,6 +2790,8 @@ struct MusicDlApp {
         //   ⚠ 本处是**兜底**：点 ✕ / ESC 那条路已经在 handleEvent 里提前停过声了（见 shutdownAudio 的
         //     注释 ✓）；这里覆盖的是 SDL_QUIT / `requestExit()`（自检钩子）那几条不进 handleEvent 的路 ✓
         //   （shutdownAudio 可重复调用：`Player.close()` 里 sound 已为 null 就直接过 ✓）
+        //   ⚠ 这里**不能**补 `flush_settings()` ✗：走到这儿窗口已经销毁、控件都 dispose 了，
+        //     再读它们（滑块值 / 勾选框）不安全 ⇒ 攒批的落盘一律放在 handleEvent 的退出分支里 ✓
         shutdownAudio()
         SDL3.ttfQuit()
     }

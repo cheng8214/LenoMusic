@@ -20,6 +20,22 @@ export const int LIMIT_MIN = 5
 export const int LIMIT_MAX = 50
 export const int LIMIT_DEF = 20
 
+// 音量 / 循环档 / 主窗口尺寸的**硬范围与出厂值**（2026-10-11 ✓ —— 设置读写、界面套初值共用，
+//   一处口径 ✓）：音量与滑动条同一套**整数** 0..100（不是 0..1 浮点 ✗ 免得两头换算对不上 ✓）
+export const int VOLUME_MIN = 0
+export const int VOLUME_MAX = 100
+export const int VOLUME_DEF = 80     // 出厂 = player.leno 里 Player.volume 的 0.8 ✓
+export const int LOOP_MIN = 0        // 与 player.leno 的 LOOP_OFF / LOOP_ALL / LOOP_ONE 同一套数 ✓
+export const int LOOP_MAX = 2
+export const int LOOP_DEF = 1        // 出厂 = LOOP_ALL（列表循环 ✓ 与 Player.loopMode 默认一致 ✓）
+// 窗口尺寸：下限与主界面 `win.setMinSize(780, 460)` **同一口径**（存得再小也拽回这儿 ✓）
+export const int WIN_W_MIN = 780
+export const int WIN_H_MIN = 460
+export const int WIN_W_MAX = 10000   // 上限只为防脏值（手改配置文件不至于开出个怪窗口 ✓）
+export const int WIN_H_MAX = 10000
+export const int WIN_W_DEF = 1060    // 出厂尺寸（原先硬编码在 musicdl_gui 的 createWindow ✓ 挪到这儿）
+export const int WIN_H_DEF = 680
+
 export struct DlSettings {
     int workers = 4      // 并行下载线程数（**多首歌同时下**）；默认值见 dl_engine.DL_DEFAULT_WORKERS
     bool lyric = true    // 启动时默认勾上"同时下载歌词"
@@ -33,6 +49,48 @@ export struct DlSettings {
     //   为什么不靠"数组空不空"判断 ✗ —— 空数组 = 用户一个都不要 ✓，跟"从没存过"（应用该走
     //   出厂默认"可用音源全勾" ✓）是两码事，必须分开记 ✓
     bool sourcesSet = false
+    // ===== ★★ 2026-10-11：「上次用的」这些也一起记住（用户实测：音量二次打开就回默认 ✗）=====
+    //   原先只记 并行数 / 默认带歌词 / 每源条数 / 音源勾选 ⇒ 下面这些**每次开机都回出厂** ✗
+    //   口径与上面几条完全一致：**落盘前先钳位**（文件里永远不会出现非法值 ✓）
+    //   ⚠ 一律**追加在末尾**（本仓约定：加字段只追加，别插中间 ✗）
+    //   ⚠ 默认值只能写字面量（不能写常量名 ✗）⇒ 这几个数与 VOLUME_DEF / LOOP_DEF 是同一套 ✓
+    int volume = 80         // 播放条音量 0..100（与滑动条同一套整数口径 ✓ = VOLUME_DEF）
+    int loop = 1            // 循环档 0=关 / 1=列表 / 2=单曲（= LOOP_DEF，与 LOOP_* 同一套数 ✓）
+    string outdir = ""      // 输出目录（"" = 没选过 ⇒ 应用走"脚本目录/downloads" ✓）
+    string fmt = ""         // 搜索页格式过滤（"" = 全部格式；否则是**小写扩展名** ✓ 如 "flac"）
+    string bangSrc = ""     // 榜单页：上次看的站点 id（"" = 没存过 ⇒ 用下拉第 0 个 ✓）
+    string bangId = ""      // 榜单页：上次看的榜单 id（**菜单里找不到就退回第 0 个** ✓ 换站后会变 ✓）
+    bool bangOnly = false   // 榜单页：「只看有大小」的勾选态 ✓
+    int winW = 0            // 主窗口尺寸（0 = 没存过 ⇒ 用 WIN_W_DEF / WIN_H_DEF ✓）
+    int winH = 0
+}
+
+// 音量 / 循环档的钳位（脏值一律回落合法区间 ✓ 与 workers / limit 一个口径 ✓）
+export func clamp_volume(int n): int {
+    if n < VOLUME_MIN { return VOLUME_MIN }
+    if n > VOLUME_MAX { return VOLUME_MAX }
+    return n
+}
+
+export func clamp_loop(int n): int {
+    if n < LOOP_MIN { return LOOP_MIN }
+    if n > LOOP_MAX { return LOOP_MAX }
+    return n
+}
+
+// 窗口尺寸：**0 表示"没存过"**（保持 0 ⇒ 应用据此用出厂尺寸 ✓ 别把 0 钳成 780 ✗）
+export func clamp_win_w(int n): int {
+    if n <= 0 { return 0 }
+    if n < WIN_W_MIN { return WIN_W_MIN }
+    if n > WIN_W_MAX { return WIN_W_MAX }
+    return n
+}
+
+export func clamp_win_h(int n): int {
+    if n <= 0 { return 0 }
+    if n < WIN_H_MIN { return WIN_H_MIN }
+    if n > WIN_H_MAX { return WIN_H_MAX }
+    return n
 }
 
 // 钳到合法范围（设置窗口的输入、配置文件的脏值都过这里 ✓）
@@ -121,6 +179,16 @@ export func load(): DlSettings {
             }
         }
         if m.has("sourcesSet") { s.sourcesSet = jsons.get_bool(m, "sourcesSet", false) }
+        // ---- ★ 2026-10-11 新增的那几项（缺键 ⇒ 保持结构里的出厂默认 ✓ 老配置文件照常能读 ✓）----
+        if m.has("volume") { s.volume = clamp_volume(jsons.get_int(m, "volume", s.volume)) }
+        if m.has("loop") { s.loop = clamp_loop(jsons.get_int(m, "loop", s.loop)) }
+        if m.has("outdir") { s.outdir = jsons.get_str(m, "outdir", "") }
+        if m.has("fmt") { s.fmt = jsons.get_str(m, "fmt", "") }
+        if m.has("bangSrc") { s.bangSrc = jsons.get_str(m, "bangSrc", "") }
+        if m.has("bangId") { s.bangId = jsons.get_str(m, "bangId", "") }
+        if m.has("bangOnly") { s.bangOnly = jsons.get_bool(m, "bangOnly", false) }
+        if m.has("winW") { s.winW = clamp_win_w(jsons.get_int(m, "winW", 0)) }
+        if m.has("winH") { s.winH = clamp_win_h(jsons.get_int(m, "winH", 0)) }
     }
     return s
 }
@@ -142,7 +210,12 @@ export func save(DlSettings s): bool {
     //   ⚠ `sourcesSet` 一起落盘 ⇒ 读写对称："存过没"不会因为文件里多/少一个键而变味 ✓
     try {
         jsons.write_file(store_path(), {version: 1, workers: w, lyric: s.lyric, limit: l,
-                                        sources: s.sources, sourcesSet: s.sourcesSet})
+                                        sources: s.sources, sourcesSet: s.sourcesSet,
+                                        // ★ 2026-10-11：音量 / 循环 / 输出目录 / 格式过滤 / 榜单页 / 窗口尺寸
+                                        volume: clamp_volume(s.volume), loop: clamp_loop(s.loop),
+                                        outdir: s.outdir, fmt: s.fmt,
+                                        bangSrc: s.bangSrc, bangId: s.bangId, bangOnly: s.bangOnly,
+                                        winW: clamp_win_w(s.winW), winH: clamp_win_h(s.winH)})
     } catch e {
         return false
     }
