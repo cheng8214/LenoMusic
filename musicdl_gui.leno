@@ -52,11 +52,15 @@ import "./dl_settings_win.leno" as dlswin    // "设置"弹窗（SDL3）—— �
 import "./dl_about_win.leno" as dlabout     // "关于"弹窗（SDL3）—— 标题栏右侧那个 ⓘ 打开 ✓
 import "./player_bar.leno" as pb             // 播放条（嵌在主界面里 ✓ 见它的文件头）
 import "./dl_history.leno" as hist           // 下载历史（`DDL` 自检要读它的访问器 ✓；窗口那边也用它 ✓）
+import "./bang_page.leno" as bangpg          // 榜单页（★ 2026-10-11 从本文件拧出 ⇒ 本文件只接线 ✓ 见它的文件头）
+                                             //   ⚠ 别名别叫 `bang` ✗ —— 本文件有个**字段**就叫 bang（BangPage?）
+                                             //     同名会把模块遮蔽掉，`bang.create_...` 会被当成"在字段上找方法"✗
 
 use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, CheckBox, Table, ProgressBar, HBox, VBox, Edit, SpinBox, Separator, Scancode, ComboBox, ImageView, TabControl)
 use dlw.DlWindow
 use pb.PlayerBar
 use dlset.DlSettings
+use bangpg.BangPage
 
 // 歌曲行的列下标（F_ID / F_NAME / …）已收敛到 dl_engine.leno 的 `export const` ⇒ 用 `eng.F_xxx` ✓
 // （原先本文件自己复制了一份；下载窗口再拆一个文件就会变成三份 ⇒ 单一事实来源 ✓）
@@ -80,11 +84,10 @@ func probe_worker(Array[Array[string]] rows): Array[Array[string]] {
     return eng.probe_rows(rows)
 }
 
-// "逐首补体积"的并行度 —— **搜索阶段 B 与榜单补格式/大小共用这一个**（两处同一套口径 ✓）。
+// "逐首补体积"的并行度 —— 搜索阶段 B 用它，榜单侧用它补格式/大小（**同一套口径** ✓）。
+//   ★ 2026-10-11：常量搬到 `dl_engine.leno`（`eng.PROBE_THREADS` ✓）—— 榜单页拆出去后，
+//     两个页面都要它 ⇒ 再留一份在本文件就是两处定义、迟早写岔 ✗（实测数据随常量一起搬过去了 ✓）
 //   实测（4 源 × 10 条，40 行 / 约 23 行真去问接口）：串行 ~26 s → 5 路 ~9.0 s → **8 路 ~5.6 s**
-//   （再往上收益递减，且第三方都是免费公开接口 ⇒ 8 封顶 ✓）
-//   榜单侧实测（酷我热歌榜 100 首、每首 1~3 个请求）：8 路 **约 5~20 s**（看 CDN 冷热 ✓）
-const int PROBE_THREADS = 8
 
 // ⚠ 下载窗口（dl_window.leno）的"开始"也走这个入口 —— 起线程的必须还是本文件 ✓
 //   shard / nshards = 本 worker 领第几份 / 共几份（**多首歌并行**，切法见 dl_engine.dl_entry_shard ✓）
@@ -95,10 +98,15 @@ func dl_worker_shard(Array[Array[string]] jobs, string outdir, any ch, any cmd, 
 // ★ 2026-10-09：`preview_worker` 随"试听（拉前一段）"整套退役 —— 现在双击就是"播放整表 + 边下边播" ✓
 //   （那条下载走的是现成的 `dl_worker_shard`，不需要新 worker ✓ 见 startStreamFor）
 
-// 榜单 worker（两条，同一条硬约束：入口必须是**本文件**的具名全局函数 ✓）
-//   ⚠ 榜单菜单/歌曲都要走网络 ⇒ 必须放线程里（同步调会卡住 UI 1~2 秒 ✗）
-//   ⚠ 结果由主线程 `t.join() as Array[Array[string]]` 取（同搜索阶段 A/B 的做法 ✓）
-//     引擎层已保证不抛异常（内部 try 兜住、失败给空列表 ✓）⇒ 这里再兜一层，纯 defensive
+// ★ 2026-10-11（拆分时实测到的**语言硬约束**，值得记牢 ✓）：
+//   `threads.start(f, …)` 的判据是 **`f` 所属的 module 必须为空**（`threads.c:130` 那段——
+//   子 VM 只继承**调用方 VM** 的 globals，且把自己的 current_module_frame 置 NULL ⇒ 模块函数
+//   进不了函数体）。⇒ **任何被 import 的模块里都写不出合法的线程入口** ✗（不只是"当前文件"，
+//   而是"**入口脚本自己**"：榜单页拆成模块后，它自己的 worker 当场就被拦了 ✓ 实测过 ✓）。
+//   那模块要不要起线程？**要 —— 由宿主把 worker 当函数值传进去**：
+//     模块里收 `func(string):Array[Array[string]]` 这种字段，再 `threads.start(field, …)` ✓
+//     此时 `f` 仍是**入口脚本**的函数（module == NULL）⇒ 合法 ✓（探针实测 join 回了正确值 ✓）
+//   ⇒ 所以下面这三条**必须留在这里**（入口脚本 = 本文件），榜单页通过 create_bang_page 收走它们 ✓
 func bang_menu_worker(string src): Array[Array[string]] {
     Array[Array[string]] menu = []
     try { menu = eng.bang_menu(src) } catch e { menu = [] }
@@ -111,8 +119,7 @@ func bang_worker(string src, string bid, int limit): Array[Array[string]] {
     return rows
 }
 
-// 榜单"逐首补格式/大小"worker（同一条硬约束：线程入口必须是**本文件**的具名全局函数 ✓）
-//   只做转发 ⇒ 真正的请求都在 eng.fill_sizes 里（与搜索的 probe_worker 同款 ✓）
+// 榜单"逐首补格式/大小"worker（只做转发 ⇒ 真正的请求都在 eng.fill_sizes 里 ✓）
 func bang_fill_worker(Array[Array[string]] part): Array[Array[string]] {
     return eng.fill_sizes(part)
 }
@@ -211,49 +218,21 @@ struct MusicDlApp {
     Button navSearch
     Button navBang
 
-    // ===== 榜单页（接口移植自二创，2026-10-09 ✓）=====
-    //   数据源：dl_engine.bang_menu(src) 拿菜单、bang_rows(src, id, limit) 拿歌曲行
-    //   ⚠ 榜单行**不做 has_size 过滤**（榜单接口多数不给体积 ⇒ 「大小」列天然为空 ✓）
-    ComboBox bangSrcBox               // 榜单页的音源下拉（决定"哪个站的榜"）
-    ComboBox bangBox                  // 榜单下拉（选项随音源动态生成 ✓）
-    Button bangReloadBtn
-    CheckBox bangOnlyDl               // ★「只看有大小」（2026-10-09）：勾上 ⇒ 列表只剩**已探到文件大小**的行
-    Table bangTable
-    Label bangLbl
-    Array[string] bangIds = []        // 与 bangBox 选项平行：第 i 项对应哪个榜单 id
-    // 榜单歌曲行存**两份**（★ 2026-10-09 加"只看有大小"时拆的）：
-    //   `bangRawSongs` = 拉回来的**全量**行（逐首补格式/大小的目标，过滤不碰它 ✓）
-    //   `bangSongs`    = 当前**展示**的行（= 全量，或按勾选过滤后的子集）
-    //   ⚠ 表格行必须与 bangSongs **一一对应**（右键 / 双击 / 下载全按行号取 songs[i]）
-    //     ⇒ 过滤不是"隐藏行"✗ 而是**重建数组**（同搜索页对 has_size 的口径 ✓ 见 dl_engine.has_size）
-    //   ⚠ 过滤**只在补格式/大小结束后**套上：补的期间结果要按**原下标**写回（见 finishBangFill ✓）
-    //     这正是用户要的"必须等补格式后生效" ✓
-    Array[Array[string]] bangRawSongs = []
-    Array[Array[string]] bangSongs = []   // 榜单歌曲行（与搜索行同构 ⇒ 下载/试听都能直接用 ✓）
+    // ===== 榜单页（★ 2026-10-11 整页搬去 bang_page.leno ⇒ 本文件只留一个引用 ✓）=====
+    //   它自带控件、两条线程（菜单/歌曲）、逐首补格式/大小那批线程，以及"只看有大小"的过滤 ✓
+    //   本文件只做五件事：把它挂进 tab（第 1 页）、每 120ms 调 tick()、切页时调 on_shown()、
+    //   经 ctx_* 访问器读它的行、以及装好它那 5 个回调（见 setupUI 里那段 ✓）
+    BangPage? bang = null
 
     // ===== 右键菜单的"作用对象"（2026-10-09 ✓ 让搜索表/榜单表共用同一套菜单）=====
     //   两张表的菜单项与处理**完全一样**，只是数据源不同 ⇒ 只记"这次菜单落在哪张表上"，
     //   由 ctx_* 访问器统一取"当前表/当前行"（见 buildMenu 那里的注释 ✓）
-    int menuCtx = 0                   // 0 = 搜索表（songs）/ 1 = 榜单表（bangSongs）
+    int menuCtx = 0                   // 0 = 搜索表（songs）/ 1 = 榜单表（bang 的行 ✓ 见 ctx_row）
 
-    // ===== 榜单行"逐首补格式/大小"的那批线程（2026-10-09 ✓ 见 startBangFill）=====
-    //   榜单接口不给体积（实测确认 ✓）⇒ 取到行之后逐首探（与搜索阶段 B 同一套编排 ✓）
-    Array[Thread] bangFillThreads = []
-    Array[Array[Array[string]]] bangFillParts = []    // 各线程入参（join 失手时退回它 ⇒ 一行都不丢 ✓）
-    bool bangFilling = false
-    int bangFillT0 = 0                                // 自检报耗时用 ✓
-    string bangFillFirst = ""                         // 自检用：补之前的第 0 行歌名（验顺序没被打乱 ✓）
     // 自检用：buildMenu 最近一次收到的"作用对象"（见文件末的 DCTX 钩子 ✓）
     int gCtxSeen = -1                 // 期望 1（榜单表）
     int gCtxRowSeen = -9              // 期望 0（右击的那一行）
     bool gCtxWasOpen = false          // 目标 4 用：切页**之前**菜单是否真的开着（防"没开也算通过" ✗）
-    Thread? bangThread = null         // 取榜单歌曲的那条线程（⚠ 入口必须是本文件函数 ⇒ 见文件头 ✓）
-    Thread? bangMenuThread = null // 取榜单**菜单**的那条线程（kuwo/qq 是内置常量、瞬时 ✓；另两个要发请求）
-    bool bangLoading = false
-    string bangCurSrc = "kuwo"
-    string bangCurId = ""
-    int bangLoadedFor = -1// 菜单已加载过几轮（切页懒加载用：-1 = 从没加载 ✓）
-    int bangLimit = 100               // 一次取多少首（榜单接口最多给 300；100 够看也够下 ✓）
 
     // ==================== 数据辅助 ====================
 
@@ -421,10 +400,12 @@ struct MusicDlApp {
         // ---- ★ 输出目录 / 格式过滤 ----
         s.outdir = outdir
         s.fmt = fmtPref                     // ⚠ 存的是**用户偏好**，不是 fmtBox 现值 ✗（见 fmtPref ✓）
-        // ---- ★ 榜单页：上次看的站点 / 榜单 / 「只看有大小」----
-        s.bangSrc = bangCurSrc
-        s.bangId = bangCurId
-        s.bangOnly = bangOnlyDl.is_checked()
+        // ---- ★ 榜单页：上次看的站点 / 榜单 / 「只看有大小」（都问榜单页要 ✓ 别直摸它的控件 ✗）----
+        if bang is BangPage => bp {
+            s.bangSrc = bp.chosen_src()
+            s.bangId = bp.chosen_id()
+            s.bangOnly = bp.only_checked()
+        }
         // ---- ★ 窗口尺寸（用 resize 事件里的**快照**，不是现问窗口 ✓ 见 winW ✓）----
         s.winW = winW
         s.winH = winH
@@ -533,7 +514,7 @@ struct MusicDlApp {
         }
     }
 
-    // 阶段 B：把阶段 A 的行切成 PROBE_THREADS 片，一片一条线程（第三方请求是耗时大头 ✓）
+    // 阶段 B：把阶段 A 的行切成 eng.PROBE_THREADS 片，一片一条线程（第三方请求是耗时大头 ✓）
     //   切片用 eng.slice_rows（**轮转片**；为什么必须轮转、以及"不重不漏"的硬要求见那边的注释 ✓）
     //   ★ 代价：结果顺序变成"轮转序"（不再按音源聚在一起）—— 表里那一列「来源」正是为此而加 ✓
     func startPhaseB() {
@@ -542,7 +523,7 @@ struct MusicDlApp {
             finishSearch([])
             return
         }
-        int k = PROBE_THREADS
+        int k = eng.PROBE_THREADS
         if k > total { k = total }
         searchPhase = 1
         searchThreads = []
@@ -637,9 +618,8 @@ struct MusicDlApp {
     // ==================== 主循环定时器（120ms 一拍） ====================
     // 搜索进度、下载进度、忙指示都在这里推进 —— 唯一一处"UI 线程排空 channel"的地方
     func onTick() {
-      // ★ 榜单页的两条线程也要在这儿收（菜单 → 歌曲，顺序有依赖 ⇒ 菜单先收 ✓）
-        pollBangMenu()
-        pollBang()
+        // ★ 榜单页：两条/一批线程的结果都由它自己收（菜单 → 歌曲，顺序有依赖 ⇒ 它内部先收菜单 ✓）
+        if bang is BangPage => bp { bp.tick() }
         // ★ 边下边播（2026-10-09）：先问播放器"要不要下当前这首"（取走后由本文件起线程 ✓），
         //   再排空那条下载通道 ⇒ 把 start/progress/done 回灌给播放器（喂缓冲 ✓）
         if pbar is PlayerBar => b {
@@ -969,19 +949,19 @@ struct MusicDlApp {
                 } else if gCtxTarget == 3 {
                     // 目标 3 = **只测动作**（不点鼠标）：榜单第 0 行 ⇒ 「搜索这首歌（跳到搜索页）」
                     //   ⚠ 要配 DBANG=1 跑：否则当前页已经是搜索页，set_active(0) 不会触发切页回调 ✗
-                    if bangSongs.len() == 0 {
+                    if bangRowCount() == 0 {
                         gCtxStep = 1        // 等榜单行（联网）✓
                     } else {
                         menuCtx = 1
                         onMenu(0, "searchthis")
                         print("[dctx] 目标 3：已调用菜单动作 searchthis\n")
                     }
-                } else if bangSongs.len() == 0 {
+                } else if bangRowCount() == 0 {
                     gCtxStep = 1            // 榜单行还没拉回来（联网）⇒ 下一拍再试 ✓
                 } else {
                     // 目标 1 = 榜单表第 0 行：y = 表头 30 + 行高中点 13（row_h=26 ✓ 见 createTable）
-                    float bx = bangTable.get_x() + 120.0
-                    float by = bangTable.get_y() + 30.0 + 13.0
+                    float bx = bangTableRef().get_x() + 120.0
+                    float by = bangTableRef().get_y() + 30.0 + 13.0
                     SDL3.testMoveAt(wid, bx, by)
                     bool ok = SDL3.testRightClickAt(wid, bx, by)
                     print("[dctx] 注入右键到榜单表第 0 行 ok=" + _str(ok)
@@ -1034,7 +1014,7 @@ struct MusicDlApp {
             if dblSt == 1 {
                 // 先等"有行"（联网 ✓）：表空了就点不到行 ⇒ 停在 1 重试（与 gCtxStep 同一手法 ✓）
                 bool hasRow = songs.len() > 0
-                if gDblTarget == 2 { hasRow = bangSongs.len() > 0 }
+                if gDblTarget == 2 { hasRow = bangRowCount() > 0 }
                 if not hasRow {
                     gDblStep = 1
                     gDblWait = gDblWait + 1
@@ -1046,7 +1026,7 @@ struct MusicDlApp {
                     }
                 } else {
                     Table dt = table
-                    if gDblTarget == 2 { dt = bangTable }
+                    if gDblTarget == 2 { dt = bangTableRef() }
                     int wid = win.getID()
                     // 列宽：搜索表 [40,280,…] / 榜单表 [40,300,…] ⇒ x 偏 200 / 150 都稳落在「歌名」列 ✓
                     // 行 y = 表头 30 + 行高 26 的中点 13（与 DCTX 目标 1 同一算法 ✓）
@@ -1312,7 +1292,11 @@ struct MusicDlApp {
     //   · 队列三件套：显示名 / 本地路径（"" = 没下载 ⇒ 边下边播 ✓）/ 消毒基名（认领 .lrc ✓）
     //   · `resolve_locals` **只扫一次目录**（几十上百行逐行 listdir 会退化成 O(行×目录项) ✗）
     func playFrom(int ctxId, int row) {
-        Array[Array[string]] rows = if ctxId == 1 then bangSongs else songs
+        // 榜单页的行问它自己要（2026-10-11 搬走之后 ✓）；搜索表暂时仍在本文件 ✓
+        Array[Array[string]] rows = songs
+        if ctxId == 1 {
+            if bang is BangPage => bp { rows = bp.rows() }
+        }
         if row < 0 or row >= rows.len() { return }
         if not ensuredir() { return }
         Array[string] names = []
@@ -1556,15 +1540,18 @@ struct MusicDlApp {
     //     ⇒ 菜单项与处理逻辑**零分支**，两个页面永远一致 ✓
     //   ⚠ 别想着"把行数组存成字段去引用另一张表"：那要靠数组的引用语义跨赋值，不好保证 ✗
     func ctx_table(): Table {
-        if menuCtx == 1 { return bangTable }
+        if menuCtx == 1 { return bangTableRef() }
         return table
     }
     func ctx_len(): int {
-        if menuCtx == 1 { return bangSongs.len() }
+        if menuCtx == 1 { return bangRowCount() }
         return songs.len()
     }
     func ctx_row(int i): Array[string] {
-        if menuCtx == 1 { return bangSongs[i] }
+        if menuCtx == 1 {
+            if bang is BangPage => bp { return bp.row(i) }
+            return []
+        }
         return songs[i]
     }
     // 当前表里**勾选**的行（搜索页仍走 pickchecked 的格式过滤口径 ✓；榜单页没有格式选择器 ⇒ 不过滤 ✓）
@@ -1575,6 +1562,17 @@ struct MusicDlApp {
             if i >= 0 and i < ctx_len() { out.add(ctx_row(i)) }
         }
         return out
+    }
+
+    // ---- 自检（DCTX / DDBL）用：榜单页的"表格 / 行数"（走它的只读口 ✓ 不直摸它的字段 ✗）----
+    //   只在 setupUI 之后跑 ⇒ 此刻 `bang` 必已建好 ✓（兜底那条只是防"没建就调"的静态检查 ✓）
+    func bangTableRef(): Table {
+        if bang is BangPage => bp { return bp.table_ref() }
+        return table
+    }
+    func bangRowCount(): int {
+        if bang is BangPage => bp { return bp.row_count() }
+        return 0
     }
 
     // ★ 双击某行 = **试听**（2026-10-09 改 ✓ 与右键「试听（同时后台下载整首）」**同一条入口** ✓）
@@ -2146,7 +2144,26 @@ struct MusicDlApp {
                             tabs: ["搜索", "榜单"], active: 0, show_header: false, border: false,
                             bg_color: #F5F6F8FF})
                         tab.setPageLayout(0, page0)              // 页 0 = 搜索页（布局驱动 ✓）
-                        buildBangPage()               // 页 1 = 榜单页（见该函数 ✓）
+                        // ★ 页 1 = 榜单页：**整页在 bang_page.leno** ✓ 这里只"建 + 装 + 接线"（2026-10-11 ✓）
+                        //   五个回调逐一对应它文件头列的那五件事（置脏 / 右击 / 选中 / 双击 / 自检收尾 ✓）
+                        bang = bangpg.create_bang_page(rowIcon, cfg.bangSrc, cfg.bangId, cfg.bangOnly,
+                                                       gBangSizeCheck, gBangOnlyCheck)
+                        if bang is BangPage => bpg {
+                            // ⚠ 这三个是**线程入口**：必须是本文件（入口脚本）的具名函数 ⇒ 当值交给它 ✓
+                            //   （模块自己写的 worker 会被 threads.start 拦 ✗ 见本文件顶部那段 ⚠）
+                            bpg.set_workers(bang_menu_worker, bang_worker, bang_fill_worker)
+                            bpg.set_on_dirty(func() { mark_dirty() })
+                            // 右击：宿主得先**认领"这次菜单落在哪张表"**，它的 ctx_* 访问器才落到榜单页 ✓
+                            bpg.set_on_ctx_menu(func(int row) { menuCtx = 1; buildMenu(row) })
+                            bpg.set_on_ctx_select(func(int row, string id) { menuCtx = 1; onMenu(row, id) })
+                            bpg.set_on_dbl_play(func(int row) { playFrom(1, row) })
+                            bpg.set_on_selfcheck_done(func() {
+                                // ⚠ 开着 DSHOT 时**别抢着退**：把截图帧推到"补完之后"（此刻表格才是最终样子 ✓）
+                                //   （这段决策原先写在榜单页的 finishBangFill 里 ✗ ⇒ 只有宿主知道帧号 ⇒ 收上来 ✓）
+                                if dlShot == "" { SDL3.requestExit() } else { dlShotAt = dlFrames + 2 }
+                            })
+                            tab.setPageLayout(1, bpg.make_page())    // 页 1 = 榜单页 ✓
+                        }
                   tab.on_change(func(int idx) { onTabChanged(idx) })
 
                         // 侧栏 + 页签内容并排（TabControl 吃剩余宽度 ⇒ 窗口缩放时页内跟着重排 ✓）
@@ -2166,86 +2183,6 @@ struct MusicDlApp {
         //   Button 的**默认底色（primary 蓝）** ✗（`background` 构造参数会被默认 type 覆盖 ⇒ 实测）
   onTabChanged(0)
         win.setRootAt(root, 0, titleH)
-    }
-
-    // ==================== 榜单页（页 1）====================
-    //   移植自二创（LenoMusic-main(1)）的榜单功能，2026-10-09 改造成独立页签 ✓
-    //   ⚠ 菜单与歌曲**都要走网络** ⇒ 都放线程里同步调会卡住 UI
-    //     （kuwo/qq 的菜单是内置常量、瞬时 ✓；netease/kugou 的要发请求 ⇒ 1~2 秒 ✗）
-    //   ⚠ 结果用 `t.join() as Array[Array[string]]` 取（与搜索阶段 A/B 同一套 ✓ 见 advanceSearch）
-
-    // 榜单页的音源下标 → 音源 id（与搜索页的 srcIds 平行；用 dl_engine.sources() 的顺序 ✓）
-    func bangsrcid(int idx): string {
-        if idx == 1 { return "netease" }
-        if idx == 2 { return "kugou" }
-        if idx == 3 { return "qq" }
-        return "kuwo"
-    }
-
-    // ★ 2026-10-11：**记住的站点**在"站点下拉"里排第几（没存过 / 存的不认识 ⇒ 0 = 第 0 项 ✓）
-    //   ⚠ 站点下拉就 4 项（`["酷我","网易云","酷狗","QQ音乐"]` ✓ 见 buildBangPage），
-    //     与上面 `bangsrcid` 的映射**一一对应** ✓ —— 两边都加站点时记得一起改 ✗
-    func bang_src_index(): int {
-        if cfg.bangSrc == "" { return 0 }
-        int i = 0
-        while i < 4 {
-            if bangsrcid(i) == cfg.bangSrc { return i }
-            i = i + 1
-        }
-        return 0
-    }
-
-    // 榜单歌曲行 → 表格行（列比搜索页少一个「来源」：榜单本身就是单一音源 ✓）
-    func bangtablerow(Array[string] s): Array[string] {
-        return ["", s[eng.F_NAME], s[eng.F_ARTIST], s[eng.F_ALBUM],
-                eng.fmtduration(_int(s[eng.F_DURATION])), s[eng.F_EXT], s[eng.F_SIZETEXT]]
-    }
-
-    func fillBangTable() {
-        Array[Array[string]] rows = []
-        for bangSongs to s { rows.add(bangtablerow(s)) }
-        bangTable.set_rows(rows)
-        bangTable.check_all()
-    }
-
-    // 按「只看有大小」把**展示行**重算一遍（表格行与 bangSongs 一一对应 ✓ 见字段声明）
-    func applyBangFilter() {
-        Array[Array[string]] keep = []
-        if bangOnlyDl.is_checked() {
-            for bangRawSongs to r {
-                if eng.has_size(r) { keep.add(r) }      // 判据与搜索页同一份：ext 非空 **且** 字节数 > 0 ✓
-            }
-        } else {
-            for bangRawSongs to r { keep.add(r) }
-        }
-        bangSongs = keep
-        fillBangTable()
-    }
-
-    // 勾选框的 on_change（★ 用户口径：**必须等补格式/大小之后**才生效 ✓）
-    //   为什么补的期间不生效：那批线程的结果要按**原下标**写回全量行，而且"哪些有大小"此刻还没定
-    //   ⇒ 只提示、不改表；意图由补完时的 applyBangFilter 兑现 ✓（注释见 finishBangFill ✓）
-    func onBangOnlyChanged(bool v) {
-        mark_dirty()              // ★ 勾选态也记住（下次开机照旧 ✓ 攒批落盘 ✓）
-        if bangFilling {
-            bangLbl.set_text("正在补格式/大小 -> " + (if v then "勾选" else "取消勾选")
-                             + "会在补完后自动生效（有文件大小 = 基本可以下载）")
-        } else if bangRawSongs.len() == 0 {
-            bangLbl.set_text("列表还是空的 -> 先等这个榜取到歌（勾选会在有数据后生效）")
-        } else {
-            applyBangFilter()
-            int have = 0
-            for bangRawSongs to r { if eng.has_size(r) { have = have + 1 } }
-            if v {
-                bangLbl.set_text("只看有大小：共 " + _str(bangRawSongs.len()) + " 首 -> 列表里留 "
-                                 + _str(bangSongs.len()) + " 首（有大小 = 基本可以下载；其余的是没探到大小，"
-                                 + "取消勾选即可看到）")
-            } else {
-                bangLbl.set_text("已显示全部 " + _str(bangSongs.len()) + " 首（其中探到文件大小的有 "
-                                 + _str(have) + " 首）")
-            }
-        }
-        SDL3.markFrameRedraw()
     }
 
     // ---- 切页：第一次进榜单页才拉菜单（懒加载 ⇒ 不拖慢启动 ✓）----
@@ -2269,330 +2206,15 @@ struct MusicDlApp {
               navBang.set_image_tint(#1F1F1FFF)
               navSearch.set_image_tint(#5A5A5AFF)
                     }
-       // ★ 2026-10-11：首次进本页 ⇒ 先套上"**上次看的站点**"（没存过 / 存的不认识 ⇒ 第 0 个 ✓）
-       //   ⚠ `set_selected` **会触发 on_change**（sdl_combobox ✓）⇒ `onBangSrcChanged` 自己会去拉菜单
-       //     ⇒ 那条路只走一次（这里就别再拉一遍 ✗ —— 两条线程抢同一个 bangMenuThread ✓）
-       //   （选中的站点本来就是第 0 个时，set_selected 可能不回调 ⇒ 那就走老路自己拉 ✓）
-       if idx == 1 and bangLoadedFor < 0 {
-           int bsi = bang_src_index()
-           if bsi > 0 {
-               bangSrcBox.set_selected(bsi)
-               // 兜底：万一 set_selected 没回调（值没变等）⇒ 自己拉一次（否则进页什么也没有 ✗）
-               if bangMenuThread == null { loadBangMenu() }
-           } else {
-               loadBangMenu()
-           }
+       // ★ 2026-10-11：进榜单页 ⇒ 交给榜单页自己（首次进它会套上"上次看的站点"并拉菜单 ✓）
+       //   ⚠ 别在这儿替它做：`set_selected` 会触发 on_change，而两条线程共用一个槽位 ✗
+       //     （那段说明现在写在 bang_page.on_shown 里 ✓ 单一事实来源 ✓）
+       if idx == 1 {
+           if bang is BangPage => bp { bp.on_shown() }
        }
           SDL3.markFrameRedraw()
       }
 
-    // ---- 拉某个音源的榜单菜单（走线程 ✓）----
-    func loadBangMenu() {
-        string src = bangsrcid(bangSrcBox.get_selected())
-        if src == bangCurSrc and bangLoadedFor >= 0 { return }   // 已有 ⇒ 不重复拉 ✓
-        bangCurSrc = src
-        bangLbl.set_text("正在取" + srcname(src) + "的榜单列表…")
-        bangMenuThread = threads.start(bang_menu_worker, src)
-    }
-
-    // ---- 菜单到手：填下拉 + 自动加载第 0 个榜单 ----
-    func onBangMenuGot(Array[Array[string]] menu) {
-        Array[string] names = []
-        bangIds = []
-        for menu to it {
-            if it.len() < 2 { continue }
-            bangIds.add(it[0])
-            names.add(it[1])
-        }
-        bangLoadedFor = 1
-        if names.len() == 0 {
-            bangBox.set_items(["（该音源暂无榜单）"])
-            bangLbl.set_text(srcname(bangCurSrc) + "：没取到榜单（网络不通或接口变了）")
-            return
-        }
-        bangBox.set_items(names)
-        // ★ 2026-10-11：套上"**上次看的榜单**"（`cfg.bangId`；菜单里没有它 ⇒ 退回第 0 个 ✓ —
-        //   换站后可见榜单会变 ⇒ 找不到是常态，不是错 ✓）
-        //   ⚠ `set_selected` 会触发 on_change ⇒ `onBangPicked` 把 bangCurId 设好并拉歌曲 ✓；
-        //     下面那句 `loadBangRows()` 是**幂等**的（`bangLoading` 守卫 ✓）⇒ 不会拉两遍 ✓
-        int pick = 0
-        if cfg.bangId != "" {
-            int k = 0
-            while k < bangIds.len() {
-                if bangIds[k] == cfg.bangId { pick = k }
-                k = k + 1
-            }
-        }
-        bangBox.set_selected(pick)
-        bangCurId = bangIds[pick]
-        bangLbl.set_text(srcname(bangCurSrc) + "：" + names[pick] + "（共 " + _str(names.len()) + " 个榜，正在取歌…）")
-        loadBangRows()
-    }
-
-    // ---- 取某个榜单的歌曲（走线程 ✓）----
-    func loadBangRows() {
-        if bangCurId == "" { return }
-        if bangLoading { return }         // 上一票还在跑 ⇒ 等它收尾（切榜太快会丢结果 ✗）
-        // ★ 补格式/大小还在跑时也不许换榜：那批线程的结果会写回 bangSongs（换榜就写串了 ✗）
-        if bangFilling {
-            bangLbl.set_text("正在补上一榜的格式/大小，等它收尾再切 ")
-            return
-        }
-        bangLoading = true
-        bangReloadBtn.set_enabled(false)
-        bangLbl.set_text("正在取「" + bangBox.get_selected_text() + "」的歌曲…")
-        bangThread = threads.start(bang_worker, bangCurSrc, bangCurId, bangLimit)
-    }
-
-    // ---- 下拉 interactions ----
-    func onBangSrcChanged(int idx) {
-        bangLoadedFor = -1        // 强制重拉菜单（换站了 ✓）
-        bangIds = []
-        bangRawSongs = []
-        bangSongs = []
-        bangTable.set_rows([])
-        mark_dirty()              // ★ 站点也记住（下次开机还看这一站 ✓ 攒批落盘 ✓）
-        loadBangMenu()
-    }
-
-    func onBangPicked(int idx) {
-        if idx < 0 or idx >= bangIds.len() { return }
-        bangCurId = bangIds[idx]
-        mark_dirty()              // ★ 榜单也记住（下次开机还看这一榜 ✓；换站后找不到就退回第 0 ✓）
-        loadBangRows()
-    }
-
-    // ---- 120ms 一拍：把两条线程的结果收回来 ----
-    func pollBang() {
-        // ★ 补格式/大小（见 startBangFill ✓）：全部停了再 join ⇒ 刷新表格
-        if bangFilling {
-            if bangFillRunning() { return }
-            finishBangFill()
-            return
-        }
-        if not bangLoading { return }
-        if bangThread == null { return }
-        Thread? t = bangThread
-        if t == null { return }
-        if t.state() == "running" { return }
-        var got = t.join() as Array[Array[string]]
-        bangThread = null
-        bangLoading = false
-        bangReloadBtn.set_enabled(true)
-        Array[Array[string]] rows = []
-        if got != null { rows = got }
-        // ★ 先按**全量**显示：此刻一格大小都没有（榜单接口不给体积 ✓）⇒ 套「只看有大小」只会得到空表 ✗
-        //   ⇒ 勾选态不在这里兑现，留给补完后的 finishBangFill（= 用户要的"必须等补格式后生效" ✓）
-        bangRawSongs = rows
-        bangSongs = []
-        for rows to r { bangSongs.add(r) }
-        fillBangTable()
-        if rows.len() == 0 {
-            bangLbl.set_text(srcname(bangCurSrc) + "：「" + bangBox.get_selected_text() + "」没取到歌（接口可能变了或网络不通）")
-        } else {
-            // ★ 榜单行**本来没有格式/大小**（接口不给 ⇒ 实测确认 ✓）⇒ 取到就先显示，
-            //   然后**逐首探**补上（补完再刷一次表 ✓ 见 startBangFill）
-            startBangFill()
-        }
-    }
-
-    // ==================== 榜单行：逐首补"格式 / 大小"（2026-10-09 ✓）====================
-    //   为什么需要：榜单接口**确实不给体积**（实测：酷我 kbangserver 的 musiclist 只有
-    //   id/name/artist/album/formats/duration/param…；官方取直链的 mobi.s 也只回 format/bitrate/url ✓）
-    //   ⇒ 「大小」列天然长期空着 ✗。搜索页靠阶段 B 的第三方直链补上，而榜单有两条断点：
-    //     ① 榜单路径压根没跑阶段 B；② 阶段 B 对**酷我是空过**（没有第三方通路 ✗）—— 榜单第一项就是酷我 ✗
-    //   做法：`eng.fill_sizes` 逐行补（第三方 proberow → 官方直链 + HEAD 探体积 ✓ 见那边的注释）
-    //   ★ 切片用**连续段**，不用引擎那份**轮转片** ✗ —— 轮转会把结果顺序打乱，而**榜单排名就是顺序**；
-    //     （搜索页有「来源」列正是为轮转序而加 ✓ 榜单页没那列 ⇒ 必须保持原序 ✓）
-    //     连续段还有个好处：按序 join 拼回去**天然就是原序** ✓ 不用记下标映射 ✓
-    //   ⚠ 补的期间禁用「重新加载」+ 挡住切榜（见 loadBangRows 的守卫 ✓）
-    func startBangFill() {
-        // ★ 补的目标是**全量行**（bangRawSongs），不是"当前展示"的那份：
-        //   勾了「只看有大小」时 bangSongs 已经是（或即将是）过滤后的子集 ⇒ 拿它当目标会**漏补** ✗
-        int n = bangRawSongs.len()
-        if n == 0 { return }
-        bangFillFirst = srow.rowname(bangRawSongs[0])    // 自检用：验补完顺序没变 ✓
-        int k = PROBE_THREADS
-        if k > n { k = n }
-        int per = (n + k - 1) / k                        // 向上取整 ⇒ 段数 ≤ k ✓
-        bangFillParts = []
-        int i = 0
-        while i < n {
-            Array[Array[string]] part = []
-            int j = i
-            while j < n and j < i + per {
-                part.add(bangRawSongs[j]); j = j + 1
-            }
-            bangFillParts.add(part)
-            i = i + per
-        }
-        bangFillThreads = []
-        for bangFillParts to part {
-            bangFillThreads.add(threads.start(bang_fill_worker, part))
-        }
-        bangFilling = true
-        bangFillT0 = _int(times.ms())
-        bangReloadBtn.set_enabled(false)
-        bangLbl.set_text(srcname(bangCurSrc) + "：「" + bangBox.get_selected_text() + "」共 " + _str(n)
-                         + " 首，正在逐首补格式/大小（" + _str(bangFillParts.len()) + " 路并行）…")
-    }
-
-    func bangFillRunning(): bool {
-        for bangFillThreads to t {
-            if t.state() == "running" { return true }
-        }
-        return false
-    }
-
-    func finishBangFill() {
-        Array[Array[string]] rows = []
-        int idx = 0
-        for bangFillThreads to t {
-            var got = t.join() as Array[Array[string]]
-            if got == null and idx < bangFillParts.len() { got = bangFillParts[idx] }   // 失手退回入参 ✓
-            if got != null {
-                Array[Array[string]] one = got
-                for one to row { rows.add(row) }
-            }
-            idx = idx + 1
-        }
-        bangFillThreads = []
-        bangFillParts = []
-        bangFilling = false
-        bangReloadBtn.set_enabled(true)
-        // 段数拼回来的行数与原榜一致才替换（防"补的过程中榜被换掉"写串 ✓）
-        if rows.len() == bangRawSongs.len() { bangRawSongs = rows }
-        // ★ 补完这一刻才套「只看有大小」（勾过的 / 没勾的都在这条路上统一兑现 ⇒ 用户口径 ✓）
-        applyBangFilter()
-        int have = 0
-        for bangRawSongs to r { if eng.has_size(r) { have = have + 1 } }
-        string only = ""
-        if bangOnlyDl.is_checked() {
-            only = "　·　只看有大小 -> 列表里 " + _str(bangSongs.len()) + " 首"
-        }
-        bangLbl.set_text(srcname(bangCurSrc) + "：「" + bangBox.get_selected_text() + "」共 " + _str(bangRawSongs.len())
-                         + " 首　·　已补到格式/大小 " + _str(have) + " 首" + only + "　·　双击某行 = 播放（边下边播）")
-        // 自检（见 gBangSizeCheck 注释 ✓）：报耗时 / 补到几首 / 首行有没有变（顺序 ✓）
-        if gBangSizeCheck {
-            // 开了「只看有大小」自检 ⇒ 就在**补完这一刻**勾上（验证"必须等补格式后生效" ✓）
-            if gBangOnlyCheck {
-                bangOnlyDl.set_checked(true)
-                onBangOnlyChanged(true)
-            }
-            int dt = _int(times.ms()) - bangFillT0
-            string first = ""
-            if bangRawSongs.len() > 0 { first = srow.rowname(bangRawSongs[0]) }
-            print("[dbangsize] 补到 " + _str(have) + " / " + _str(bangRawSongs.len()) + " 首　耗时 " + _str(dt) + " ms　"
-                  + "首行=" + first + "（补前 " + bangFillFirst + "，顺序"
-                  + (if first == bangFillFirst then "未变 " else "**变了 **") + "）\n")
-            if gBangOnlyCheck {
-                bool each = true
-                for bangSongs to r { if not eng.has_size(r) { each = false } }
-                print("[dbangonly] 勾上「只看有大小」-> 列表 " + _str(bangSongs.len()) + " 首 / 有大小 "
-                      + _str(have) + " 首　每行都有大小：" + (if each then "是 " else "**否 **") + "\n")
-                gBangOnlyCheck = false
-            }
-            gBangSizeCheck = false
-            // ⚠ 开着 DSHOT 时**别抢着退**：把截图帧推到"补完之后"（此刻表格才是最终样子 ✓），
-            //   由截图钩子负责退出 ✓（与 DCTX / DHOVER 同一套做法 ✓）
-            if dlShot == "" {
-                SDL3.requestExit()
-            } else {
-                dlShotAt = dlFrames + 2
-            }
-        }
-        SDL3.markFrameRedraw()
-    }
-
-    // 菜单线程单独收（它比歌曲线程先起 ✓）
-    func pollBangMenu() {
-        if bangMenuThread == null { return }
-        Thread? t = bangMenuThread
-        if t == null { return }
-        if t.state() == "running" { return }
-        var got = t.join() as Array[Array[string]]
-        bangMenuThread = null
-        Array[Array[string]] menu = []
-        if got != null { menu = got }
-        onBangMenuGot(menu)
-    }
-
-    // ==================== 榜单页（页 1）====================
-    //   页内也用布局驱动（setPageLayout(1, page1) ⇒ 窗口缩放跟着重排 ✓ 照 dashboard 的做法）
-    func buildBangPage() {
-        var page1 = SDL3.createVBox({padX: 0, padY: 0, spacing: 6})    // 与搜索页同一个行距口径 ✓
-
-        // ---- 工具行：音源 + 榜单 + 重新加载 ----
-        var brow = SDL3.createHBox({h: 32, padX: 0, padY: 0, spacing: 8})
-        brow.add(SDL3.createLabel({text: "站点", font_size: 13}), {grow: 0, shrink: 0, align: 1})
-        //   站点下拉：只用**有榜单的四个源**（咪咕还没接 ⇒ 不进这个下拉 ✓）
-        bangSrcBox = SDL3.createComboBox({
-            w: 110, h: 30, font_size: 13, item_h: 26, selected: 0,
-            items: ["酷我", "网易云", "酷狗", "QQ音乐"],
-            tip: "选哪个站的榜（换站 -> 榜单菜单重新拉）"
-        })
-        bangSrcBox.on_change(func(int idx) { onBangSrcChanged(idx) })
-        brow.add(bangSrcBox, {grow: 0, shrink: 0, basis: 110, align: 3})
-        brow.add(SDL3.createLabel({text: "榜单", font_size: 13}), {grow: 0, shrink: 0, align: 1})
-        bangBox = SDL3.createComboBox({
-            w: 230, h: 30, font_size: 13, item_h: 26, selected: 0,
-            items: ["（切到本页自动加载）"],
-            tip: "选一个榜单（选项按所选站点动态生成）"
-        })
-        bangBox.on_change(func(int idx) { onBangPicked(idx) })
-        brow.add(bangBox, {grow: 0, shrink: 0, basis: 230, align: 3})
-        bangReloadBtn = SDL3.createButton({w: 96, h: 30, text: "重新加载", font_size: 13})
-        bangReloadBtn.set_tip("重新取这个榜单的歌曲（接口抽风时用）")
-        bangReloadBtn.on_click(func() { loadBangRows() })
-        bangReloadBtn.set_enabled(false)
-        brow.add(bangReloadBtn, {grow: 0, shrink: 0, basis: 96, align: 3})
-        // ★「只看有大小」+ 一句口径提示（2026-10-09 ✓ 用户要的）：
-        //   榜单接口**不给体积** ⇒ 一行"有文件大小"意味着"直链取到了、真实字节数也探到了"
-        //   = 基本可下载 ✓（探不到的**照样留着** —— 榜单页与搜索页有意的差别：先让你看见，
-        //   真下的时候按 Range 头报真话 ✓）。所以过滤是**用户可选的**，不是默认行为 ✓
-        // ★ 2026-10-11：勾选态也记住（`checked: cfg.bangOnly` 走 opts ⇒ 不触发 on_change ✓
-        //   与"音源勾选框"同一个初值套法 ✓）
-        bangOnlyDl = SDL3.createCheckBox({text: "只看有大小", checked: cfg.bangOnly, font_size: 13,
-            tip: "勾上 -> 列表里只留**已探到文件大小**的曲目（有大小 = 基本可下载）；正在补格式/大小时要等补完才生效"})
-        bangOnlyDl.on_change(func(bool v) { onBangOnlyChanged(v) })
-        brow.add(bangOnlyDl, {grow: 0, shrink: 0, align: 1})
-        brow.add(SDL3.createLabel({text: "（有文件大小出现 = 基本可以下载）", font_size: 12}), {grow: 0, shrink: 0, align: 1})
-        brow.add(SDL3.createLabel({text: ""}), {grow: 1, shrink: 0, align: 1})
-        page1.add(brow, {grow: 0, shrink: 0, align: 3})
-
-        // ---- 榜单歌曲表格 ----
-        //   列与搜索表一致、少了「来源」（榜单本身就是单一站点 ✓）；第 0 列仍是勾选列 ✓
-        bangTable = SDL3.createTable({
-            headers: ["", "歌名", "歌手", "专辑", "时长", "格式", "大小"],
-            col_widths: [40.0, 300.0, 150.0, 180.0, 70.0, 66.0, 110.0],
-            aligns: [1, 0, 0, 0, 1, 1, 2],
-            header_aligns: [1, 0, 0, 0, 1, 1, 2],
-            check_col: 0,
-            image_col: 1, image_size: 18, image_gap: 6, image_path: rowIcon,
-            sortable: true, zebra: true, row_h: 26, header_h: 30, font_size: 14,
-            multi: true,
-            empty_text: "还没有榜单 —— 切到本页会自动加载所选站点的第1 个榜单"
-        })
-        //   双击 = 试听（★ 2026-10-09 改 ✓ 与搜索表同一套语义：走同一个 previewRow ✓）
-        //     ⚠ 原先这里是"下载这一首"⇒ 两个页面各写一份、改一处忘一处就是这个坑 ✗ ⇒ 共用入口 ✓
-        bangTable.on_dbl_click(func(int row, int col) { playFrom(1, row) })
-        //   ★ 右键菜单（2026-10-09 补 ✓ 用户反馈"榜单没有右击菜单、下不了"）：
-        //     与搜索表**共用同一套**菜单与处理（试听 / 下载这一首 / 只下歌词 / 复制 /
-        //     下载勾选的 N 首 / 全选 / 全不选 / 定位 / 删除本地文件 / 打开目录 ✓）
-        //     先设 menuCtx=1 ⇒ ctx_* 访问器都落在**榜单表 + bangSongs** 上 ✓
-        bangTable.on_context_will_open(func(int row) { menuCtx = 1; buildMenu(row) })
-        bangTable.on_context_select(func(int row, string id) { menuCtx = 1; onMenu(row, id) })
-        bangTable.get_context_menu().set_image_size(18)      // 与搜索表同一口径 ✓（见那边的注释 ✓）
-        page1.add(bangTable, {grow: 1, shrink: 1, align: 3})
-
-        // ---- 状态行 ----
-        var bstatus = SDL3.createHBox({h: 24, padX: 0, padY: 0, spacing: 12})
-        bangLbl = SDL3.createLabel({text: "切到本页会自动加载所选站点的第 1 个榜单（免登录）", font_size: 12, truncate: 1, max_w: 1040.0})
-        bstatus.add(bangLbl, {grow: 1, shrink: 1, align: 1})
-        page1.add(bstatus, {grow: 0, shrink: 0, align: 3})
-
-        tab.setPageLayout(1, page1)
-    }
 
     // ==================== 事件与主入口 ====================
 
@@ -2719,19 +2341,19 @@ struct MusicDlApp {
         // ★ 自检钩子：DBANG=1 ⇒ 启动就切到「榜单」页（照数据看板 dashboard 的 DPAGE 约定 ✓）
         //   配合 DSHOT 用：DBANG=1 DSHOT=x.png DSHOT_AT=150 ⇒ 能截到榜单加载完的样子 ✓
         var dbang = _env("DBANG")
-                if dbang != null and _int(_str(dbang)) > 0 {
-         tab.set_active(1)
-                    // DBANGSRC=<1..4>顺带选中某个站点（自检用：kuwo/qq 是**内置菜单**、瞬时 ✓；
-                    //   netease/kugou 的菜单是**现拉接口** ⇒ 另一条代码路径，得单独验 ✓）
-         var dbs = _env("DBANGSRC")
-                    if dbs != null {
+        if dbang != null and _int(_str(dbang)) > 0 {
+            tab.set_active(1)
+            // DBANGSRC=<1..4>顺带选中某个站点（自检用：kuwo/qq 是**内置菜单**、瞬时 ✓；
+            //   netease/kugou 的菜单是**现拉接口** ⇒ 另一条代码路径，得单独验 ✓）
+            //   ★ 2026-10-11：改走榜单页的口子（`select_src` 与用户点下拉同一条路 ✓）
+            var dbs = _env("DBANGSRC")
+            if dbs != null {
                 int si = _int(_str(dbs))
-            if si > 0 and si <= 4 {
-                  bangSrcBox.set_selected(si - 1)
-              onBangSrcChanged(si - 1)
-              }
+                if si > 0 and si <= 4 {
+                    if bang is BangPage => bpg { bpg.select_src(si - 1) }
                 }
-                }
+            }
+        }
         // ⚠ setupUI 之后才能碰控件：套上设置里的"默认带歌词"，并在状态栏报一下并行度 ✓
         lyricBox.set_checked(cfg.lyric)
         // ★★ 2026-10-11：**上次用的**也套回来（用户实测："音量这些居然没有保存，二次打开就归 0" ✓）
