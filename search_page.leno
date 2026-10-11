@@ -1,0 +1,731 @@
+// search_page.leno — 音乐下载器：**搜索页**（主界面页签 0 ✓）
+//
+// ★ 2026-10-11 从 musicdl_gui.leno **整页拧出来**（那份当时 2619 行 ⇒ 还是太厚 ✗）。
+//   搬过来的就是原来的"数据辅助 / 格式过滤 / 搜索两阶段 / 结果表"那一族。
+//
+// 分工（照本应用既有分层 ✓）：
+//   dl_engine.leno    —— 纯逻辑：搜索 / 取直链 / 落盘（不 import SDL3 ⇒ 可单测 ✓）
+//   search_page.leno  —— **本文件**：搜索页的控件 + 两阶段并行搜索（阶段 A 每源一条、阶段 B 每片一条）
+//   musicdl_gui.leno  —— 只接线：把本页的四行/表格/状态栏摆进 page0、每 120ms 调 `tick()`、装回调
+//
+// 与宿主的接口（**单向**：本页**不回指宿主** —— 那会变成模块循环 import ✗）：
+//   · 宿主给：`create_search_page(...)` 的入参（行图标 + **它建的两个共享控件**：
+//             `lyricBox`（"同时下载歌词"，本页负责把它摆进操作行 ✓ / 读写它 ✓）
+//             `busyBar`（忙指示；本页只写它的值，**摆放由宿主做** ✓ 因为下载进度也用它 ✓））
+//             以及 `set_limit` / `set_fmt_pref` / `set_sources`（⚠ 必须在 `make_*` **之前**调 ✓
+//             —— 它们是"套初值"，不是"改现成控件" ⇒ 顺序反了就等于白设 ✗）
+//   · 本页给：`make_search_row()` / `build_sources_into(row)` / `make_action_row()` /
+//             `make_table()` / `make_status_row()`（**四行一表**由宿主按原顺序摆进 page0 ✓ ——
+//             为什么不整页返回一个 VBox：源行里**混着宿主的输出目录**、操作行下面还有宿主的忙指示
+//             ⇒ 页与宿主的控件是**交叉**的，硬切会把布局顺序弄乱 ✗）
+//             以及 `tick()`、`status_label()`、`rows() / row(i) / row_count() / table_ref()`、
+//             `picked() / picked_sources() / keyword() / limit() / fmt_want() / fmt_ok(row)`、
+//             `searching() / start_search(kw) / keyword_into(kw) / check_all() / check_none()`、
+//             `refresh_count() / set_fmt_pref(v)`
+//   · 要宿主出手的七件事走**回调**（与 player_bar 的 `stateChanged` 同款：set_on_xxx 装、用前判 null）：
+//       `set_on_dirty`         —— 有"要记住"的项变了（条数 / 音源勾选 / 歌词开关 / 格式偏好）⇒ 宿主攒批落盘 ✓
+//       `set_on_dl_checked`    —— 点「下载勾选」⇒ 宿主 `onDownloadChecked()` ✓
+//       `set_on_dl_selected`   —— 点「下载选中行」⇒ 宿主 `onDownloadSelected()` ✓
+//       `set_on_dbl_play`      —— 双击某行 ⇒ 宿主 `playFrom(0, row)` ✓
+//       `set_on_ctx_menu`      —— 表格右击将要弹出（**同步**）⇒ 宿主 `menuCtx = 0; buildMenu(row)` ✓
+//       `set_on_ctx_select`    —— 右击菜单选中了某项 ⇒ 宿主 `menuCtx = 0; onMenu(row, id)` ✓
+//       `set_on_search_done`   —— 搜索收尾 ⇒ 宿主打印 DSEARCH 自检并决定退出（只有它有那些全局量 ✓）
+//       `set_workers`          —— **两个线程入口函数值**（见下面 ⚠⚠；模块里写不出合法的线程入口 ✗）
+//
+// 搜索是**两阶段并行**（2026-10-08 改 ✓，原先一条线程串完所有源 + 所有第三方请求 ≈ 20~25 s ✗）：
+//   阶段 A：**一个音源**一条线程（各源官方搜索互不相干），进度走 channel 回传；
+//   阶段 B：**一片行**一条线程（第三方直链请求才是耗时大头：10 条 ≈ 7~11 s）—— 只补行、不发消息。
+//   UI 侧 120ms 一拍排空 channel，等"线程全停 + 通道排空"后由 `advance` 推进下一阶段 / 收尾 ✓
+import threads
+import times
+import strings
+import SDL3
+import "./dl_engine.leno" as eng
+import "./dl_settings.leno" as dlset   // ⚠ 只借它的**常量与钳位口径**（LIMIT_MIN/MAX ✓）—— 本页不读盘 ✗
+use SDL3.(Table, Button, CheckBox, ComboBox, Edit, Label, HBox, VBox, ProgressBar, SpinBox)
+
+// ⚠⚠ 线程入口：本文件是**模块** ⇒ 它自己写的 worker 会被 `threads.start` 拦 ✗
+//   （判据是"入口函数的 module 必须为空" —— threads.c:130；子 VM 只继承调用方 VM 的 globals ✓）
+//   ⇒ 两个 worker 由**入口脚本**写好、当函数值经 `set_workers` 交进来 ✓（见 bang_page.leno 的同类说明 ✓）
+
+export struct SearchPage {
+    // ===== 本页给宿主读/设的几个入参（见文件头：set_* 必须在 make_* 之前 ✓）=====
+    string rowIcon = ""              // 歌名前的行图标（images/music.png ✓ 与榜单页同一个 ✓）
+    int wantLimit = 20               // 每源条数（设置里记住的；已钳到 LIMIT_MIN..LIMIT_MAX ✓）
+    string wantFmt = ""              // 格式过滤的**用户偏好**（"" = 全部 ✓ 见 fmtPref 的注释 ✓）
+    Array[string] wantSources = []   // 上次勾过的音源 id
+    bool wantSourcesSet = false      // false = 从没存过 ⇒ 出厂默认"可用即勾" ✓
+
+    // ===== 宿主建的两个共享控件（本页只写/只摆 ✓ 不建 ✗）=====
+    CheckBox lyricBox                // 「同时下载歌词」：本页把它摆进操作行 + 读写它 ✓
+    ProgressBar busyBar              // 忙指示：本页写它的值，**摆放由宿主做**（下载进度也用它 ✓）
+
+    // ===== 本页自己的控件（make_* 之后才有值；字段默认值只能是常量 ⇒ 这里不初始化 ✓）=====
+    Edit keywordEdit
+    Button btnSearch
+    ComboBox fmtBox
+    SpinBox limitSpin
+    Table table
+    Button dlCheckedBtn
+    Button dlSelBtn
+    Button selAllBtn
+    Button selNoneBtn
+    Label countLbl
+    Label stateLbl
+
+    // ===== 音源（与 dl_engine.sources() 的行平行）=====
+    Array[CheckBox] srcBoxes
+    Array[string] srcIds
+    Array[string] srcNames            // 中文显示名（表格「来源」列用 ✓ 取自 dl_engine.sources()，不硬编码）
+    Array[bool] srcAvail
+
+    // ===== 数据 =====
+    Array[Array[string]] songs        // 搜索结果（歌曲行）
+    // ★ 格式过滤的**用户选择**（"" = 全部格式）—— ⚠ 与 `fmtBox` 的当前值**不是一回事** ✗：
+    //   每次搜索都会**程序化**重填下拉（`refresh_fmt_items`：选项 = 搜到的那些格式）⇒ 用户上次选的
+    //   "flac" 只要这次没搜到 flac 就会掉回「全部格式」⇒ 直接存 `fmt_want()` 会**把偏好抹掉** ✗✗
+    //   ⇒ 偏好只在**用户真动了下拉**时更新（`fmtProg` 区分程序化 vs 用户 ✓）
+    string fmtPref = ""
+    bool fmtProg = false              // 正在程序化设 fmtBox（这段时间的 on_change 不算用户动作 ✓）
+
+    // ===== 搜索线程状态（两阶段并行 ⇒ 线程是**一批**而不是一条 ✓）=====
+    Array[Thread] searchThreads = []
+    int searchPhase = 0                       // 0 = 阶段 A；1 = 阶段 B
+    Array[Array[string]] searchRowsA = []     // 阶段 A 收集到的行（阶段 B 的输入 ✓）
+    Array[Array[Array[string]]] searchParts = []  // 阶段 B 各线程的入参（join 失手时退回它 ⇒ 一首都不丢 ✓）
+    Channel? searchCh = null
+    bool searching = false
+    string searchErr = ""             // 失败原因（worker 报错时记下，别让"没搜到结果"盖掉真因 ✓）
+    int searchHidden = 0              // 本次被隐藏的条数（没大小 = 拿不到直链 ⇒ 不入表 ✓ 见 has_size）
+    int busyPhase = 0                 // 进度条脉冲相位（"忙"指示）
+    int searchT0 = 0                  // 发起时刻（给 DSEARCH 自检报耗时用 ✓）
+
+    // ===== 线程入口（宿主给的**函数值** ✓ —— 本文件是模块，自己写的 worker 会被拦 ✗ 见文件头）=====
+    pri func(string, string, int, any):Array[Array[string]] searchWorker   // 阶段 A：一个音源一条
+    pri func(Array[Array[string]]):Array[Array[string]] probeWorker        // 阶段 B：一片行一条
+
+    // ===== 宿主回调（用前判 null ✓ 见文件头）=====
+    pri func():void dirty
+    pri func():void dlChecked
+    pri func():void dlSelected
+    pri func(int):void dblPlay
+    pri func(int):void ctxMenu
+    pri func(int, string):void ctxSelect
+    pri func(int, int, int):void searchDone    // (命中, 隐藏, 耗时 ms)
+
+    // ==================== 宿主接口 ====================
+    func set_on_dirty(func():void cb) { dirty = cb }
+    func set_on_dl_checked(func():void cb) { dlChecked = cb }
+    func set_on_dl_selected(func():void cb) { dlSelected = cb }
+    func set_on_dbl_play(func(int):void cb) { dblPlay = cb }
+    func set_on_ctx_menu(func(int):void cb) { ctxMenu = cb }
+    func set_on_ctx_select(func(int, string):void cb) { ctxSelect = cb }
+    func set_on_search_done(func(int, int, int):void cb) { searchDone = cb }
+    func set_workers(func(string, string, int, any):Array[Array[string]] search,
+                     func(Array[Array[string]]):Array[Array[string]] probe) {
+        searchWorker = search
+        probeWorker = probe
+    }
+    // ⚠ 下面三个是"套初值"（在 make_* 之前调 ✓）—— 与"改现成控件"不是一回事，顺序反了等于白设 ✗
+    func set_limit(int v) { wantLimit = v }
+    func set_fmt_pref(string v) { wantFmt = v }
+    func set_sources(Array[string] picked, bool saved) { wantSources = picked; wantSourcesSet = saved }
+    pri func notify_dirty() { if dirty != null { dirty() } }
+
+    // ---- 给宿主的只读口（ctx_* / 下载判定 / 自检都从这儿取 ✓ 别让宿主直摸字段 ✗）----
+    func rows(): Array[Array[string]] { return songs }
+    func row(int i): Array[string] {
+        if i < 0 or i >= songs.len() { return [] }
+        return songs[i]
+    }
+    func row_count(): int { return songs.len() }
+    func table_ref(): Table { return table }
+    func status_label(): Label { return stateLbl }
+    func keyword(): string { return keywordEdit.get_text() }
+    func limit(): int { return _int(limitSpin.get_value()) }
+    func fmt_pref(): string { return fmtPref }
+    func search_err(): string { return searchErr }
+    func searching_now(): bool { return searching }
+    func hidden_count(): int { return searchHidden }
+    func elapsed_ms(): int { return _int(times.ms()) - searchT0 }
+    func check_all() { table.check_all(); update_count(); SDL3.markFrameRedraw() }
+    func check_none() { table.uncheck_all(); update_count(); SDL3.markFrameRedraw() }
+    func refresh_count() { update_count() }
+
+    // 勾选行 → 歌曲行（**按当前格式过滤** ✓ 见下面格式过滤那一段）
+    func picked(): Array[Array[string]] {
+        Array[Array[string]] out = []
+        Array[int] checked = table.get_checked_rows()
+        for checked to i {
+            if i >= 0 and i < songs.len() {
+                if fmt_ok(songs[i]) { out.add(songs[i]) }
+            }
+        }
+        return out
+    }
+
+    func checked_count(): int { return table.get_checked_rows().len() }
+    // 选中的行（Ctrl/Shift 多选）→ 歌曲行：吃格式过滤的那份（「下载选中行」用 ✓）
+    func selected_picked(): Array[Array[string]] {
+        Array[Array[string]] out = []
+        Array[int] sel = table.get_selected_rows()
+        for sel to i {
+            if i >= 0 and i < songs.len() {
+                if fmt_ok(songs[i]) { out.add(songs[i]) }
+            }
+        }
+        return out
+    }
+    // 同样选中的行，但**不过滤**（「只下歌词」用 —— 它不管格式 ✓ 见宿主 onLyricSelected ✓）
+    func selected_all(): Array[Array[string]] {
+        Array[Array[string]] out = []
+        Array[int] sel = table.get_selected_rows()
+        for sel to i {
+            if i >= 0 and i < songs.len() { out.add(songs[i]) }
+        }
+        return out
+    }
+    func selected_count(): int { return table.get_selected_rows().len() }
+
+    // 勾选的音源 id（跳过不可用/未勾选）
+    func picked_sources(): Array[string] {
+        Array[string] out = []
+        int i = 0
+        while i < srcBoxes.len() {
+            if srcAvail[i] and srcBoxes[i].is_checked() { out.add(srcIds[i]) }
+            i = i + 1
+        }
+        return out
+    }
+
+    // 宿主（右键菜单"搜索这首歌"）用：把关键词填进搜索框，**不起搜**（是否起搜由宿主决定 ✓）
+    func keyword_into(string kw) { keywordEdit.set_text(kw) }
+    // 宿主（自检 / 菜单）用：填词 + 起搜（= 用户按回车那条路 ✓）
+    func start_search(string kw) {
+        keywordEdit.set_text(kw)
+        on_search()
+    }
+
+    // ==================== 数据辅助 ====================
+    // 音源 id → 中文显示名（表格「来源」列用 ✓ 名字只在 dl_engine.sources() 里定义一次 ✓）
+    func src_name(string id): string {
+        int i = 0
+        while i < srcIds.len() {
+            if srcIds[i] == id { return srcNames[i] }
+            i = i + 1
+        }
+        return id
+    }
+
+    // 歌曲行 → 表格行（列顺序见 make_table 里的 headers）
+    //   ★ 2026-10-08：末尾加「来源」列（多音源同搜时，同一首歌会出现多行 ⇒ 靠它分辨 ✓）
+    func table_row(Array[string] s): Array[string] {
+        return ["", s[eng.F_NAME], s[eng.F_ARTIST], s[eng.F_ALBUM],
+                eng.fmtduration(_int(s[eng.F_DURATION])), s[eng.F_EXT], s[eng.F_SIZETEXT],
+                src_name(eng.srcid(s))]
+    }
+
+    func fill_table() {
+        Array[Array[string]] rows = []
+        for songs to s { rows.add(table_row(s)) }
+        table.set_rows(rows)
+        table.check_all()            // 默认全勾：搜到就能一键下
+        // 图标不用管：表格配了 `image_path`（默认图标 ✓）⇒ 每行都画它、**换数据也不会掉** ✓
+        //   （早先得每次 set_rows 后逐行 set_row_image 重贴 ✗ —— `set_rows` 会清/截断 rowImages
+        //     见 sdl_table 里 `imgDefault` 的注释 ✓；框架补了默认图标这条就把坑根治了 ✓）
+    }
+
+    // ==================== 格式过滤（搜索行那个下拉框 ✓ 2026-10-08）====================
+    //   为什么要有：一次搜回来常混着 flac / mp3 / aac；只想下某种后缀时，原先只能一行行取消勾选 ✗
+    //   ★ 作用范围 = **批量下载**：
+    //     · 「下载勾选」/「下载选中行」⇒ 过滤 ✓
+    //     · 右键「下载这一首」⇒ 是**显式点名单曲** ⇒ 不拦 ✓（拦了会像"点了没反应"）
+    //     · 双击 = 播放（边下边播 ✓）⇒ 不碰下载 ⇒ 与这里无关 ✓
+    //   ⚠ 只**读** `fmtBox`（用户选的 ✓）；tick 里绝不 set_*（`set_selected` 会触发 on_change ✗
+    //      —— 与音量滑块同一条纪律 ✓）
+
+    // 当前"只要什么"："" = 全部 ✓；否则是**小写**扩展名（"mp3" ✓）
+    func fmt_want(): string {
+        // ⚠ 别写 `if fmtBox == null` ✗：struct 是**值类型**、默认立即分配（编译器会警告"与 null 比较无意义"✓）
+        //   没搜过时 `get_selected()` 也不是有效项 ⇒ 下面 `<= 0` 一并兜住 ✓（返回 "" = 全部 ✓）
+        if fmtBox.get_selected() <= 0 { return "" }        // 第 0 项 = 全部格式 ✓（-1 也当全部 ✓）
+        return strings.to_lower(fmtBox.get_selected_text())
+    }
+
+    // 这一行符合当前过滤吗 ✓（没给扩展名的行算"未知" ⇒ 只有"全部"才放行 ✓）
+    func fmt_ok(Array[string] row): bool {
+        string want = fmt_want()
+        if want == "" { return true }
+        string e = "未知"
+        if row.len() > eng.F_EXT and row[eng.F_EXT] != "" { e = strings.to_lower(row[eng.F_EXT]) }
+        return e == want
+    }
+
+    // 下拉框选项 = 「全部格式」+ **搜到的**那些扩展名（去重 + 插入排序 ✓，几条而已）
+    //   ⚠ `set_selected` **会触发 on_change**（sdl_combobox:177 ✓）⇒ 处理函数必须是幂等的 ✓
+    func refresh_fmt_items() {
+        Array[string] exts = []
+        for songs to s {
+            string e = "未知"
+            if s.len() > eng.F_EXT and s[eng.F_EXT] != "" { e = strings.to_lower(s[eng.F_EXT]) }
+            bool has = false
+            for exts to x { if x == e { has = true } }
+            if not has { exts.add(e) }
+        }
+        Array[string] sorted = []
+        for exts to e2 {
+            int at = 0
+            while at < sorted.len() and sorted[at] < e2 { at = at + 1 }
+            sorted.insert(at, e2)
+        }
+        // 重搜后格式集合会变 ⇒ 尽量保住用户原来选的那项 ✓
+        string keep = ""
+        if fmtBox.get_selected() > 0 { keep = fmtBox.get_selected_text() }
+        Array[string] its = []
+        its.add("全部格式")
+        for sorted to e3 { its.add(e3) }
+        fmtBox.set_items(its)                  // 会把越界的 sel 复位成 -1 ✓（那也当"全部" ✓）
+        // ⚠ 下面到 `on_fmt_changed()` 为止全是**程序化**设置（不是用户选的）⇒ 用 fmtProg 标上 ✓
+        fmtProg = true
+        int want = 0
+        int i = 0
+        while i < its.len() {
+            if keep != "" and its[i] == keep { want = i }
+            i = i + 1
+        }
+        // ★ 2026-10-11：没保住（**刚启动**的第一次搜索 / 上次选的那项这次没搜到）⇒
+        //   用**记住的那个格式**（`fmtPref`；"" = 全部格式 ✓）⇒ "上次只下 flac"就不用每次重选 ✓
+        if want == 0 and fmtPref != "" {
+            i = 0
+            while i < its.len() {
+                if strings.to_lower(its[i]) == fmtPref { want = i }
+                i = i + 1
+            }
+        }
+        fmtBox.set_selected(want)
+        fmtBox.set_enabled(its.len() > 1)      // 只有一种格式 ⇒ 没得选（禁用更清楚 ✓ 仍可见 ✓）
+        on_fmt_changed()
+        fmtProg = false
+    }
+
+    // 换格式 ⇒ 状态栏说清"这一选会下几首"（避免"以为全下、其实只下了 3 首" ✗）
+    func on_fmt_changed() {
+        string want = fmt_want()
+        // ★ 2026-10-11：格式过滤也记住 —— 但**只有用户真动了下拉**才更新偏好 ✗：
+        //   本函数每次搜索完都会被 `refresh_fmt_items` **程序化**调一遍（那时是"自动选/退回全部"，
+        //   不是用户改主意 ✓）⇒ 记进去就会把"上次只下 flac"的偏好抹掉 ✗✗（见 fmtPref 的注释 ✓）
+        if not fmtProg and want != fmtPref {
+            fmtPref = want
+            notify_dirty()
+        }
+        if want == "" {
+            stateLbl.set_text("格式：全部 —— 勾选的都会下")
+        } else {
+            int n = 0
+            for songs to s { if fmt_ok(s) { n = n + 1 } }
+            stateLbl.set_text("格式：只要 " + want + " —— 搜到的 " + _str(songs.len()) + " 首里有 " + _str(n) + " 首")
+        }
+        // 批量按钮的提示也跟着走（用户不用去猜过滤还在不在 ✓）
+        string what = if want == "" then "全部格式" else want
+        dlCheckedBtn.set_tip("下载勾选的行（当前格式过滤：" + what + "）")
+        update_count()
+        SDL3.markFrameRedraw()
+    }
+
+    // ==================== 搜索 ====================
+    func on_search() {
+        if searching { return }
+        string keyword = keywordEdit.get_text().trim()
+        if keyword == "" {
+            stateLbl.set_text("请输入关键词，例如：周杰伦 晴天")
+            SDL3.markFrameRedraw()
+            return
+        }
+        Array[string] srcs = picked_sources()
+        if srcs.len() == 0 {
+            stateLbl.set_text("至少勾选一个音源")
+            SDL3.markFrameRedraw()
+            return
+        }
+        int limit = _int(limitSpin.get_text())
+        if limit < 1 { limit = 20 }
+
+        searching = true
+        searchErr = ""
+        searchHidden = 0
+        songs = []
+        table.set_rows([])
+        table.clear_selection()
+        btnSearch.set_enabled(false)
+        dlCheckedBtn.set_enabled(false)
+        dlSelBtn.set_enabled(false)
+        countLbl.set_text("已选 0 / 0 首")
+        stateLbl.set_text("正在搜索「" + keyword + "」（音源：" + strings.join(srcs, "、") + "）…")
+        busyPhase = 5
+        busyBar.set_value(5.0)
+        searchT0 = _int(times.ms())
+        searchCh = threads.channel(4096)
+        start_phase_a(srcs, keyword, limit)
+        SDL3.markFrameRedraw()
+    }
+
+    // ==================== 搜索两阶段（都并行）====================
+    // 阶段 A：**每个音源一条线程**（原先是一条线程里串着所有源 ⇒ 3~4 源时白白串了 3 次等待 ✗）
+    func start_phase_a(Array[string] srcs, string keyword, int limit) {
+        searchPhase = 0
+        searchThreads = []
+        searchRowsA = []
+        searchParts = []
+        for srcs to s {
+            searchThreads.add(threads.start(searchWorker, s, keyword, limit, searchCh))
+        }
+    }
+
+    // 阶段 B：把阶段 A 的行切成 eng.PROBE_THREADS 片，一片一条线程（第三方请求是耗时大头 ✓）
+    //   切片用 eng.slice_rows（**轮转片**；为什么必须轮转、以及"不重不漏"的硬要求见那边的注释 ✓）
+    //   ★ 代价：结果顺序变成"轮转序"（不再按音源聚在一起）—— 表里那一列「来源」正是为此而加 ✓
+    func start_phase_b() {
+        int total = searchRowsA.len()
+        if total == 0 {
+            finish_search([])
+            return
+        }
+        int k = eng.PROBE_THREADS
+        if k > total { k = total }
+        searchPhase = 1
+        searchThreads = []
+        searchParts = eng.slice_rows(searchRowsA, k)   // 轮转切片（切法见 dl_engine.slice_rows ✓）
+        stateLbl.set_text("已搜到 " + _str(total) + " 首，正在逐首取无损直链（" + _str(searchParts.len()) + " 路并行）…")
+        for searchParts to part {
+            searchThreads.add(threads.start(probeWorker, part))
+        }
+    }
+
+    // 本阶段的线程全停了吗（通道里可能还有最后一波消息 ⇒ 调用方还要看通道长度 ✓）
+    func search_running(): bool {
+        for searchThreads to t {
+            if t.state() == "running" { return true }
+        }
+        return false
+    }
+
+    // 阶段切换 / 收尾：由 120ms 定时器在"线程都停了 + 通道排空"之后调 ✓
+    func advance() {
+        Array[Array[string]] rows = []
+        int idx = 0
+        for searchThreads to t {
+            var got = t.join() as Array[Array[string]]
+            if got == null {
+                // ★ 线程失手（极罕见）⇒ 退回**它那份入参**（未补直链、但仍是官方结果 ✓ 一首都不丢）
+                if searchPhase == 1 and idx < searchParts.len() { got = searchParts[idx] }
+            }
+            if got != null {
+                Array[Array[string]] one = got
+                for one to row { rows.add(row) }
+            }
+            idx = idx + 1
+        }
+        searchThreads = []
+        if searchPhase == 0 {
+            searchRowsA = rows
+            start_phase_b()
+        } else {
+            Array[Array[string]] kept = eng.keep_downloadable(rows)
+            // ★ 隐藏数 = 阶段 A 总数 − 最终保留数（付费/无直链的 ⇒ 不入表 ✓ 见 has_size）
+            searchHidden = rows.len() - kept.len()
+            finish_search(kept)
+        }
+    }
+
+    // 搜索收尾：行已经拿齐（线程都 join 过了）
+    func finish_search(Array[Array[string]] rows) {
+        searchThreads = []
+        searchParts = []
+        searchRowsA = []
+        searchPhase = 0
+        if searchCh is Channel { searchCh.close() }
+        searchCh = null
+        searching = false
+        songs = rows
+        fill_table()
+        refresh_fmt_items()        // ★ 下拉框选项 = 搜到的那些格式（全部/flac/mp3/aac… ✓）
+        update_count()
+        btnSearch.set_enabled(true)
+        busyBar.set_value(100.0)
+        if rows.len() == 0 {
+            // ★ 有错就报错：worker 抛异常时如果只说"没搜到结果"，用户根本无从下手
+            //   （"青衣"那次就是这么被误判成"搜不到"的 ✓）
+            if searchErr != "" {
+                stateLbl.set_text("搜索失败：" + searchErr)
+            } else if searchHidden > 0 {
+                // ★ 搜到了、但全都没直链 ⇒ 必须说清，否则和"搜不到"长得一模一样 ✗
+                stateLbl.set_text("搜到 " + _str(searchHidden) + " 首，但都没拿到直链（付费/无版权）—— 已全部隐藏")
+            } else {
+                stateLbl.set_text("没搜到结果（接口可能被限流，或关键词无匹配）")
+            }
+        } else {
+            // ★ 隐藏数一并报出（否则用户会以为"搜索结果怎么少了" ✓）
+            string hid = ""
+            if searchHidden > 0 { hid = "；另 " + _str(searchHidden) + " 首没拿到直链（付费/无版权）已隐藏" }
+            stateLbl.set_text("搜索完成：命中 " + _str(rows.len()) + " 首（默认已全部勾选）" + hid)
+        }
+        // ★ 搜索自检收尾（`DSEARCH` ✓）：打印与"要不要接着跑/退出"都归**宿主**（那些是它的全局量 ✓）
+        if searchDone != null { searchDone(rows.len(), searchHidden, _int(times.ms()) - searchT0) }
+        SDL3.markFrameRedraw()
+    }
+
+    // ==================== 120ms 一拍 ====================
+    func tick() {
+        poll_search()
+        pulse_busy()
+    }
+
+    func pulse_busy() {
+        if searching {
+            busyPhase = busyPhase + 9
+            if busyPhase > 92 { busyPhase = 5 }
+            busyBar.set_value(_float(busyPhase))
+        }
+    }
+
+    func poll_search() {
+        int found = 0
+        if searchCh is Channel {
+            var msg = searchCh.try_receive()
+            int n = 0
+            while msg != null and n < 4000 {
+                if msg is Array => mv {
+                    string kind = _str(mv[0])
+                    if kind == "search" {
+                        found = found + _int(mv[2])
+                        stateLbl.set_text("音源 " + _str(mv[1]) + " 返回 " + _str(mv[2]) + " 条…")
+                    } else if kind == "serror" {
+                        searchErr = _str(mv[4])
+                        stateLbl.set_text("搜索出错：" + searchErr)
+                    }
+                }
+                msg = searchCh.try_receive()
+                n = n + 1
+            }
+        }
+        if not searching { return }
+        // 线程还活着 ⇒ 继续等（worker 结束 + 通道排空后再推进，避免丢最后几条消息）
+        if search_running() { return }
+        if searchCh is Channel {
+            if searchCh.len() > 0 { return }
+        }
+        advance()                // 阶段 A ⇒ 阶段 B，或最终收尾 ✓
+    }
+
+    // 勾选/格式变化 ⇒ "已选 N / M 首"那行（下载按钮的可用态见下面的口径 ✓）
+    func update_count() {
+        Array[int] checked = table.get_checked_rows()
+        int bytes = 0
+        int match = 0                       // 勾选里"符合当前格式"的条数（★ 才是真正会下的 ✓）
+        for checked to i {
+            if i >= 0 and i < songs.len() {
+                bytes = bytes + _int(songs[i][eng.F_BYTES])
+                if fmt_ok(songs[i]) { match = match + 1 }
+            }
+        }
+        string extra = ""
+        string want = fmt_want()
+        if want != "" { extra = "｜只要 " + want + "：符合 " + _str(match) + " 首" }
+        countLbl.set_text("已选 " + _str(checked.len()) + " / " + _str(songs.len()) + " 首 · 合计约 " + strings.fmt_size(bytes) + extra)
+        // ★ 2026-10-10 改（用户口径）：**不再按"勾了几首"灰着** —— 没勾 / 全被格式滤掉也让它可点，
+        //   点了就开（空的）下载窗口 ⇒ 与标题栏那个「下载」图标**同一口径** ✓
+        //   为什么：它同样是个"进下载窗口"的入口，用户想先看看任务表 / 「历史」页签时，
+        //   不该被一个灰按钮挡在外面 ✗（"点不动"确实不等于"点了没反应"，但这里压根不需要拦 ✓）
+        //   ⚠ 「下载选中行」保持原样（它只认表格选中行、没有"打开窗口"的含义 ✓）
+        dlCheckedBtn.set_enabled(true)
+    }
+
+    // ==================== 页内四行一表（由宿主按原顺序摆进 page0 ✓）====================
+    // ---- ① 搜索行：图标 + 关键词 + 搜索按钮 + 格式 + 每源条数 ----
+    func make_search_row(): HBox {
+        var row1 = SDL3.createHBox({h: 34, padX: 0, padY: 0, spacing: 8})
+        // ★ 搜索框左边的小音符（2026-10-08 ✓）：`images\music.png`
+        //   它是**彩色**图（绿色音符 + 透明底 ✓）⇒ 不用 tint ✓；不给 `image_mode` ⇒ 走默认
+        //   `MODE_ASPECT_FIT`（保持比例、完整显示 ✓）—— 给了 1（拉伸）就会被拉变形 ✗
+        var logo = SDL3.createImageView({w: 26, h: 26, image_path: rowIcon})
+        logo.set_tip("音乐下载器：搜歌 -> 勾选 -> 下载（下载目录可在下面改）")
+        row1.add(logo, {grow: 0, shrink: 0, basis: 26, align: 1})
+        keywordEdit = SDL3.createEdit({
+            text: "", w: 380, h: 32, font_size: 14,
+            placeholder: "输入歌名 / 歌手，回车或点「搜索」（如：周杰伦 晴天）"
+        })
+        keywordEdit.on_enter(func() { on_search() })
+        row1.add(keywordEdit, {grow: 1, shrink: 1, align: 3})
+        btnSearch = SDL3.createButton({w: 90, h: 32, text: "搜索", type: "primary", font_size: 14})
+        btnSearch.set_tip("按勾选的音源搜索（当前只有酷我可用）")
+        btnSearch.on_click(func() { on_search() })
+        row1.add(btnSearch, {grow: 0, shrink: 0, basis: 90, align: 3})
+        // ★ 格式下拉框（2026-10-08 ✓）——一次搜回来常混着 flac / mp3 / aac，只想下某种后缀时
+        //   不用一行行取消勾选 ✓
+        //   · 选项**按搜到的内容生成**（`refresh_fmt_items` ✓ 搜完才填 ✓）
+        //   · 只作用于**批量下载**（「下载勾选」「下载选中行」✓）；右键「下载这一首」
+        //     是**显式点名单曲** ⇒ 不拦 ✓（拦了就像"点了没反应" ✗）
+        //   · 双击（= 播放 ✓）不碰下载 ⇒ 与这里无关 ✓
+        row1.add(SDL3.createLabel({text: "格式", font_size: 13}), {grow: 0, shrink: 0, align: 1})
+        fmtBox = SDL3.createComboBox({
+            w: 120, h: 32, font_size: 13, item_h: 26, selected: 0,
+            items: ["全部格式"],
+            tip: "只下这种后缀的（搜索完成后按搜到的格式列出）"
+        })
+        fmtBox.on_change(func(int idx) { on_fmt_changed() })
+        fmtBox.set_enabled(false)      // 还没搜 ⇒ 只有「全部格式」一项 ⇒ 先灰着（搜完由 refresh_fmt_items 打开 ✓）
+        row1.add(fmtBox, {grow: 0, shrink: 0, basis: 120, align: 3})
+        row1.add(SDL3.createLabel({text: "每源条数", font_size: 13}), {grow: 0, shrink: 0, align: 1})
+        // ★ 条数记忆（2026-10-08 ✓）：初值取设置里的（读盘时已钳到 LIMIT_MIN..LIMIT_MAX ✓）；
+        //   范围也直接引 dl_settings 的常量 ⇒ 控件与钳位**只有一处口径**（不会对不上 ✗）
+        limitSpin = SDL3.createSpinBox({w: 86, h: 32, min: dlset.LIMIT_MIN, max: dlset.LIMIT_MAX, step: 5, value: wantLimit, int_mode: true, font_size: 13})
+        limitSpin.set_tip("每个音源最多取多少条（酷我接口的 rn 参数；改了会记住）")
+        limitSpin.on_change(func(float v) { notify_dirty() })     // ★ 改了记下来（攒批落盘 ✓）
+        row1.add(limitSpin, {grow: 0, shrink: 0, basis: 86, align: 3})
+        return row1
+    }
+
+    // ---- ② 音源勾选框：**追加到宿主给的那一行**里（那一行还装着宿主的"输出目录 + 选择目录" ✓
+    //        ⇒ 顺序：音源复选框 -> 弹性空隙 -> 输出目录…… 与拆分前**一模一样** ✓）----
+    func build_sources_into(HBox row) {
+        Array[Array[string]] srcs = eng.sources()
+        for srcs to s {
+            string id = s[0]
+            string name = s[1]
+            bool avail = s[2] == "1"
+            string note = s[3]
+            // ★ 勾选记忆（2026-10-08 ✓）：存过就按存的来 ✓
+            //   · `wantSourcesSet == false` = **从没存过** ⇒ 出厂默认"可用即勾" ✓
+            //   · 存过 ⇒ 只勾当时勾过的那几个；**不可用的音源一律强制不勾** ✓（哪怕文件里勾着 ✗）
+            //   · "全不勾"也是一种选择（空数组 ✓）⇒ 不能跟"没存过"混为一谈 ✗ 见 wantSourcesSet ✓
+            bool want = avail
+            if avail and wantSourcesSet {
+                want = false
+                for wantSources to w { if w == id { want = true } }
+            }
+            CheckBox box = SDL3.createCheckBox({text: name, checked: want, enabled: avail, font_size: 13, tip: note})
+            // 勾选变化：落盘记住（点搜索时仍会现取一遍 ⇒ 两不冲突 ✓）
+            box.on_change(func(bool v) {
+                stateLbl.set_text("音源勾选已记住（下次启动照旧）")
+                notify_dirty()                  // ★ 改了记下来（攒批落盘 ✓ 见宿主 mark_dirty）
+                SDL3.markFrameRedraw()
+            })
+            row.add(box, {grow: 0, shrink: 0, align: 1})
+            srcBoxes.add(box)
+            srcIds.add(id)
+            srcNames.add(name)
+            srcAvail.add(avail)
+        }
+    }
+
+    // ---- ③ 操作行：下载勾选 / 下载选中行 / 歌词开关 / 分组（全选·全不选）/ 已选统计 ----
+    func make_action_row(): HBox {
+        var row3 = SDL3.createHBox({h: 32, padX: 0, padY: 0, spacing: 8})
+        dlCheckedBtn = SDL3.createButton({w: 140, h: 30, text: "下载勾选", type: "success", font_size: 13})
+        dlCheckedBtn.set_tip("下载列表里勾选的歌曲（默认全勾）；一首都没勾也能点 —— 会打开（空的）下载窗口，可看「历史」")
+        dlCheckedBtn.on_click(func() { if dlChecked != null { dlChecked() } })
+        // ★ 2026-10-10（用户口径）：开局就**可点**（不必等搜索结果）—— 空任务照样把窗口开出来 ✓
+        dlCheckedBtn.set_enabled(true)
+        row3.add(dlCheckedBtn, {grow: 0, shrink: 0, basis: 140, align: 3})
+        dlSelBtn = SDL3.createButton({w: 120, h: 30, text: "下载选中行", font_size: 13})
+        dlSelBtn.set_tip("下载表格里当前选中的行（Ctrl/Shift 可多选）")
+        dlSelBtn.on_click(func() { if dlSelected != null { dlSelected() } })
+        dlSelBtn.set_enabled(false)
+        row3.add(dlSelBtn, {grow: 0, shrink: 0, basis: 120, align: 3})
+        // 歌词开关：紧跟在两个下载按钮后面（它是"下载"的选项，语义上属于下载这一组），
+        // 后面用一条竖线把"下载动作"与"表格选择"分开，避免三类控件挤成一团（2026-10-07 调整 ✓）
+        //   ★ 它由**宿主**建（值来自设置 ✓ 见 run() 里的 lyricBox.set_checked ✓），本页只摆+接线 ✓
+        lyricBox.set_tip("下载音频时顺带存一份同名 .lrc（酷我官方歌词，含译文行）")
+        lyricBox.on_change(func(bool v) {
+            stateLbl.set_text(if v then "下载时将同时保存 .lrc 歌词（已记住）" else "下载时不再保存歌词（已记住；右键菜单仍可单独下歌词）")
+            notify_dirty()          // ★ 改了就记（攒批落盘 ✓ 2026-10-08 修过"改了不存"、2026-10-11 改成攒批）
+            SDL3.markFrameRedraw()
+        })
+        row3.add(lyricBox, {grow: 0, shrink: 0, align: 1})
+        // 分组间隔：本来想用一条竖向 Separator，但**实测 Separator 放进 HBox 里不渲染**
+        //   （thickness/color/alpha/basis/align 各组合都试过，仍不可见 ⇒ 疑似布局没给它非零高度）
+        //   ⇒ 改用"嵌套 HBox + 左内边距"制造视觉间隔，效果等价且可靠 ✓
+        //   ★ **嵌套容器必须显式给 w**（2026-10-09 ✓ 实测踩到）：父容器 `add()` 抓的是子的
+        //     `get_w()`，而 HBox 的 `w` 默认 **300**（不是内容宽 ✗）⇒ 不给就白占 300-176=124px，
+        //     把它后面的「已选 N / M 首」顶到**行中间**（左侧本该 8px，实测 148px ✗）
+        //     （176 = padX14 + 全选70 + spacing8 + 全不选70 + padX14 ✓）
+        var selGroup = SDL3.createHBox({w: 176, h: 32, padX: 14, padY: 0, spacing: 8})
+        selAllBtn = SDL3.createButton({w: 70, h: 30, text: "全选", font_size: 13})
+        selAllBtn.on_click(func() { table.check_all(); update_count(); SDL3.markFrameRedraw() })
+        selGroup.add(selAllBtn, {grow: 0, shrink: 0, basis: 70, align: 3})
+        selNoneBtn = SDL3.createButton({w: 70, h: 30, text: "全不选", font_size: 13})
+        selNoneBtn.on_click(func() { table.uncheck_all(); update_count(); SDL3.markFrameRedraw() })
+        selGroup.add(selNoneBtn, {grow: 0, shrink: 0, basis: 70, align: 3})
+        row3.add(selGroup, {grow: 0, shrink: 0, align: 3})
+        //   ⚠ 这个统计标签**别给 grow:1**（2026-10-09）：grow:1 让它的盒子吃掉整行剩余宽度，
+        //     而 Label 的 `align` 是**锚点**语义（`drawX = x`，右对齐会画到盒子左边界去 ✗
+        //     见 sdl_label 的"普通绘制"分支）⇒ 盒子一大，文字就**浮在行中间**（实测 x=793，
+        //     行尾白留 180px ✗）。改成紧跟「全不选」当一句**说明**：定长时 75px、变长时往右长
+        //     （右边本来就是空的 ✓）⇒ 既不浮，也绝不会被裁 ✓
+        countLbl = SDL3.createLabel({text: "已选 0 / 0 首", font_size: 13})
+        row3.add(countLbl, {grow: 0, shrink: 1, align: 2})
+        return row3
+    }
+
+    // ---- ④ 结果表格 ----
+    func make_table(): Table {
+        // 第 0 列是复选框列（表头可全选/全不选）；其余 7 列与 dl_engine 的歌曲行字段对应
+        table = SDL3.createTable({
+            // ★ 2026-10-08：末尾加「来源」（多音源搜索结果里，同一首歌会有多行 ⇒ 靠它分辨是哪家 ✓）
+            //   ⚠ 列宽**必须按"表格真正拿到的宽度"算**（2026-10-09 校正）：窗口 1060 − 根容器 24 −
+            //     侧栏 104 = **931**（实测表格区就是 117..1047 ✓）。旧账写「总 986」是**超预算 55px**
+            //     的（侧栏 80 那会儿也超 30）⇒ 表现是**最右边「来源」被裁掉半截** ✗（加宽侧栏后更明显）
+            //     现在合计 **928 ≤ 931** ⇒ 8 列全可见 ✓（改列宽时请照这个预算来 ✓）
+            headers: ["", "歌名", "歌手", "专辑", "时长", "格式", "大小", "来源"],
+            col_widths: [40.0, 280.0, 140.0, 140.0, 66.0, 66.0, 106.0, 90.0],
+            aligns: [1, 0, 0, 0, 1, 1, 2, 1],
+            header_aligns: [1, 0, 0, 0, 1, 1, 2, 1],
+            check_col: 0,
+            // ★ 图标列（2026-10-08 ✓）：框架的 `image_col` = 把该列画成 **[图标 + 文字]** ✓
+            //   ⇒ 图标自然落在**歌名前** ✓（列 1 = 歌名；列 0 是勾选列 ✓ 见 check_col ✓）
+            //   18px 图标 + 6px 间距：row_h=26 下看着正好，也不挤掉歌名的地方 ✓
+            image_col: 1, image_size: 18, image_gap: 6,
+            // ★ 默认图标（2026-10-08 框架新增 ✓）：每行都用它 ⇒ **不必逐行 set_row_image** ✗
+            //   先前必须每次 set_rows 后重贴（`set_rows` 会清 rowImages ✗ 见 fill_table 的历史注释 ✓）
+            //   ⇒ 现在一次给、永不掉 ✓
+            image_path: rowIcon,
+            sortable: true, zebra: true, row_h: 26, header_h: 30, font_size: 14,
+            multi: true,
+            empty_text: "还没有结果 —— 输入关键词后回车搜索"
+        })
+        table.on_check(func(int col, Array[int] checked) { update_count() })
+        table.on_select(func(int row) { dlSelBtn.set_enabled(row >= 0) })
+        // ★ 双击 = **播放**（2026-10-09 二次改 ✓ 边下边播）：从该行起播**整张表** ——
+        //   已下载的直接播、没下过的**边下边播**（见宿主的 playFrom ✓）；回车（RETURN）也走这条回调 ✓
+        table.on_dbl_click(func(int row, int col) { if dblPlay != null { dblPlay(row) } })
+        //   ★ 右键菜单：宿主的回调里会先钉住"菜单作用在**搜索表**上"（menuCtx=0）再建菜单 ✓
+        //     （榜单表接的是同一套函数，只是 menuCtx=1 ⇒ 见宿主 buildMenu 的 ctx_* 访问器 ✓）
+        table.on_context_will_open(func(int row) { if ctxMenu != null { ctxMenu(row) } })
+        table.on_context_select(func(int row, string id) { if ctxSelect != null { ctxSelect(row, id) } })
+        // 右键菜单的图标尺寸（★ 2026-10-09 用户提供了一批菜单图标 ✓）：它是**菜单级**设置
+        //   ⇒ 两张表各设一次（榜单表见它自己的创建处 ✓）。18px：菜单行高 26 ⇒ 默认 16 偏小，
+        //   18 与行高比例更舒服；左内边距保持默认 10 + 间距 6 ✓（图标列宽会自动加上去 ✓）
+        table.get_context_menu().set_image_size(18)
+        return table
+    }
+
+    // ---- ⑤ 状态行（★ 属搜索页 ⇒ 与榜单页各有一条 ✓；宿主要用它写别的信息 ⇒ 走 status_label() ✓）----
+    func make_status_row(): HBox {
+        var statusRow = SDL3.createHBox({h: 24, padX: 0, padY: 0, spacing: 12})
+        stateLbl = SDL3.createLabel({text: "就绪", font_size: 13})
+        statusRow.add(stateLbl, {grow: 1, shrink: 1, align: 1})
+        statusRow.add(SDL3.createLabel({text: "双击某行 = 播放（没下过的边下边播）；右键 = 下载/批量/复制/打开目录", font_size: 12}), {grow: 0, shrink: 0, align: 2})
+        return statusRow
+    }
+}
+
+// 工厂：建页（**不**替宿主摆布局 —— 四行一表由宿主按原顺序摆进 page0 ✓ 见文件头）
+//   ⚠ 建完先调 `set_limit / set_fmt_pref / set_sources`（套初值 ✓）**再**调 make_* ✓
+//   ⚠ `set_workers` 也别忘了 —— 少装会在起搜那一刻报 "threads.start() requires a function argument"
+export func create_search_page(string imgIcon, CheckBox lyric, ProgressBar busy): SearchPage {
+    SearchPage p = new SearchPage()
+    p.rowIcon = imgIcon
+    p.lyricBox = lyric
+    p.busyBar = busy
+    return p
+}
