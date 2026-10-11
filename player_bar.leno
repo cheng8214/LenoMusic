@@ -69,6 +69,9 @@ const float BAR_TOTAL = 52.0
 //   ⚠ 这两个数**必须一致** ✗：`Label` 的截断上限是 `min(max_w, 盒子宽度)`（sdl_label.leno:242 ✓）
 //     ⇒ 写岔了（比如 max_w 200 但盒子只有 45）就又变成"只显示几个字"✗（2026-10-07 踩过 ✓）
 const float INFO_W = 200.0
+// 进度条"点在条上"的手感余量（上下各放宽这么多像素 ⇒ 条子很细也不至于"差一点就点不中"✗）
+//   ★ 2026-10-11：用户口径 = **只有点在进度条那一条上才跳转**，画布里别处只给涟漪 ✓（见 on_click）
+const float SEEK_HIT_SLACK = 5.0
 
 export struct PlayerBar {
     // ===== 控件（build 之后才有值；字段默认值只能是常量 ⇒ 这里不初始化 ✓）=====
@@ -161,6 +164,7 @@ export struct PlayerBar {
     // （原 `dlPct`：试听期的"整首下载 %" 已随试听退役 ⇒ 边下边播的进度改由 buf_ratio() 现算 ✓）
 
     bool lastPlaying = false     // 上一拍是否在播（用来判"要不要换播放/暂停图标" ✓）
+    int lastLoopMode = -1        // 上一拍显示的循环档（-1 = 还没同步过；**变了才碰按钮** ✓ 见 sync_icons）
     int lastIdx = -1             // 上一次显示的曲目（变了才同步歌单选中 ✓）
     string dir = ""              // 扫哪个目录（= 输出目录 downloads/ ✓）
     string imgDir = ""           // 图标目录（宿主给：`dirs.join(dirs.res_dir(), "images")` ✓）
@@ -217,14 +221,21 @@ export struct PlayerBar {
             //   · 试听放的是"前一段"的截断文件 ⇒ 拖了会跳到并不存在的位置 ✗ ⇒ 挡下来并说清原因 ✓
             //   · 列表里的歌 = 已下完的完整文件 ⇒ 放行 ✓（闸门 = `Player.can_seek()` ✓）
             //   ⚠ 涟漪照样冒（哪怕是挡下来的那次 ✓）—— "点了有反馈"比"点了没动静"好得多 ✓
+            // ★★ 2026-10-11 修（用户口径）：**只有点在进度条那一条上才跳转**；
+            //   画布是**整行高**（BAR_H=52）、条子只占中间 8~12px ⇒ 不判的话"条子上方/下方那一大片"
+            //   也算跳转 ✗（一不留神点空白就把歌跳走了 ✓）⇒ 别处**只给涟漪**、不跳也不写状态栏 ✓
             seekBar.on_click(func(float cx, float cy, int btn) {
                 float w0 = seekBar.get_w()
                 float rr = 0.0
                 if w0 > 0.0 { rr = cx / w0 }
                 if rr < 0.0 { rr = 0.0 }
                 if rr > 1.0 { rr = 1.0 }
-                clickFx = rr
+                clickFx = rr                              // 涟漪：点哪儿都冒（手感反馈 ✓）
                 clickT = 0.0
+                if not on_seek_bar(cy, seekBar.get_h()) {  // ★ 没点在条上 ⇒ 到此为止（只留涟漪 ✓）
+                    SDL3.markFrameRedraw()
+                    return
+                }
                 if p is Player => q {
                     if q.can_seek() {
                         if q.seek_ratio(rr) {
@@ -1047,16 +1058,23 @@ export struct PlayerBar {
         //   ⇒ 现在换回来：**关 = 页面同款底色**（普通按钮 ✓）、**开 = 深一档**（一眼看出开着 ✓）
         //   ⚠ 两个"开"的图标本就不同（loop_one / loop_all ✓），而"关"复用 loop_all ⇒
         //     若不给激活态底色，ALL 与 OFF 会长得完全一样、分不出循环状态 ✗（所以这个底色不能省 ✓）
-        if q.loopMode == pl.LOOP_ONE {
-            btnLoop.set_image(icon_path("loop_one"))
-            btnLoop.set_bg_color(#E4E6EAFF)          // 激活态：比页面深一档 ✓
-        } eif q.loopMode == pl.LOOP_ALL {
-            btnLoop.set_image(icon_path("loop_all"))
-            btnLoop.set_bg_color(#E4E6EAFF)          // 同上 ✓
-        } else {
-            // "循环：关" = 跟其它图标按钮/页面**同款背景色** ⇒ 看着就是"普通按钮、没开循环" ✓
-            btnLoop.set_image(icon_path("loop_all"))
-            btnLoop.set_bg_color(#F0F0F5FF)
+        // ★ 2026-10-11 修（用户实测："播放时**时不时卡顿一下**"✗）：这段原先**每 120ms 都跑一遍** ✗
+        //   —— 而 `Button.set_image()` 是"**把旧纹理丢掉、路径记下来**，下一帧渲染时**重新从磁盘加载**
+        //   PNG"（见 sdl_button.set_image ✓）⇒ 循环图标每秒被销毁/重载 8 次（磁盘 I/O + 解码）✓
+        //   在弱机上就是可感的卡顿 ⇒ 现在**只在循环档真的变了**才碰它（与上面播放/暂停图标同一口径 ✓）
+        if q.loopMode != lastLoopMode {
+            lastLoopMode = q.loopMode
+            if q.loopMode == pl.LOOP_ONE {
+                btnLoop.set_image(icon_path("loop_one"))
+                btnLoop.set_bg_color(#E4E6EAFF)          // 激活态：比页面深一档 ✓
+            } eif q.loopMode == pl.LOOP_ALL {
+                btnLoop.set_image(icon_path("loop_all"))
+                btnLoop.set_bg_color(#E4E6EAFF)          // 同上 ✓
+            } else {
+                // "循环：关" = 跟其它图标按钮/页面**同款背景色** ⇒ 看着就是"普通按钮、没开循环" ✓
+                btnLoop.set_image(icon_path("loop_all"))
+                btnLoop.set_bg_color(#F0F0F5FF)
+            }
         }
     }
 
@@ -1279,12 +1297,27 @@ export struct PlayerBar {
     //     ③ 已播段上半档亮色 —— 两块钱做出**伪渐变** ✓（不建纹理、不做 shader ✓）
     //     ④ 扫光 —— 播放中：一道半透明白带在**已播段里**来回跑 ✓（不看时间也看得出在走 ✓）
     //     ⑤ 头部圆点 + **呼吸**光晕 —— 暂停时光晕静止（不做动画 ⇒ 不白刷帧 ✓）
-    //     ⑥ 点击涟漪 —— 纯手感反馈 ✓（**不 seek**：定位是二期 ✓）
+    //     ⑥ 点击涟漪 —— 纯手感反馈 ✓（**点在条上**的那次还会真跳转 ⇒ 闸门见 on_seek_bar ✓）
     //   ⚠ 一律"手写夹取"到已播段内（`l / rr` 那几行 ✓）：`setClipRect` 要传指针、麻烦 ✗
     //   ⚠ 条高随悬停 8 → 12（缓动 ✓）—— 想加效果又**不想动布局**时，"在画布里长粗"是零成本 ✓
+
+    // 进度条当前粗细（**只此一处定义**：画与"点没点在条上"共用 ✓ 见 draw_seek / on_seek_bar）
+    func seek_bar_h(): float { return 8.0 + 4.0 * hoverEase }
+
+    // 画布内坐标 y 落在"进度条那一条"上吗（★ 2026-10-11：点击要**先过这道闸门**才跳转 ✓）
+    //   ⚠ 画布是**整行高**（BAR_H=52），条子只占中间 8~12px ⇒ 不判的话"条子上方/下方那一大片"
+    //     都算跳转 ✗（用户实测口径：只有点在条上才跳，别处只给涟漪 ✓）
+    //   ⚠ 垂直居中的算式与 `draw_seek` 的 `by` **必须同源** ✗：条子挪了这儿也要跟着挪 ✓
+    //   ⚠ 上下各放宽 `SEEK_HIT_SLACK`：条子很细，像素级贴合会"差一点就点不中"✗
+    func on_seek_bar(float cy, float ch): bool {
+        float bh = seek_bar_h()
+        float top = (ch - bh) * 0.5                    // = draw_seek 里的 (oy + (ch-bh)*0.5) 去掉 oy ✓
+        return cy >= top - SEEK_HIT_SLACK and cy <= top + bh + SEEK_HIT_SLACK
+    }
+
     func draw_seek(Renderer r, float ox, float oy, float cw, float ch, float ratio, bool playing) {
         if cw <= 2.0 or ch <= 2.0 { return }
-        float bh = 8.0 + 4.0 * hoverEase               // 悬停变粗 ✓
+        float bh = seek_bar_h()                        // 悬停变粗（与命中判定共用一处 ✓）
         float by = oy + (ch - bh) * 0.5                // 垂直居中 ✓（在行里跟文字对齐 ✓）
         float rad = bh * 0.5
         float rt = ratio
