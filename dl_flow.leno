@@ -1,0 +1,350 @@
+// dl_flow.leno — 下载编排 + 边下边播（★ 2026-10-11 从 musicdl_gui.leno 拧出 ✓）
+//
+// 管两件事（都是"数据 → 起线程 → 回灌"这条链；界面本体都在别处 ✓）：
+//   ① 下载编排：开窗（复用检查 / 建目录 / open_download）与起线程（dl_start_if_wanted）。
+//      窗口本体在 dl_window.leno；"哪些行要下"的**业务判定**（勾选 / 选中行 / 格式过滤提示）
+//      留在宿主 —— 它们要读搜索页，别让本模块反向依赖页面 ✗
+//   ② 边下边播的**下载半边**：播放器说"要这首" ⇒ 起**单任务**下载 ⇒ 把 start/progress/done
+//      回灌给播放器（begin_stream / feed_buffer / finish_stream ✓）。
+//      （播放半边在 player.leno / player_bar.leno —— 本文件只喂它 ✓）
+//
+// ⚠⚠ 线程入口（2026-10-11 实测的语言硬约束；bang_page / search_page / musicdl_gui 文件头同款）：
+//   `threads.start(f, …)` 判的是 **f 所属 module 必须为空**（threads.c:130：子 VM 只继承调用方
+//   VM 的 globals 且把 current_module_frame 置 NULL）⇒ **本文件是模块，自己写不出合法入口** ✗
+//   ⇒ `dl_worker_shard` 留在**入口脚本**，宿主经 `set_dl_worker(...)` 把它当**函数值**交进来，
+//     本文件再 `threads.start(dlWorker, …)` ✓ —— 此时 f 仍是入口脚本的函数（module == NULL）✓
+//
+// 宿主给（create_dl_flow + set_*）：
+//   · stateLbl / pbar / lyricBox / cfg —— 都是**引用**（`cfg.workers`、"同时下载歌词"勾选态
+//     都**现读** ⇒ 改设置立刻生效 ✓）；pbar 为 null 也能活（起下载的几个口都先 narrowing ✓）
+//   · set_outdir_provider(func():string) —— 输出目录的**活口**（用户随时能改 ⇒ 别拷贝值 ✗）
+//   · set_dl_worker(func) —— 上面 ⚠⚠ 那个
+// 本模块给：
+//   · start_download(jobs) / open_lyric_only(jobs) —— 开窗入口（"空任务也开窗"口径随方法走 ✓）
+//   · play_table(rows, row) —— 整表交给播放器：已下载的直接播、没下的边下边播 ✓
+//   · tick_playback() / tick_download() —— 宿主 120ms 一拍**各调一次**（次序别换：
+//     流回信在前、窗口起线程 + 窗口 tick 在后 —— 与拆分前 onTick 的次序一致 ✓）
+//   · is_downloading() / sync_locals() / play_rows() / dl_ref() —— 宿主的只读口 ✓
+//     （自检钩子 DDL / DDLOPEN 经 dl_ref() 摸窗口；"歌词面板点立即下载"经 play_rows() 找当前这首 ✓）
+
+import "SDL3" as SDL3
+import dirs
+import files
+import threads
+import "./dl_engine.leno" as eng
+import "./dl_window.leno" as dlw
+import "./player_bar.leno" as pb
+import "./dl_settings.leno" as dlset
+
+// ⚠ `Thread` / `Channel` 是内建类型，**不**进 SDL3 的 use 列表 ✗（放进去报"期望类型名"✗）
+use SDL3.(Label, CheckBox)
+use dlw.DlWindow
+use pb.PlayerBar
+use dlset.DlSettings
+
+export struct DlFlow {
+    // ===== 宿主给的（create_dl_flow / set_* ✓）=====
+    Label stateLbl
+    PlayerBar? pbar = null
+    CheckBox lyricBox                 // 「同时下载歌词」——只读它的勾选态 ✓ 不改它
+    DlSettings cfg                    // 只读 `cfg.workers`（引用语义 ⇒ 改设置立刻生效 ✓）
+    pri func():string outdirOf        // 输出目录活口（set_outdir_provider ✓）
+    pri func(Array[Array[string]], string, any, any, Array[string], int, int): Array[string] dlWorker
+
+    // ===== 下载窗口（本体在 dl_window.leno ✓；对外只经 dl_ref() ✓）=====
+    DlWindow? dl = null
+
+    // ===== 边下边播的下载状态（原 musicdl_gui 的模块级 gStream* ✓ 收进 struct）=====
+    //   流程：播放器置 wantStream ⇒ tick_playback 取走 ⇒ start_stream 起**单任务**下载 ⇒
+    //   start/progress/done 回灌 ✓
+    //   ⚠ 单任务（`dl_worker_shard(..., 0, 1)`）是**必须的**：多 worker 各写一段会乱序 ⇒
+    //     文件前缀不自洽、播放器读到空洞 ✗（见 dl_engine 的 dl_one 分片口径 ✓）
+    Channel? streamCh = null
+    Thread? streamThread = null
+    Channel? streamCmd = null
+    string streamTag = ""
+    bool streamRunning = false
+    Array[Array[string]] playRows = []   // 当前播放队列的**原始行**（起下载要用整行 ✓ 见 play_table）
+
+    // ==================== 接线 ====================
+    func set_dl_worker(func(Array[Array[string]], string, any, any, Array[string], int, int): Array[string] f) { dlWorker = f }
+    func set_outdir_provider(func():string f) { outdirOf = f }
+    // ⚠ 调**函数类型字段**的返回值是 `any`（实测 ✓）⇒ 收窄成 string 再用
+    pri func outdir(): string {
+        var d = outdirOf()
+        return d as string
+    }
+
+    // ==================== 只读口（宿主用 ✓）====================
+    func dl_ref(): DlWindow? { return dl }
+
+    // 还有"在下"的任务吗（决定主窗口能不能直接关 ✓）
+    func is_downloading(): bool {
+        if dl is DlWindow => w {
+            return w.open and w.started and not w.finished
+        }
+        return false
+    }
+
+    // 当前播放队列的原始行（"歌词面板点立即下载歌词"按显示名在其中找 ✓ 判据同口径）
+    func play_rows(): Array[Array[string]] { return playRows }
+
+    // 重算"本地已有"并回灌播放器（下完一首 / 删了文件之后调 ✓）
+    func sync_locals() {
+        if playRows.len() == 0 { return }
+        Array[string] locals = eng.resolve_locals(playRows, outdir())
+        if pbar is PlayerBar => b { b.set_locals(locals) }
+    }
+
+    // ==================== 输出目录（先建再写：write 到不存在的目录会抛 ✗ 见实录 B2）====================
+    pri func ensure_dir(): bool {
+        if dirs.exists(outdir()) { return true }
+        try {
+            dirs.mkdir_p(outdir())
+        } catch e {
+            stateLbl.set_text("无法创建输出目录：" + outdir())
+            SDL3.markFrameRedraw()
+            return false
+        }
+        return true
+    }
+
+    // 本轮要不要带歌词：看「同时下载歌词」的勾选态（**现读** ⇒ 改了立刻生效 ✓）
+    pri func lyric_flags(): Array[string] {
+        Array[string] flags = []
+        if lyricBox.is_checked() { flags.add("lyric") }
+        return flags
+    }
+
+    // 下载窗口已经开着？⇒ 置前 + 状态栏说明 + 返回 true（调用方据此**不重复开** ✓）
+    //   ★ 2026-10-07 改非模态后必须有：主窗口能继续点，而原先每点一次都会 `new` 一个新窗口 ✗
+    //   ⚠ 已有窗口在下**另一批**任务时不抢（抢掉 = 中断正在下的 ✗）⇒ 只置前 + 说明"先关掉它"
+    pri func reuse_dl_if_open(): bool {
+        // ★ 2026-10-09：窗口开着、但任务已被「清空」（空表 + 没在跑）⇒ **关掉它**，让新一批开新窗口 ✓
+        //   为什么：清空之后用户多半就是"再下一批"，此时若还按"已开着 ⇒ 只置前"处理，
+        //   他会被告知"先关掉下载窗口"（而窗口明明是空着的 ✗）；这一条把那个死角补掉 ✓
+        //   `close()` 只置 `open=false / closing=true`（空任务时它也不会发取消 ✓）⇒ 主循环下一帧销毁 ✓
+        if dl is DlWindow => e {
+            if e.open and e.jobs.len() == 0 and not e.started { e.close() }
+        }
+        if not dlw.reuse_if_open(dl) { return false }
+        string what = "下载窗口"
+        if dl is DlWindow => w {
+            if w.lyriconly { what = "下载歌词窗口" }
+        }
+        stateLbl.set_text(what + "已经开着（已切到前台）—— 要开始新的一批，请先关掉它")
+        SDL3.markFrameRedraw()
+        return true
+    }
+
+    // ==================== 开窗入口 ====================
+    //   "要下哪些歌"由宿主判定好再进来（勾选 / 选中行 / 格式过滤的提示都在宿主 ✓）
+    func start_download(Array[Array[string]] jobs) {
+        if reuse_dl_if_open() { return }       // ★ 一个应用只留一个下载窗口 ✓（非模态 ⇒ 必须自己管）
+        // ★ 2026-10-09 改（用户口径）：**空任务也开窗** —— 原先这里 `jobs.len() == 0` 直接 return，
+        //   于是标题栏那个下载图标只能弹一句"还没有要下载的歌" ✗（想先看看窗口 / 看看「历史」都进不去）
+        //   空任务的长相由窗口自己表达：开始按钮禁用 + 表格空文案 + info 说明怎么加任务（见 dl_window.build ✓）
+        if not ensure_dir() { return }
+        dl = dlw.open_download(jobs, lyric_flags(), outdir(), stateLbl, cfg.workers)   // 并行上限来自**设置** ✓
+        if jobs.len() == 0 {
+            stateLbl.set_text("下载窗口已打开（还没有任务 —— 勾选歌曲后点「下载勾选」）")
+            SDL3.markFrameRedraw()
+        }
+    }
+
+    // 只下歌词（右键菜单 / 已有音频时用）；空任务的提示由宿主先说 ✓
+    func open_lyric_only(Array[Array[string]] jobs) {
+        if reuse_dl_if_open() { return }       // 同上：右键"只下这一首的歌词"也不会开出第二个框 ✓
+        if not ensure_dir() { return }
+        dl = dlw.open_download(jobs, ["lyriconly"], outdir(), stateLbl, cfg.workers)   // 同上：上限来自设置 ✓
+    }
+
+    // ==================== 播放 / 边下边播（2026-10-09，移植自二创 LenoMusic-main ✓）====================
+    //   "当前界面显示的那张表"整张喂给播放器：已下载的直接播 ✓，没下过的边走边下边播 ✓
+    //   宿主只负责"取哪张表的行"（它才知道当前页 ✓）；队列三件套在这儿组：
+    //   显示名 / 本地路径（"" = 没下载 ⇒ 边下边播 ✓）/ 消毒基名（认领 .lrc ✓）
+    //   · `resolve_locals` **只扫一次目录**（几十上百行逐行 listdir 会退化成 O(行×目录项) ✗）
+    func play_table(Array[Array[string]] rows, int row) {
+        if row < 0 or row >= rows.len() { return }
+        if not ensure_dir() { return }
+        Array[string] names = []
+        Array[string] tags = []
+        for rows to r {
+            names.add(eng.songlabel(r))
+            tags.add(eng.base_of(r))
+        }
+        Array[string] locals = eng.resolve_locals(rows, outdir())
+        playRows = rows                                  // 起"边下边播"要用整行 ✓（见 start_stream）
+        bool started = false
+        if pbar is PlayerBar => b {
+            started = b.set_queue(names, locals, tags, outdir(), row)
+        }
+        if started {
+            stateLbl.set_text("播放：" + eng.songlabel(rows[row]) + "（表里共 " + _str(rows.len()) + " 首）")
+        } else {
+            stateLbl.set_text("打不开这首音频（文件坏了？或本机没有可用的音频设备）")
+        }
+        SDL3.markFrameRedraw()
+    }
+
+    // 宿主起"边下边播"用的**单任务**下载（顺序下这一首 ⇒ 文件一路变大 ✓ 见 streamCh 注释）
+    pri func start_stream(int i) {
+        if not ensure_dir() { return }
+        if i < 0 or i >= playRows.len() { return }
+        Array[string] one = playRows[i]
+        string tag = eng.songlabel(one)
+        if pbar is PlayerBar => b {
+            if b.queue_local(i) != "" { return }           // 本地已有 ⇒ 不必下（播放器自己会播 ✓）
+        }
+        if streamRunning and streamTag == tag { return }   // 同一首已在流 ⇒ 不重复起 ✗
+        // ⚠⚠ 同一首别让两个线程写**同一个路径**（并发写会把文件写坏 ✗✗）
+        //   下载窗口里正在下这首 ⇒ 不起流，明确说清（它下完 sync_locals 之后这首就是"本地已有" ✓）
+        if dl is DlWindow => w {
+            if w.open {
+                int k = 0
+                while k < w.jobs.len() {
+                    if eng.songlabel(w.jobs[k]) == tag {
+                        stateLbl.set_text("这首正在下载窗口里下着 —— 先别听（等它下完再点一次即可）")
+                        if pbar is PlayerBar => b2 { b2.fail_stream("这首正在下载窗口里下载中") }
+                        SDL3.markFrameRedraw()
+                        return
+                    }
+                    k = k + 1
+                }
+            }
+        }
+        streamTag = tag
+        streamRunning = true
+        streamCh = threads.channel(65536)
+        streamCmd = threads.channel(64)
+        Array[string] f = lyric_flags()
+        f.add("lyric")                                     // 边听边把歌词也带上（与试听同一口径 ✓）
+        // ⚠⚠ dlWorker 是**宿主传进来的函数值**（入口脚本的函数 ✓）—— 本文件自己的函数进不了线程 ✗
+        streamThread = threads.start(dlWorker, [one], outdir(), streamCh, streamCmd, f, 0, 1)
+        stateLbl.set_text("边下边播：" + tag + "（正在下载，边下边听）")
+        SDL3.markFrameRedraw()
+    }
+
+    // 边下边播的回信（通道式；随 tick_playback 排空 ✓）
+    //   消息格式见 dl_engine 头部：["start", 序, ?, 总, 路径] / ["progress", 序, 已下, 总, 路径]
+    //                              / ["done", 序, 已下, ?, 路径] / ["fail", 序, ?, ?, 原因]
+    pri func poll_streams() {
+        if streamCh is Channel {
+            var m = streamCh.try_receive()
+            while m != null {
+                if m is Array => mv {
+                    string kind = _str(mv[0])
+                    if kind == "start" {
+                        string p = _str(mv[4])
+                        if p != "" {
+                            if pbar is PlayerBar => b { b.begin_stream(p) }
+                        }
+                    } else if kind == "progress" {
+                        int got = _int(mv[2])
+                        int tot = _int(mv[3])
+                        if pbar is PlayerBar => b { b.feed_buffer(got, tot) }
+                    } else if kind == "done" {
+                        string p = _str(mv[4])
+                        // ★ 去 `@` 改名（2026-10-09，对齐二创）：worker 那边**通常已经改好了**；
+                        //   但边下边播时它改不动 —— Windows 下文件正被播放器读着 ✗
+                        //   ⇒ 这里由本模块补做，且必须按这个顺序：**先让播放器松手 → 改名 → 用新文件续播** ✓
+                        string bp = dirs.basename(p)
+                        if bp != "" and bp.slice(0, 0) == "@" {
+                            float pos = -1.0
+                            if pbar is PlayerBar => b { pos = b.stream_pause_for_rename() }
+                            string fin = dirs.join(outdir(), bp.slice(1, bp.len()))
+                            bool renamed = false
+                            try {
+                                if files.exists(fin) { files.delete(fin) }
+                                dirs.rename(p, fin)
+                                p = fin
+                                renamed = true
+                            } catch e {
+                                renamed = false            // 改不动（别的程序占着）⇒ 保留 `@` 名 ✓ 不硬来 ✗
+                            }
+                            if renamed {
+                                if pbar is PlayerBar => b { b.stream_switched(fin, pos) }
+                            }
+                        }
+                        if pbar is PlayerBar => b { b.finish_stream(p) }
+                        streamRunning = false
+                        sync_locals()                      // 这首已经下完 ⇒ 刷一遍"本地已有" ✓
+                        stateLbl.set_text("整首下载完成：" + streamTag + "（可以随便拖了）")
+                    } else if kind == "fail" {
+                        if pbar is PlayerBar => b { b.fail_stream(_str(mv[4])) }
+                        streamRunning = false
+                        stateLbl.set_text("这首的下载没成功：" + _str(mv[4]))
+                    }
+                }
+                m = streamCh.try_receive()
+            }
+        }
+    }
+
+    // ==================== 宿主 120ms 一拍各调一次（次序：playback 在前 ✓）====================
+    // ① 边下边播：先问播放器"要不要下当前这首"（取走后起线程 ✓），再排空那条下载通道 ✓
+    func tick_playback() {
+        if pbar is PlayerBar => b {
+            int si = b.take_stream_request()
+            if si >= 0 { start_stream(si) }
+        }
+        poll_streams()
+    }
+
+    // ⚠ 下载窗口的"开始"必须由**本模块**真正起线程：线程入口只能是入口脚本的具名全局函数
+    //   （语言硬约束 ✓ 见文件头 ⚠⚠），所以窗口只置 `wantStart`，这里在定时器里接手 ⇒ 谁起线程谁持有入口 ✓
+    pri func dl_start_if_wanted() {
+        if dl is DlWindow => w {
+            // ★ 右键「重试」（2026-10-08 ✓）：窗口只列**下标**，起线程仍由这里做（语言硬约束 ✓）
+            //   技巧：单个下标也走 `dl_entry_shard(jobs, …, shard = i, nshards = jobs.len())` ——
+            //     该 worker 只领 `下标 % nshards == shard` 那一份 ⇒ 正好只下第 i 首 ✓
+            //     而且它发消息时带的是**全量下标** ✓ ⇒ 窗口那张任务表天然对位 ✓（引擎一行都不用改 ✓）
+            //   ⚠ 每个 worker 一条命令通道：暂停/取消得**人人发到**（一条被谁取走别人就收不到 ✗）
+            if w.retryList.len() > 0 {
+                Array[int] idxs = w.retryList
+                w.retryList = []
+                Channel rch = threads.channel(65536)
+                Array[Thread] rts = []
+                Array[Channel] rcs = []
+                for idxs to r {
+                    Channel rcmd = threads.channel(64)
+                    rts.add(threads.start(dlWorker, w.jobs, outdir(), rch, rcmd, w.flags, r, w.jobs.len()))
+                    rcs.add(rcmd)
+                }
+                w.attach(rts, rch, rcs)
+            }
+            if not w.wantStart { return }
+            w.wantStart = false
+            // **多首歌并行**：切成 n 份，n 个 worker 同时下（切法与取舍见 dl_engine.dl_entry_shard ✓）
+            //   上限来自**设置**（dl_settings.leno ✓）；任务数比上限少就少开 ✓
+            int n = eng.dl_workers(w.jobs.len(), cfg.workers)
+            Channel msgch = threads.channel(65536)   // 所有 worker 共用（消息带全量下标 ⇒ UI 按 idx 归位 ✓）
+            Array[Thread] ts = []
+            Array[Channel] cs = []
+            for n to k {
+                Channel cmdch = threads.channel(64)  // **每个 worker 一条**命令通道（暂停/取消要人人发到 ✓）
+                ts.add(threads.start(dlWorker, w.jobs, outdir(), msgch, cmdch, w.flags, k, n))
+                cs.add(cmdch)
+            }
+            w.attach(ts, msgch, cs)
+        }
+    }
+
+    // ② 下载窗口：起线程（点了"开始"/重试）+ 排空通道刷新窗口（窗口本体在 dl_window.leno ✓）
+    func tick_download() {
+        dl_start_if_wanted()
+        if dl is DlWindow => w {
+            if w.open { w.tick() }
+        }
+    }
+}
+
+// 工厂：建编排器（控件引用由宿主给 ✓；worker 与目录活口随后 set —— 见文件头"宿主给" ✓）
+export func create_dl_flow(Label hostLbl, PlayerBar pbar, CheckBox lyricChk, DlSettings settings): DlFlow {
+    DlFlow f = new DlFlow()
+    f.stateLbl = hostLbl
+    f.pbar = pbar
+    f.lyricBox = lyricChk
+    f.cfg = settings
+    return f
+}
