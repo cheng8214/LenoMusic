@@ -275,458 +275,11 @@ struct MusicDlApp {
         if bang is BangPage => bp { bp.tick() }
         // ★ 边下边播（2026-09 起）：播放器要歌 ⇒ 起**单任务**下载 + 排空回信通道（编排搬去 dl_flow.leno ✓）
         if flow is DlFlow => f { f.tick_playback() }
-        // ★ 空任务开窗 自检（`DDLOPEN=1`，见 gDlOpenCheck 注释 ✓）：第 3 拍调一次标题栏那个入口
-        if gDlOpenCheck {
-            gDlOpenTick = gDlOpenTick - 1
-            if gDlOpenTick <= 0 {
-                onDownloadAction()                    // ← 就是标题栏那个「下载」图标做的事
-                bool opened = false
-                int n = -1
-                if flow is DlFlow => fl0 {
-                    DlWindow? dw = fl0.dl_ref()
-                    if dw is DlWindow => w {
-                        opened = w.open
-                        n = w.jobs.len()
-                        if gDlOpenHist {
-                            w.tabs.set_active(1)      // 切到「历史」页签（只为看图 ✓）
-                            SDL3.markFrameRedraw()
-                        }
-                    }
-                }
-                bool pass = opened and n == 0
-                print("[ddlopen] " + (if pass then "通过" else "**不通过**") + "：窗口开着=" + _str(opened)
-                      + " 任务=" + _str(n) + "\n")
-                gDlOpenCheck = false
-                if dlShot != "" {
-                    dlShotAt = dlFrames + 3
-                } eif not gDlOpenStay {
-                    _exit(0)
-                }
-            }
-        }
-        // ★ 下载 + 历史 自检（`DDL=<关键词>`）：搜索 → 下第 1 首 → 等跑完 → 切「历史」页 → 打印断言
-        //   为什么要它：这条链是"联网 × 线程 × 落盘 × 写历史" —— "下完了但历史没记上"这种问题
-        //   光看代码发现不了（notehistory 挂在消息分支上 ✗），必须真跑一遍 ✓
-        //   ⚠ 挑**免费曲**的关键词（付费曲会因取直链失败而记成"失败"，那是另一回事 ✗）
-        if gAutoDl != "" {
-            if gDlStep == 0 {
-                if page is SearchPage => sp0 { sp0.start_search(gAutoDl) }   // 填词 + 起搜（= 按回车 ✓）
-                gDlStep = 1
-                gDlWait = 0
-            } else if gDlStep == 1 {
-                gDlWait = gDlWait + 1
-                if not search_busy() and searchRowCount() > 0 {
-                    // 挑**第一首可下的**（有体积 = 拿得到直链 ✓）：否则撞上付费曲会记成"失败"，
-                    //   那测的就不是"历史有没有记上"了 ✗
-                    Array[Array[string]] pick = []
-                    Array[Array[string]] all = search_rows_all()
-                    for all to s {
-                        if pick.len() == 0 and eng.has_size(s) { pick.add(s) }
-                    }
-                    if pick.len() > 0 {
-                        if flow is DlFlow => fl1 { fl1.start_download(pick) }   // 只下 1 首（可控、快 ✓）
-                        gDlStep = 2
-                        gDlWait = 0
-                    } else if gDlWait > 500 {
-                        print("[ddl] **不通过**：这一页没有可下的行（换关键词，或等接口恢复）\n")
-                        gAutoDl = ""
-                        _exit(1)
-                    }
-                } else if gDlWait > 500 {
-                    print("[ddl] **不通过**：等不到搜索结果（" + gAutoDl + "）\n")
-                    gAutoDl = ""
-                    _exit(1)
-                }
-            } else if gDlStep == 2 {
-                gDlWait = gDlWait + 1
-                bool fin = false
-                if flow is DlFlow => fl2 {
-                    DlWindow? dw = fl2.dl_ref()
-                    if dw is DlWindow => w { if w.finished { fin = true } }
-                }
-                if fin {
-                    gDlStep = 3
-                    gDlWait = 0
-                } else if gDlWait > 1000 {
-                    print("[ddl] **不通过**：下载没跑完（超时）\n")
-                    gAutoDl = ""
-                    _exit(1)
-                }
-            } else if gDlStep == 3 {
-                int n = 0
-                string first = ""
-                string st = ""
-                string sz = ""
-                if flow is DlFlow => fl3 {
-                    DlWindow? dw = fl3.dl_ref()
-                    if dw is DlWindow => w {
-                        w.tabs.set_active(1)              // 切到「历史」页（顺便验证页签可用 ✓）
-                        n = w.histItems.len()
-                        if n > 0 {
-                            first = hist.hlabel(w.histItems[0])
-                            st = hist.hstatus(w.histItems[0])
-                            sz = hist.hsize(w.histItems[0])
-                        }
-                    }
-                }
-                bool ok = n > 0 and st == "完成"
-                print("[ddl] " + (if ok then "通过" else "**不通过**") + "：历史 " + _str(n) + " 条　最新="
-                      + first + " | " + sz + " | " + st + "\n")
-                gAutoDl = ""
-                if dlShot == "" { _exit(0) } else { dlShotAt = dlFrames + 2 }
-            }
-        }
-        // 退出路径自检（见 gExitTicks 注释 ✓）
-        // 播放自检（见 gPlayStep 注释 ✓）：先播一首**本地**、再切一首**没下载**的（复现"进度条不动" ✓）
-        //   全**离线**：A/B 两首都拿下载目录里已有的音频 ⇒ 不需要联网（只有声音需要一个音频设备 ✓）
-        if gPlayStep > 0 {
-            gPlayTick = gPlayTick + 1
-            if gPlayStep == 1 {
-                // ① 扫一遍下载目录，拿两首真音频（A = 当"本地那首"、B = 当"边下边播那首"）
-                if pbar is PlayerBar => b {
-                    b.rescan()
-                    if b.p is Player => q {
-                        int need = 2                       // 离线版要 A/B 两个文件；联网版只用 A ✓
-                        if gPlayMode == 2 { need = 1 }
-                        if q.list.len() >= need {
-                            gPlayFileA = q.list[0]
-                            if q.list.len() >= 2 { gPlayFileB = q.list[1] }
-                            q.set_volume(0.0)        // 自检**不出声**（音量不写盘 ✓ 见 set_volume 的注释 ✓）
-                            print("[dplay] 先播本地：" + dirs.basename(gPlayFileA)
-                                  + (if gPlayMode == 2 then "（联网版：待会儿播搜索结果里没下载的那首 ✓）"
-                                     else "　B=" + dirs.basename(gPlayFileB) + "（离线版：B 当「流」顶一手 ✓）") + "\n")
-                            b.set_queue(gPlayNames, [gPlayFileA, ""], gPlayNames, outdir, 0)
-                            gPlayStep = 2
-                            gPlayTick = 0
-                        } else {
-                            print("[dplay] 跳过：下载目录里音频太少（离线版要 2 首 / 联网版要 1 首 ✓）\n")
-                            gPlayStep = 0
-                            if dlShot == "" { SDL3.requestExit() }
-                        }
-                    }
-                }
-            } eif gPlayStep == 2 and gPlayTick >= 20 {
-                // ② 本地那首播了约 2.4 秒 ⇒ 记下它的"位置 / 时长"（等会儿和流那边对照 ✓）
-                if pbar is PlayerBar => b {
-                    gPlayLocalPos = b.pos_secs()
-                    gPlayLocalDur = b.dur_secs()
-                    print("[dplay] 本地态：位置=" + _str(_int(gPlayLocalPos)) + "s　时长=" + _str(_int(gPlayLocalDur))
-                          + "s　在流=" + _str(b.is_streaming()) + "\n")
-                    if gPlayLocalPos <= 0.0 {
-                        print("[dplay] 跳过：本地那首没放起来（本机没音频设备？）⇒ 这条自检要真播才行\n")
-                        gPlayStep = 0
-                        if dlShot == "" { SDL3.requestExit() }
-                    } else {
-                        if gPlayMode == 2 {
-                            gPlayStep = 4                  // 联网版：先去等搜索结果（见下 ✓）
-                            gPlayTick = 0
-                        } else {
-                            // ③ 切到**没有本地文件**的那一行 ⇒ 播放器走"边下边播"分支（= 用户点网络播放 ✓）
-                            b.set_queue(gPlayNames, [gPlayFileA, ""], gPlayNames, outdir, 1)
-                            // ④ 再手动喂"首片落盘"这一步 —— 宿主收到 dl_engine 的 "start" 消息时调的就是它 ✓
-                            //    （离线复现的关键：真正的流是文件一路变大，这里用 B 这个完整文件顶上，
-                            //      只验"**流的音频对象到底建没建起来**"这一个点 ✓）
-                            b.begin_stream(gPlayFileB)
-                            gPlayStep = 3
-                            gPlayTick = 0
-                        }
-                    }
-                }
-            } eif gPlayStep == 4 {
-                // 联网版：等搜索结果（配 `DSEARCH=<词>` ✓）⇒ 挑**第一首没下载的**，走真链路 ✓
-                Array[Array[string]] srows = search_rows_all()
-                if srows.len() > 0 {
-                    Array[string] lls2 = eng.resolve_locals(srows, outdir)
-                    int i3 = 0
-                    int pick = -1
-                    while i3 < srows.len() {
-                        if lls2[i3] == "" and pick < 0 { pick = i3 }
-                        i3 = i3 + 1
-                    }
-                    if pick < 0 {
-                        print("[dplay] 跳过：这批搜索结果**全都已下载**（联网版要一首没下过的 ✓）\n")
-                        gPlayStep = 0
-                        if dlShot == "" { SDL3.requestExit() }
-                    } else {
-                        print("[dplay] 联网版：播搜索结果第 " + _str(pick) + " 行（没下载 ⇒ 真边下边播 ✓）\n")
-                        playFrom(0, pick)
-                        gPlayStep = 3
-                        gPlayTick = 0
-                    }
-                } eif gPlayTick > 400 {
-                    print("[dplay] 跳过：等了 400 拍搜索结果还没回来（联网自检，网络不通就算了 ✓）\n")
-                    gPlayStep = 0
-                    if dlShot == "" { SDL3.requestExit() }
-                }
-            } eif gPlayStep == 3 {
-                if pbar is PlayerBar => b {
-                    if gPlayTick == 8 or gPlayTick == 24 or gPlayTick == 40 or gPlayTick == 56
-                       or gPlayTick == 88 or gPlayTick == 120 {
-                        print("[dplay] 流 t=" + _str(_int(gPlayTick)) + "：位置=" + _str(_int(b.pos_secs()))
-                              + "s　时长=" + _str(_int(b.dur_secs())) + "s　在流=" + _str(b.is_streaming())
-                              + "　已下=" + _str(_int(b.buf_ratio() * 100.0)) + "%\n")
-                    }
-                    // 联网版要等首片落盘（下载起线程 + 拉第一片）⇒ 判定的时间点给宽一点 ✓
-                    int due = if gPlayMode == 2 then 120 else 64
-                    if gPlayTick >= due {
-                        float p2 = b.pos_secs()
-                        float d2 = b.dur_secs()
-                        // 期望：位置自己在走（>1s ✓）＋ 时长是**这一首**的（≠ 上一首本地那首 ✓）
-                        bool okp = p2 > 1.0 and d2 > 0.0 and _int(d2) != _int(gPlayLocalDur)
-                        print("[dplay] " + (if okp then "通过" else "**不通过**")
-                              + "：切到边下边播后 位置=" + _str(_int(p2)) + "s　时长=" + _str(_int(d2)) + "s"
-                              + "（上一首本地=" + _str(_int(gPlayLocalDur)) + "s"
-                              + " ⇒ 时长对上上一首 = 流的声**没建起来** ✗）\n")
-                        gPlayStep = 0
-                        if dlShot == "" { SDL3.requestExit() }
-                    }
-                }
-            }
-        }
-        // 「关于」弹窗自检（见 gAboutTick 注释 ✓）：第 N 拍自动打开它 ✓
-        if gAboutTick > 0 {
-            gAboutTick = gAboutTick - 1
-            if gAboutTick == 0 { onAbout() }
-        }
-        // 悬停自检（见 gHoverTick 注释 ✓）：把指针注入到播放键上 ✓
-        if gHoverTick > 0 {
-            gHoverTick = gHoverTick - 1
-            if gHoverTick == 0 {
-                if pbar is PlayerBar => b {
-                    SDL3.testMoveAt(win.getID(), b.btnPlay.get_x() + b.btnPlay.get_w() / 2.0,
-                                                  b.btnPlay.get_y() + b.btnPlay.get_h() / 2.0)
-                    print("[dhover] 指针已移到播放键上\n")
-                }
-            }
-        }
-        // 歌词浮层自检（见 gLrcTick 注释 ✓）：第 2 拍把「词」面板打开（配 DSHOT 截它的样子 ✓）
-        if gLrcTick > 0 {
-            gLrcTick = gLrcTick - 1
-            if gLrcTick == 0 {
-                if pbar is PlayerBar => b { b.toggle_lrc() }
-            }
-        }
-        // 歌单点击自检（见 gClickStep 注释 ✓）：注入真实点击 ⇒ 断言到底有没有落到控件上 ✓
-        if gClickStep > 0 {
-            int st = gClickStep
-            gClickStep = gClickStep + 1
-            if pbar is PlayerBar => b {
-                int wid = win.getID()
-                if st == 1 {
-                    // ⚠ 先注入**移动**再点击：只发 down/up 时按钮的 hover 还不成立 ⇒ 点击会**偶发不生效** ✗
-                    //   （实测过：同一坐标有时开门、有时不开 ✓ 真人点之前总会有移动 ✓）
-                    float bx = b.btnList.get_x() + b.btnList.get_w() / 2.0
-                    float by = b.btnList.get_y() + b.btnList.get_h() / 2.0
-                    SDL3.testMoveAt(wid, bx, by)
-                    bool ok = SDL3.testClickAt(wid, bx, by)
-                    print("[dpclick] 注入点「列表」按钮 ok=" + _str(ok)
-                          + "  按钮矩形=" + _str(_int(b.btnList.get_x())) + "," + _str(_int(b.btnList.get_y()))
-                          + " " + _str(_int(b.btnList.get_w())) + "x" + _str(_int(b.btnList.get_h())) + "\n")
-                } eif st == 4 {
-                    print("[dpclick] 点完按钮：popOpen=" + _str(b.popOpen)
-                          + "  歌单矩形=" + _str(_int(b.lb.x)) + "," + _str(_int(b.lb.y))
-                          + " " + _str(_int(b.lb.w)) + "x" + _str(_int(b.lb.h)) + "\n")
-                    // 点歌单第 3 行中点（itemH=22 ✓ 见 LIST_ROW）；同样先移动再点 ✓
-                    float rx = b.lb.x + 40.0
-                    float ry = b.lb.y + 4.0 + 22.0 * 2.0 + 11.0
-                    SDL3.testMoveAt(wid, rx, ry)
-                    bool ok = SDL3.testClickAt(wid, rx, ry)
-                    print("[dpclick] 注入点歌单第 3 行 ok=" + _str(ok) + "\n")
-                } eif st == 8 {
-                    gClickRow3 = b.cur_index()
-                    print("[dpclick] 点歌单第 3 行 -> 下标=" + _str(gClickRow3) + "（期望 2）\n")
-                    // 再点**当前正在播的那一行**（第 1 行）：这里最容易"看着没反应" ✗
-                    //   （`ListBox` 单选模式下点已选中行**不回调** ✓ ⇒ 靠 on_event 自己算行号 ✓）
-                    SDL3.testMoveAt(wid, b.lb.x + 40.0, b.lb.y + 4.0 + 11.0)
-                    bool ok = SDL3.testClickAt(wid, b.lb.x + 40.0, b.lb.y + 4.0 + 11.0)
-                    print("[dpclick] 注入点「当前行」ok=" + _str(ok) + "\n")
-                } eif st == 12 {
-                    bool pass = gClickRow3 == 2 and b.cur_index() == 0
-                    print("[dpclick] " + (if pass then "通过" else "**不通过**")
-                          + "：点第 3 行 -> 下标 " + _str(gClickRow3) + "（期望 2）；"
-                          + "再点当前行 -> 下标 " + _str(b.cur_index()) + "（期望 0）\n")
-                    SDL3.requestExit()
-                }
-            }
-        }
-        // 进度条点击自检（见 gSeekStep 注释 ✓）：注入两次真实点击 ⇒ 断言"只有点在条上才跳转" ✓
-        if gSeekStep > 0 {
-            int st = gSeekStep
-            gSeekStep = gSeekStep + 1
-            if pbar is PlayerBar => b {
-                int wid = win.getID()
-                float sx = b.seekBar.get_x() + 200.0       // 横向取画布中段（条子铺满整宽 ✓ 横向不是判据 ✓）
-                float sy = b.seekBar.get_y()
-                float ch = b.seekBar.get_h()
-                if st == 2 {
-                    // ① 点**条子外面**（画布顶端往下 2px）：画布整行高 52、条子只占中间那条 ✓
-                    stateLbl.set_text("")                  // 先清空 —— 要断言"一个字都没写"⇒ 得先没有 ✓
-                    SDL3.testMoveAt(wid, sx, sy + 2.0)     // ⚠ 先 move 再 click（同 DPCLICK 的实测教训 ✓）
-                    bool ok = SDL3.testClickAt(wid, sx, sy + 2.0)
-                    print("[dseek] 注入点「条外」ok=" + _str(ok)
-                          + "  画布 " + _str(_int(b.seekBar.get_w())) + "x" + _str(_int(ch))
-                          + "  点 y=2（条子中心 ≈ " + _str(_int(ch / 2.0)) + "）\n")
-                } eif st == 3 {
-                    gSeekOffText = stateLbl.get_text()      // 条外点击后的状态栏（期望空串 ✓）
-                    gSeekOffFx = b.clickFx                  // 涟漪该冒出来（期望 ≥ 0 ✓）
-                    gSeekOffCy = b.clickCy                  // 且**就地**（期望 ≈ 2；条子中心是 26 ✓）
-                    // ② 点**条子正中**：这次必须真去跳（没播过 ⇒ 状态栏会写"先播一首再拖进度"✓）
-                    stateLbl.set_text("")
-                    SDL3.testMoveAt(wid, sx, sy + ch / 2.0)
-                    bool ok = SDL3.testClickAt(wid, sx, sy + ch / 2.0)
-                    print("[dseek] 注入点「条上」ok=" + _str(ok) + "\n")
-                } eif st == 4 {
-                    string onBar = stateLbl.get_text()
-                    // 涟漪的纵向必须**落在点击处**（≈2）：不是条子中心（≈26）⇒ 证明"就地冒"✓
-                    bool local = _int(gSeekOffCy) <= 6
-                    bool pass = gSeekOffText == "" and gSeekOffFx >= 0.0 and local and onBar != ""
-                    print("[dseek] " + (if pass then "通过" else "**不通过**")
-                          + "：条外点击 -> 状态栏=\"" + gSeekOffText + "\"（期望空 ⇒ 只留涟漪）"
-                          + " 涟漪=" + (if gSeekOffFx >= 0.0 then "有" else "没有")
-                          + " 纵坐标=" + _str(_int(gSeekOffCy)) + "（期望 ≈2 就地，条子中心 " + _str(_int(ch / 2.0)) + "）"
-                          + "；条上点击 -> 状态栏=\"" + onBar + "\"（期望非空 ⇒ 真去跳）\n")
-                    SDL3.requestExit()
-                }
-            }
-        }
-        // 右键菜单自检（见 gCtxStep 注释 ✓）：注入**真实右键** ⇒ 断言菜单建在正确的数据源上
-        if gCtxStep > 0 {
-            int st = gCtxStep
-            gCtxStep = gCtxStep + 1
-            if st == 1 {
-                int wid = win.getID()
-                if gCtxTarget == 2 or gCtxTarget == 4 {
-                    // 目标 2 = **搜索表空白处**（row<0）：不必联网、不必先搜 ⇒ 专测"搜索页那条线还通着"
-                    // 目标 4 = 同上注入（它只要"菜单开着"这个前提 ✓ 用空白处 ⇒ 免联网 ✓）
-                    float bx = searchTableRef().get_x() + 200.0
-                    float by = searchTableRef().get_y() + 200.0
-                    SDL3.testMoveAt(wid, bx, by)
-                    bool ok = SDL3.testRightClickAt(wid, bx, by)
-                    print("[dctx] 注入右键到搜索表空白处 ok=" + _str(ok)
-                          + (if gCtxTarget == 4 then "（目标 4：接着会切页）" else "") + "\n")
-                } else if gCtxTarget == 3 {
-                    // 目标 3 = **只测动作**（不点鼠标）：榜单第 0 行 ⇒ 「搜索这首歌（跳到搜索页）」
-                    //   ⚠ 要配 DBANG=1 跑：否则当前页已经是搜索页，set_active(0) 不会触发切页回调 ✗
-                    if bangRowCount() == 0 {
-                        gCtxStep = 1        // 等榜单行（联网）✓
-                    } else {
-                        menuCtx = 1
-                        onMenu(0, "searchthis")
-                        print("[dctx] 目标 3：已调用菜单动作 searchthis\n")
-                    }
-                } else if bangRowCount() == 0 {
-                    gCtxStep = 1            // 榜单行还没拉回来（联网）⇒ 下一拍再试 ✓
-                } else {
-                    // 目标 1 = 榜单表第 0 行：y = 表头 30 + 行高中点 13（row_h=26 ✓ 见 createTable）
-                    float bx = bangTableRef().get_x() + 120.0
-                    float by = bangTableRef().get_y() + 30.0 + 13.0
-                    SDL3.testMoveAt(wid, bx, by)
-                    bool ok = SDL3.testRightClickAt(wid, bx, by)
-                    print("[dctx] 注入右键到榜单表第 0 行 ok=" + _str(ok)
-                          + "  位置=" + _str(_int(bx)) + "," + _str(_int(by)) + "\n")
-                }
-            } eif st == 3 {
-                // 期望：榜单表 ⇒ menuCtx=1 / row=0（那一行）；搜索表空白 ⇒ menuCtx=0 / row<0 ✓
-                bool pass = false
-                if gCtxTarget == 2 {
-                    pass = gCtxSeen == 0 and gCtxRowSeen < 0
-                    print("[dctx] " + (if pass then "通过" else "**不通过**")
-                          + "：目标=2 -> buildMenu(menuCtx=" + _str(gCtxSeen) + ", row=" + _str(gCtxRowSeen) + ")\n")
-                } else if gCtxTarget == 3 {
-                    // 期望：切到搜索页（curPage=0）+ 关键词填成"歌名 歌手" + 真的起了搜索 ✓
-                    pass = curPage == 0 and search_keyword_now().trim() != "" and search_busy()
-                    print("[dctx] " + (if pass then "通过" else "**不通过**")
-                          + "：目标=3 -> 切页后 curPage=" + _str(curPage)
-                          + "  关键词=\"" + search_keyword_now() + "\""
-                          + "  搜索中=" + _str(search_busy()) + "\n")
-                } else if gCtxTarget == 4 {
-                    // 目标 4 = **切页必须把残留的右击菜单收掉**（2026-10-09 框架修复的回归断言 ✓）
-                    //   实测过的 bug：菜单由窗口第二遍统一绘制、只认 isOpen() ⇒ 切页后**照旧显示**，
-                    //   而隐藏页收不到事件 ⇒ **点不动也关不掉** ✗（用户原话见 sdl_tab.closePopups ✓）
-                    //   修法：TabControl 切页时调 menu.closeContextMenus(hwnd) ✓
-                    //   ⚠ 断言就写在**同一拍**：`set_active` 是同步调用（closePopups 立刻跑完 ✓），
-                    //     而本回调是**事件驱动**的、不是每帧都来 ⇒ 靠"下一拍再断言"会等不到 ✗
-                    gCtxWasOpen = searchTableRef().get_context_menu().isOpen()
-                    tab.set_active(1)                                  // ← 真的切一次页 ✓
-                    bool nowOpen4 = searchTableRef().get_context_menu().isOpen()
-                    pass = gCtxWasOpen and not nowOpen4 and curPage == 1
-                    print("[dctx] " + (if pass then "通过" else "**不通过**")
-                          + "：目标=4 -> 切页前菜单开着=" + _str(gCtxWasOpen)
-                          + "  切页后开着=" + _str(nowOpen4) + "（期望 false）"
-                          + "  当前页=" + _str(curPage) + "（期望 1）\n")
-                } else {
-                    pass = gCtxSeen == 1 and gCtxRowSeen == 0
-                    print("[dctx] " + (if pass then "通过" else "**不通过**")
-                          + "：目标=1 -> buildMenu(menuCtx=" + _str(gCtxSeen) + ", row=" + _str(gCtxRowSeen) + ")\n")
-                }
-                // ⚠ 开着 DSHOT 时**别抢着退**：让截图钩子先截到"菜单正开着"的样子 ✓（与 DHOVER 同一套 ✓）
-                if dlShot == "" { SDL3.requestExit() }
-            }
-        }
-        // 双击=试听 自检（见 gDblTarget 注释 ✓）：注入两次左键（框架按 400ms/10px 阈值判双击 ✓）
-        //   ⚠ 为什么必须有：这条改动是**改语义**（下载 → 试听），而"双击到底还有没有反应"光看代码
-        //     看不出来（框架的 dbl 判定在 mouseDown 里做、还要过复选框列 / 表头 / 列重排那几道闸 ✓）
-        if gDblStep > 0 {
-            int dblSt = gDblStep
-            gDblStep = gDblStep + 1
-            if dblSt == 1 {
-                // 先等"有行"（联网 ✓）：表空了就点不到行 ⇒ 停在 1 重试（与 gCtxStep 同一手法 ✓）
-                bool hasRow = searchRowCount() > 0
-                if gDblTarget == 2 { hasRow = bangRowCount() > 0 }
-                if not hasRow {
-                    gDblStep = 1
-                    gDblWait = gDblWait + 1
-                    // ⚠ 不能无限等：接口被限流 / 关键词无匹配时表会一直空 ⇒ 约 36 秒后报"没等到行"收摊 ✓
-                    if gDblWait > 300 {
-                        print("[ddbl] **不通过**：等了 " + _str(gDblWait) + " 拍还没有行（搜索/榜单没回来）-> 没法注入\n")
-                        gDblStep = 0
-                        SDL3.requestExit()
-                    }
-                } else {
-                    Table dt = searchTableRef()
-                    if gDblTarget == 2 { dt = bangTableRef() }
-                    int wid = win.getID()
-                    // 列宽：搜索表 [40,280,…] / 榜单表 [40,300,…] ⇒ x 偏 200 / 150 都稳落在「歌名」列 ✓
-                    // 行 y = 表头 30 + 行高 26 的中点 13（与 DCTX 目标 1 同一算法 ✓）
-                    float cx2 = dt.get_x() + 200.0
-                    float cy2 = dt.get_y() + 30.0 + 13.0
-                    SDL3.testMoveAt(wid, cx2, cy2)
-                    bool ok1 = SDL3.testClickAt(wid, cx2, cy2)
-                    bool ok2 = SDL3.testClickAt(wid, cx2, cy2)
-                    print("[ddbl] 注入双击到" + (if gDblTarget == 2 then "榜单表" else "搜索表")
-                          + "第 0 行 ok=" + _str(ok1 and ok2)
-                          + "  位置=" + _str(_int(cx2)) + "," + _str(_int(cy2)) + "\n")
-                }
-            } eif dblSt == 4 {
-                // 期望：起了**播放队列**（表已喂进去 ✓），且**没**开下载窗口 ✓
-                //   ★ 2026-10-09 二次改：双击从"试听（前一段）"变成"播放整表（边下边播）"⇒ 断言跟着变
-                int qn = 0
-                if pbar is PlayerBar => b { qn = b.queue_count() }
-                DlWindow? dw = null
-                if flow is DlFlow => f { dw = f.dl_ref() }
-                bool dlOpen = dw is DlWindow
-                bool ok = qn > 0 and not dlOpen
-                print("[ddbl] " + (if ok then "通过" else "**不通过**")
-                      + "：目标=" + _str(gDblTarget) + " -> 播放队列入队=" + _str(qn) + " 首"
-                      + "  下载窗口=" + _str(dlOpen) + "（期望 false）"
-                      + "  状态栏=\"" + stateLbl.get_text() + "\"\n")
-                if dlShot == "" { SDL3.requestExit() }
-            }
-        }
-        if gExitTicks > 0 {
-            gExitTicks = gExitTicks - 1
-            if gExitTicks == 0 {
-                print("[diag] 走正常退出路径（requestExit）\n")
-                SDL3.requestExit()
-            }
-        }
-        // 搜索自检（见 gAutoSearch 注释 ✓）：第 2 拍界面已建好 ⇒ 自动搜一次
-        if gAutoSearch != "" {
-            gAutoSearchTick = gAutoSearchTick + 1
-            if gAutoSearchTick == 2 {
-                if page is SearchPage => sp3 { sp3.start_search(gAutoSearch) }   // 填词 + 起搜（= 按回车 ✓）
-            }
-        }
+        // ===== 无头自检钩子：全部收口到下面四个方法（2026-10-11 ✓ 一个都不开 ⇒ 每拍 4 次判断零成本）=====
+        selfcheck_dl_tick()        // DDLOPEN（空任务开窗）/ DDL（搜索 -> 下 1 首 -> 查历史）
+        selfcheck_play_tick()      // DPLAY（播放/边下边播）/ 关于 / 悬停 / 歌词浮层
+        selfcheck_click_tick()     // DPCLICK / DSEEK / DCTX / DDBL / 退出路径
+        selfcheck_search_tick()    // DSEARCH（自动搜索）
         // ★ 歌词面板里点了"立即下载歌词" ⇒ 由**本文件**去下（要起线程 + 开下载窗口，只有这里能做 ✓）
         //   ⚠ 拿得到歌曲 ID 的前提：当前这首**在搜索结果里**（试听时记下的那行 ✓ gPrevRow）
         //     列表里的歌（磁盘文件名）没有 ID ✗ ⇒ 老实说清"去搜索结果里右键"✓ 不瞎猜 ✗
@@ -1761,6 +1314,475 @@ struct MusicDlApp {
         //     再读它们（滑块值 / 勾选框）不安全 ⇒ 攒批的落盘一律放在 handleEvent 的退出分支里 ✓
         shutdownAudio()
         SDL3.ttfQuit()
+    }
+
+    // ==================== 无头自检钩子（onTick 的自检块收口 ✓ 2026-10-11）====================
+    //   全部由环境变量驱动（见各 gXxx 全局的注释 ✓）；一个都没开时每拍只做几次判断 ⇒ 零成本 ✓
+    //   ⚠ 四个方法之间的**相对次序**与收口前一致（有的断言依赖前一拍留下的状态 ✓）⇒ 别调换调用顺序 ✗
+    func selfcheck_dl_tick() {
+        // ★ 空任务开窗 自检（`DDLOPEN=1`，见 gDlOpenCheck 注释 ✓）：第 3 拍调一次标题栏那个入口
+        if gDlOpenCheck {
+            gDlOpenTick = gDlOpenTick - 1
+            if gDlOpenTick <= 0 {
+                onDownloadAction()                    // ← 就是标题栏那个「下载」图标做的事
+                bool opened = false
+                int n = -1
+                if flow is DlFlow => fl0 {
+                    DlWindow? dw = fl0.dl_ref()
+                    if dw is DlWindow => w {
+                        opened = w.open
+                        n = w.jobs.len()
+                        if gDlOpenHist {
+                            w.tabs.set_active(1)      // 切到「历史」页签（只为看图 ✓）
+                            SDL3.markFrameRedraw()
+                        }
+                    }
+                }
+                bool pass = opened and n == 0
+                print("[ddlopen] " + (if pass then "通过" else "**不通过**") + "：窗口开着=" + _str(opened)
+                      + " 任务=" + _str(n) + "\n")
+                gDlOpenCheck = false
+                if dlShot != "" {
+                    dlShotAt = dlFrames + 3
+                } eif not gDlOpenStay {
+                    _exit(0)
+                }
+            }
+        }
+        // ★ 下载 + 历史 自检（`DDL=<关键词>`）：搜索 → 下第 1 首 → 等跑完 → 切「历史」页 → 打印断言
+        //   为什么要它：这条链是"联网 × 线程 × 落盘 × 写历史" —— "下完了但历史没记上"这种问题
+        //   光看代码发现不了（notehistory 挂在消息分支上 ✗），必须真跑一遍 ✓
+        //   ⚠ 挑**免费曲**的关键词（付费曲会因取直链失败而记成"失败"，那是另一回事 ✗）
+        if gAutoDl != "" {
+            if gDlStep == 0 {
+                if page is SearchPage => sp0 { sp0.start_search(gAutoDl) }   // 填词 + 起搜（= 按回车 ✓）
+                gDlStep = 1
+                gDlWait = 0
+            } else if gDlStep == 1 {
+                gDlWait = gDlWait + 1
+                if not search_busy() and searchRowCount() > 0 {
+                    // 挑**第一首可下的**（有体积 = 拿得到直链 ✓）：否则撞上付费曲会记成"失败"，
+                    //   那测的就不是"历史有没有记上"了 ✗
+                    Array[Array[string]] pick = []
+                    Array[Array[string]] all = search_rows_all()
+                    for all to s {
+                        if pick.len() == 0 and eng.has_size(s) { pick.add(s) }
+                    }
+                    if pick.len() > 0 {
+                        if flow is DlFlow => fl1 { fl1.start_download(pick) }   // 只下 1 首（可控、快 ✓）
+                        gDlStep = 2
+                        gDlWait = 0
+                    } else if gDlWait > 500 {
+                        print("[ddl] **不通过**：这一页没有可下的行（换关键词，或等接口恢复）\n")
+                        gAutoDl = ""
+                        _exit(1)
+                    }
+                } else if gDlWait > 500 {
+                    print("[ddl] **不通过**：等不到搜索结果（" + gAutoDl + "）\n")
+                    gAutoDl = ""
+                    _exit(1)
+                }
+            } else if gDlStep == 2 {
+                gDlWait = gDlWait + 1
+                bool fin = false
+                if flow is DlFlow => fl2 {
+                    DlWindow? dw = fl2.dl_ref()
+                    if dw is DlWindow => w { if w.finished { fin = true } }
+                }
+                if fin {
+                    gDlStep = 3
+                    gDlWait = 0
+                } else if gDlWait > 1000 {
+                    print("[ddl] **不通过**：下载没跑完（超时）\n")
+                    gAutoDl = ""
+                    _exit(1)
+                }
+            } else if gDlStep == 3 {
+                int n = 0
+                string first = ""
+                string st = ""
+                string sz = ""
+                if flow is DlFlow => fl3 {
+                    DlWindow? dw = fl3.dl_ref()
+                    if dw is DlWindow => w {
+                        w.tabs.set_active(1)              // 切到「历史」页（顺便验证页签可用 ✓）
+                        n = w.histItems.len()
+                        if n > 0 {
+                            first = hist.hlabel(w.histItems[0])
+                            st = hist.hstatus(w.histItems[0])
+                            sz = hist.hsize(w.histItems[0])
+                        }
+                    }
+                }
+                bool ok = n > 0 and st == "完成"
+                print("[ddl] " + (if ok then "通过" else "**不通过**") + "：历史 " + _str(n) + " 条　最新="
+                      + first + " | " + sz + " | " + st + "\n")
+                gAutoDl = ""
+                if dlShot == "" { _exit(0) } else { dlShotAt = dlFrames + 2 }
+            }
+        }
+    }
+
+    // 播放/浮层类：DPLAY（先本地后流）/ 关于弹窗 / 悬停 / 歌词浮层
+    func selfcheck_play_tick() {
+        // 播放自检（见 gPlayStep 注释 ✓）：先播一首**本地**、再切一首**没下载**的（复现"进度条不动" ✓）
+        //   全**离线**：A/B 两首都拿下载目录里已有的音频 ⇒ 不需要联网（只有声音需要一个音频设备 ✓）
+        if gPlayStep > 0 {
+            gPlayTick = gPlayTick + 1
+            if gPlayStep == 1 {
+                // ① 扫一遍下载目录，拿两首真音频（A = 当"本地那首"、B = 当"边下边播那首"）
+                if pbar is PlayerBar => b {
+                    b.rescan()
+                    if b.p is Player => q {
+                        int need = 2                       // 离线版要 A/B 两个文件；联网版只用 A ✓
+                        if gPlayMode == 2 { need = 1 }
+                        if q.list.len() >= need {
+                            gPlayFileA = q.list[0]
+                            if q.list.len() >= 2 { gPlayFileB = q.list[1] }
+                            q.set_volume(0.0)        // 自检**不出声**（音量不写盘 ✓ 见 set_volume 的注释 ✓）
+                            print("[dplay] 先播本地：" + dirs.basename(gPlayFileA)
+                                  + (if gPlayMode == 2 then "（联网版：待会儿播搜索结果里没下载的那首 ✓）"
+                                     else "　B=" + dirs.basename(gPlayFileB) + "（离线版：B 当「流」顶一手 ✓）") + "\n")
+                            b.set_queue(gPlayNames, [gPlayFileA, ""], gPlayNames, outdir, 0)
+                            gPlayStep = 2
+                            gPlayTick = 0
+                        } else {
+                            print("[dplay] 跳过：下载目录里音频太少（离线版要 2 首 / 联网版要 1 首 ✓）\n")
+                            gPlayStep = 0
+                            if dlShot == "" { SDL3.requestExit() }
+                        }
+                    }
+                }
+            } eif gPlayStep == 2 and gPlayTick >= 20 {
+                // ② 本地那首播了约 2.4 秒 ⇒ 记下它的"位置 / 时长"（等会儿和流那边对照 ✓）
+                if pbar is PlayerBar => b {
+                    gPlayLocalPos = b.pos_secs()
+                    gPlayLocalDur = b.dur_secs()
+                    print("[dplay] 本地态：位置=" + _str(_int(gPlayLocalPos)) + "s　时长=" + _str(_int(gPlayLocalDur))
+                          + "s　在流=" + _str(b.is_streaming()) + "\n")
+                    if gPlayLocalPos <= 0.0 {
+                        print("[dplay] 跳过：本地那首没放起来（本机没音频设备？）⇒ 这条自检要真播才行\n")
+                        gPlayStep = 0
+                        if dlShot == "" { SDL3.requestExit() }
+                    } else {
+                        if gPlayMode == 2 {
+                            gPlayStep = 4                  // 联网版：先去等搜索结果（见下 ✓）
+                            gPlayTick = 0
+                        } else {
+                            // ③ 切到**没有本地文件**的那一行 ⇒ 播放器走"边下边播"分支（= 用户点网络播放 ✓）
+                            b.set_queue(gPlayNames, [gPlayFileA, ""], gPlayNames, outdir, 1)
+                            // ④ 再手动喂"首片落盘"这一步 —— 宿主收到 dl_engine 的 "start" 消息时调的就是它 ✓
+                            //    （离线复现的关键：真正的流是文件一路变大，这里用 B 这个完整文件顶上，
+                            //      只验"**流的音频对象到底建没建起来**"这一个点 ✓）
+                            b.begin_stream(gPlayFileB)
+                            gPlayStep = 3
+                            gPlayTick = 0
+                        }
+                    }
+                }
+            } eif gPlayStep == 4 {
+                // 联网版：等搜索结果（配 `DSEARCH=<词>` ✓）⇒ 挑**第一首没下载的**，走真链路 ✓
+                Array[Array[string]] srows = search_rows_all()
+                if srows.len() > 0 {
+                    Array[string] lls2 = eng.resolve_locals(srows, outdir)
+                    int i3 = 0
+                    int pick = -1
+                    while i3 < srows.len() {
+                        if lls2[i3] == "" and pick < 0 { pick = i3 }
+                        i3 = i3 + 1
+                    }
+                    if pick < 0 {
+                        print("[dplay] 跳过：这批搜索结果**全都已下载**（联网版要一首没下过的 ✓）\n")
+                        gPlayStep = 0
+                        if dlShot == "" { SDL3.requestExit() }
+                    } else {
+                        print("[dplay] 联网版：播搜索结果第 " + _str(pick) + " 行（没下载 ⇒ 真边下边播 ✓）\n")
+                        playFrom(0, pick)
+                        gPlayStep = 3
+                        gPlayTick = 0
+                    }
+                } eif gPlayTick > 400 {
+                    print("[dplay] 跳过：等了 400 拍搜索结果还没回来（联网自检，网络不通就算了 ✓）\n")
+                    gPlayStep = 0
+                    if dlShot == "" { SDL3.requestExit() }
+                }
+            } eif gPlayStep == 3 {
+                if pbar is PlayerBar => b {
+                    if gPlayTick == 8 or gPlayTick == 24 or gPlayTick == 40 or gPlayTick == 56
+                       or gPlayTick == 88 or gPlayTick == 120 {
+                        print("[dplay] 流 t=" + _str(_int(gPlayTick)) + "：位置=" + _str(_int(b.pos_secs()))
+                              + "s　时长=" + _str(_int(b.dur_secs())) + "s　在流=" + _str(b.is_streaming())
+                              + "　已下=" + _str(_int(b.buf_ratio() * 100.0)) + "%\n")
+                    }
+                    // 联网版要等首片落盘（下载起线程 + 拉第一片）⇒ 判定的时间点给宽一点 ✓
+                    int due = if gPlayMode == 2 then 120 else 64
+                    if gPlayTick >= due {
+                        float p2 = b.pos_secs()
+                        float d2 = b.dur_secs()
+                        // 期望：位置自己在走（>1s ✓）＋ 时长是**这一首**的（≠ 上一首本地那首 ✓）
+                        bool okp = p2 > 1.0 and d2 > 0.0 and _int(d2) != _int(gPlayLocalDur)
+                        print("[dplay] " + (if okp then "通过" else "**不通过**")
+                              + "：切到边下边播后 位置=" + _str(_int(p2)) + "s　时长=" + _str(_int(d2)) + "s"
+                              + "（上一首本地=" + _str(_int(gPlayLocalDur)) + "s"
+                              + " ⇒ 时长对上上一首 = 流的声**没建起来** ✗）\n")
+                        gPlayStep = 0
+                        if dlShot == "" { SDL3.requestExit() }
+                    }
+                }
+            }
+        }
+        // 「关于」弹窗自检（见 gAboutTick 注释 ✓）：第 N 拍自动打开它 ✓
+        if gAboutTick > 0 {
+            gAboutTick = gAboutTick - 1
+            if gAboutTick == 0 { onAbout() }
+        }
+        // 悬停自检（见 gHoverTick 注释 ✓）：把指针注入到播放键上 ✓
+        if gHoverTick > 0 {
+            gHoverTick = gHoverTick - 1
+            if gHoverTick == 0 {
+                if pbar is PlayerBar => b {
+                    SDL3.testMoveAt(win.getID(), b.btnPlay.get_x() + b.btnPlay.get_w() / 2.0,
+                                                  b.btnPlay.get_y() + b.btnPlay.get_h() / 2.0)
+                    print("[dhover] 指针已移到播放键上\n")
+                }
+            }
+        }
+        // 歌词浮层自检（见 gLrcTick 注释 ✓）：第 2 拍把「词」面板打开（配 DSHOT 截它的样子 ✓）
+        if gLrcTick > 0 {
+            gLrcTick = gLrcTick - 1
+            if gLrcTick == 0 {
+                if pbar is PlayerBar => b { b.toggle_lrc() }
+            }
+        }
+    }
+
+    // 注入点击类：歌单按钮 / 进度条 / 右键菜单 / 双击 / 退出路径
+    func selfcheck_click_tick() {
+        // 退出路径自检（见 gExitTicks 注释 ✓）
+        // 歌单点击自检（见 gClickStep 注释 ✓）：注入真实点击 ⇒ 断言到底有没有落到控件上 ✓
+        if gClickStep > 0 {
+            int st = gClickStep
+            gClickStep = gClickStep + 1
+            if pbar is PlayerBar => b {
+                int wid = win.getID()
+                if st == 1 {
+                    // ⚠ 先注入**移动**再点击：只发 down/up 时按钮的 hover 还不成立 ⇒ 点击会**偶发不生效** ✗
+                    //   （实测过：同一坐标有时开门、有时不开 ✓ 真人点之前总会有移动 ✓）
+                    float bx = b.btnList.get_x() + b.btnList.get_w() / 2.0
+                    float by = b.btnList.get_y() + b.btnList.get_h() / 2.0
+                    SDL3.testMoveAt(wid, bx, by)
+                    bool ok = SDL3.testClickAt(wid, bx, by)
+                    print("[dpclick] 注入点「列表」按钮 ok=" + _str(ok)
+                          + "  按钮矩形=" + _str(_int(b.btnList.get_x())) + "," + _str(_int(b.btnList.get_y()))
+                          + " " + _str(_int(b.btnList.get_w())) + "x" + _str(_int(b.btnList.get_h())) + "\n")
+                } eif st == 4 {
+                    print("[dpclick] 点完按钮：popOpen=" + _str(b.popOpen)
+                          + "  歌单矩形=" + _str(_int(b.lb.x)) + "," + _str(_int(b.lb.y))
+                          + " " + _str(_int(b.lb.w)) + "x" + _str(_int(b.lb.h)) + "\n")
+                    // 点歌单第 3 行中点（itemH=22 ✓ 见 LIST_ROW）；同样先移动再点 ✓
+                    float rx = b.lb.x + 40.0
+                    float ry = b.lb.y + 4.0 + 22.0 * 2.0 + 11.0
+                    SDL3.testMoveAt(wid, rx, ry)
+                    bool ok = SDL3.testClickAt(wid, rx, ry)
+                    print("[dpclick] 注入点歌单第 3 行 ok=" + _str(ok) + "\n")
+                } eif st == 8 {
+                    gClickRow3 = b.cur_index()
+                    print("[dpclick] 点歌单第 3 行 -> 下标=" + _str(gClickRow3) + "（期望 2）\n")
+                    // 再点**当前正在播的那一行**（第 1 行）：这里最容易"看着没反应" ✗
+                    //   （`ListBox` 单选模式下点已选中行**不回调** ✓ ⇒ 靠 on_event 自己算行号 ✓）
+                    SDL3.testMoveAt(wid, b.lb.x + 40.0, b.lb.y + 4.0 + 11.0)
+                    bool ok = SDL3.testClickAt(wid, b.lb.x + 40.0, b.lb.y + 4.0 + 11.0)
+                    print("[dpclick] 注入点「当前行」ok=" + _str(ok) + "\n")
+                } eif st == 12 {
+                    bool pass = gClickRow3 == 2 and b.cur_index() == 0
+                    print("[dpclick] " + (if pass then "通过" else "**不通过**")
+                          + "：点第 3 行 -> 下标 " + _str(gClickRow3) + "（期望 2）；"
+                          + "再点当前行 -> 下标 " + _str(b.cur_index()) + "（期望 0）\n")
+                    SDL3.requestExit()
+                }
+            }
+        }
+        // 进度条点击自检（见 gSeekStep 注释 ✓）：注入两次真实点击 ⇒ 断言"只有点在条上才跳转" ✓
+        if gSeekStep > 0 {
+            int st = gSeekStep
+            gSeekStep = gSeekStep + 1
+            if pbar is PlayerBar => b {
+                int wid = win.getID()
+                float sx = b.seekBar.get_x() + 200.0       // 横向取画布中段（条子铺满整宽 ✓ 横向不是判据 ✓）
+                float sy = b.seekBar.get_y()
+                float ch = b.seekBar.get_h()
+                if st == 2 {
+                    // ① 点**条子外面**（画布顶端往下 2px）：画布整行高 52、条子只占中间那条 ✓
+                    stateLbl.set_text("")                  // 先清空 —— 要断言"一个字都没写"⇒ 得先没有 ✓
+                    SDL3.testMoveAt(wid, sx, sy + 2.0)     // ⚠ 先 move 再 click（同 DPCLICK 的实测教训 ✓）
+                    bool ok = SDL3.testClickAt(wid, sx, sy + 2.0)
+                    print("[dseek] 注入点「条外」ok=" + _str(ok)
+                          + "  画布 " + _str(_int(b.seekBar.get_w())) + "x" + _str(_int(ch))
+                          + "  点 y=2（条子中心 ≈ " + _str(_int(ch / 2.0)) + "）\n")
+                } eif st == 3 {
+                    gSeekOffText = stateLbl.get_text()      // 条外点击后的状态栏（期望空串 ✓）
+                    gSeekOffFx = b.clickFx                  // 涟漪该冒出来（期望 ≥ 0 ✓）
+                    gSeekOffCy = b.clickCy                  // 且**就地**（期望 ≈ 2；条子中心是 26 ✓）
+                    // ② 点**条子正中**：这次必须真去跳（没播过 ⇒ 状态栏会写"先播一首再拖进度"✓）
+                    stateLbl.set_text("")
+                    SDL3.testMoveAt(wid, sx, sy + ch / 2.0)
+                    bool ok = SDL3.testClickAt(wid, sx, sy + ch / 2.0)
+                    print("[dseek] 注入点「条上」ok=" + _str(ok) + "\n")
+                } eif st == 4 {
+                    string onBar = stateLbl.get_text()
+                    // 涟漪的纵向必须**落在点击处**（≈2）：不是条子中心（≈26）⇒ 证明"就地冒"✓
+                    bool local = _int(gSeekOffCy) <= 6
+                    bool pass = gSeekOffText == "" and gSeekOffFx >= 0.0 and local and onBar != ""
+                    print("[dseek] " + (if pass then "通过" else "**不通过**")
+                          + "：条外点击 -> 状态栏=\"" + gSeekOffText + "\"（期望空 ⇒ 只留涟漪）"
+                          + " 涟漪=" + (if gSeekOffFx >= 0.0 then "有" else "没有")
+                          + " 纵坐标=" + _str(_int(gSeekOffCy)) + "（期望 ≈2 就地，条子中心 " + _str(_int(ch / 2.0)) + "）"
+                          + "；条上点击 -> 状态栏=\"" + onBar + "\"（期望非空 ⇒ 真去跳）\n")
+                    SDL3.requestExit()
+                }
+            }
+        }
+        // 右键菜单自检（见 gCtxStep 注释 ✓）：注入**真实右键** ⇒ 断言菜单建在正确的数据源上
+        if gCtxStep > 0 {
+            int st = gCtxStep
+            gCtxStep = gCtxStep + 1
+            if st == 1 {
+                int wid = win.getID()
+                if gCtxTarget == 2 or gCtxTarget == 4 {
+                    // 目标 2 = **搜索表空白处**（row<0）：不必联网、不必先搜 ⇒ 专测"搜索页那条线还通着"
+                    // 目标 4 = 同上注入（它只要"菜单开着"这个前提 ✓ 用空白处 ⇒ 免联网 ✓）
+                    float bx = searchTableRef().get_x() + 200.0
+                    float by = searchTableRef().get_y() + 200.0
+                    SDL3.testMoveAt(wid, bx, by)
+                    bool ok = SDL3.testRightClickAt(wid, bx, by)
+                    print("[dctx] 注入右键到搜索表空白处 ok=" + _str(ok)
+                          + (if gCtxTarget == 4 then "（目标 4：接着会切页）" else "") + "\n")
+                } else if gCtxTarget == 3 {
+                    // 目标 3 = **只测动作**（不点鼠标）：榜单第 0 行 ⇒ 「搜索这首歌（跳到搜索页）」
+                    //   ⚠ 要配 DBANG=1 跑：否则当前页已经是搜索页，set_active(0) 不会触发切页回调 ✗
+                    if bangRowCount() == 0 {
+                        gCtxStep = 1        // 等榜单行（联网）✓
+                    } else {
+                        menuCtx = 1
+                        onMenu(0, "searchthis")
+                        print("[dctx] 目标 3：已调用菜单动作 searchthis\n")
+                    }
+                } else if bangRowCount() == 0 {
+                    gCtxStep = 1            // 榜单行还没拉回来（联网）⇒ 下一拍再试 ✓
+                } else {
+                    // 目标 1 = 榜单表第 0 行：y = 表头 30 + 行高中点 13（row_h=26 ✓ 见 createTable）
+                    float bx = bangTableRef().get_x() + 120.0
+                    float by = bangTableRef().get_y() + 30.0 + 13.0
+                    SDL3.testMoveAt(wid, bx, by)
+                    bool ok = SDL3.testRightClickAt(wid, bx, by)
+                    print("[dctx] 注入右键到榜单表第 0 行 ok=" + _str(ok)
+                          + "  位置=" + _str(_int(bx)) + "," + _str(_int(by)) + "\n")
+                }
+            } eif st == 3 {
+                // 期望：榜单表 ⇒ menuCtx=1 / row=0（那一行）；搜索表空白 ⇒ menuCtx=0 / row<0 ✓
+                bool pass = false
+                if gCtxTarget == 2 {
+                    pass = gCtxSeen == 0 and gCtxRowSeen < 0
+                    print("[dctx] " + (if pass then "通过" else "**不通过**")
+                          + "：目标=2 -> buildMenu(menuCtx=" + _str(gCtxSeen) + ", row=" + _str(gCtxRowSeen) + ")\n")
+                } else if gCtxTarget == 3 {
+                    // 期望：切到搜索页（curPage=0）+ 关键词填成"歌名 歌手" + 真的起了搜索 ✓
+                    pass = curPage == 0 and search_keyword_now().trim() != "" and search_busy()
+                    print("[dctx] " + (if pass then "通过" else "**不通过**")
+                          + "：目标=3 -> 切页后 curPage=" + _str(curPage)
+                          + "  关键词=\"" + search_keyword_now() + "\""
+                          + "  搜索中=" + _str(search_busy()) + "\n")
+                } else if gCtxTarget == 4 {
+                    // 目标 4 = **切页必须把残留的右击菜单收掉**（2026-10-09 框架修复的回归断言 ✓）
+                    //   实测过的 bug：菜单由窗口第二遍统一绘制、只认 isOpen() ⇒ 切页后**照旧显示**，
+                    //   而隐藏页收不到事件 ⇒ **点不动也关不掉** ✗（用户原话见 sdl_tab.closePopups ✓）
+                    //   修法：TabControl 切页时调 menu.closeContextMenus(hwnd) ✓
+                    //   ⚠ 断言就写在**同一拍**：`set_active` 是同步调用（closePopups 立刻跑完 ✓），
+                    //     而本回调是**事件驱动**的、不是每帧都来 ⇒ 靠"下一拍再断言"会等不到 ✗
+                    gCtxWasOpen = searchTableRef().get_context_menu().isOpen()
+                    tab.set_active(1)                                  // ← 真的切一次页 ✓
+                    bool nowOpen4 = searchTableRef().get_context_menu().isOpen()
+                    pass = gCtxWasOpen and not nowOpen4 and curPage == 1
+                    print("[dctx] " + (if pass then "通过" else "**不通过**")
+                          + "：目标=4 -> 切页前菜单开着=" + _str(gCtxWasOpen)
+                          + "  切页后开着=" + _str(nowOpen4) + "（期望 false）"
+                          + "  当前页=" + _str(curPage) + "（期望 1）\n")
+                } else {
+                    pass = gCtxSeen == 1 and gCtxRowSeen == 0
+                    print("[dctx] " + (if pass then "通过" else "**不通过**")
+                          + "：目标=1 -> buildMenu(menuCtx=" + _str(gCtxSeen) + ", row=" + _str(gCtxRowSeen) + ")\n")
+                }
+                // ⚠ 开着 DSHOT 时**别抢着退**：让截图钩子先截到"菜单正开着"的样子 ✓（与 DHOVER 同一套 ✓）
+                if dlShot == "" { SDL3.requestExit() }
+            }
+        }
+        // 双击=试听 自检（见 gDblTarget 注释 ✓）：注入两次左键（框架按 400ms/10px 阈值判双击 ✓）
+        //   ⚠ 为什么必须有：这条改动是**改语义**（下载 → 试听），而"双击到底还有没有反应"光看代码
+        //     看不出来（框架的 dbl 判定在 mouseDown 里做、还要过复选框列 / 表头 / 列重排那几道闸 ✓）
+        if gDblStep > 0 {
+            int dblSt = gDblStep
+            gDblStep = gDblStep + 1
+            if dblSt == 1 {
+                // 先等"有行"（联网 ✓）：表空了就点不到行 ⇒ 停在 1 重试（与 gCtxStep 同一手法 ✓）
+                bool hasRow = searchRowCount() > 0
+                if gDblTarget == 2 { hasRow = bangRowCount() > 0 }
+                if not hasRow {
+                    gDblStep = 1
+                    gDblWait = gDblWait + 1
+                    // ⚠ 不能无限等：接口被限流 / 关键词无匹配时表会一直空 ⇒ 约 36 秒后报"没等到行"收摊 ✓
+                    if gDblWait > 300 {
+                        print("[ddbl] **不通过**：等了 " + _str(gDblWait) + " 拍还没有行（搜索/榜单没回来）-> 没法注入\n")
+                        gDblStep = 0
+                        SDL3.requestExit()
+                    }
+                } else {
+                    Table dt = searchTableRef()
+                    if gDblTarget == 2 { dt = bangTableRef() }
+                    int wid = win.getID()
+                    // 列宽：搜索表 [40,280,…] / 榜单表 [40,300,…] ⇒ x 偏 200 / 150 都稳落在「歌名」列 ✓
+                    // 行 y = 表头 30 + 行高 26 的中点 13（与 DCTX 目标 1 同一算法 ✓）
+                    float cx2 = dt.get_x() + 200.0
+                    float cy2 = dt.get_y() + 30.0 + 13.0
+                    SDL3.testMoveAt(wid, cx2, cy2)
+                    bool ok1 = SDL3.testClickAt(wid, cx2, cy2)
+                    bool ok2 = SDL3.testClickAt(wid, cx2, cy2)
+                    print("[ddbl] 注入双击到" + (if gDblTarget == 2 then "榜单表" else "搜索表")
+                          + "第 0 行 ok=" + _str(ok1 and ok2)
+                          + "  位置=" + _str(_int(cx2)) + "," + _str(_int(cy2)) + "\n")
+                }
+            } eif dblSt == 4 {
+                // 期望：起了**播放队列**（表已喂进去 ✓），且**没**开下载窗口 ✓
+                //   ★ 2026-10-09 二次改：双击从"试听（前一段）"变成"播放整表（边下边播）"⇒ 断言跟着变
+                int qn = 0
+                if pbar is PlayerBar => b { qn = b.queue_count() }
+                DlWindow? dw = null
+                if flow is DlFlow => f { dw = f.dl_ref() }
+                bool dlOpen = dw is DlWindow
+                bool ok = qn > 0 and not dlOpen
+                print("[ddbl] " + (if ok then "通过" else "**不通过**")
+                      + "：目标=" + _str(gDblTarget) + " -> 播放队列入队=" + _str(qn) + " 首"
+                      + "  下载窗口=" + _str(dlOpen) + "（期望 false）"
+                      + "  状态栏=\"" + stateLbl.get_text() + "\"\n")
+                if dlShot == "" { SDL3.requestExit() }
+            }
+        }
+        if gExitTicks > 0 {
+            gExitTicks = gExitTicks - 1
+            if gExitTicks == 0 {
+                print("[diag] 走正常退出路径（requestExit）\n")
+                SDL3.requestExit()
+            }
+        }
+    }
+
+    func selfcheck_search_tick() {
+        // 搜索自检（见 gAutoSearch 注释 ✓）：第 2 拍界面已建好 ⇒ 自动搜一次
+        if gAutoSearch != "" {
+            gAutoSearchTick = gAutoSearchTick + 1
+            if gAutoSearchTick == 2 {
+                if page is SearchPage => sp3 { sp3.start_search(gAutoSearch) }   // 填词 + 起搜（= 按回车 ✓）
+            }
+        }
     }
 }
 
