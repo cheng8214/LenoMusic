@@ -839,6 +839,42 @@ struct MusicDlApp {
                 }
             }
         }
+        // 进度条点击自检（见 gSeekStep 注释 ✓）：注入两次真实点击 ⇒ 断言"只有点在条上才跳转" ✓
+        if gSeekStep > 0 {
+            int st = gSeekStep
+            gSeekStep = gSeekStep + 1
+            if pbar is PlayerBar => b {
+                int wid = win.getID()
+                float sx = b.seekBar.get_x() + 200.0       // 横向取画布中段（条子铺满整宽 ✓ 横向不是判据 ✓）
+                float sy = b.seekBar.get_y()
+                float ch = b.seekBar.get_h()
+                if st == 2 {
+                    // ① 点**条子外面**（画布顶端往下 2px）：画布整行高 52、条子只占中间那条 ✓
+                    stateLbl.set_text("")                  // 先清空 —— 要断言"一个字都没写"⇒ 得先没有 ✓
+                    SDL3.testMoveAt(wid, sx, sy + 2.0)     // ⚠ 先 move 再 click（同 DPCLICK 的实测教训 ✓）
+                    bool ok = SDL3.testClickAt(wid, sx, sy + 2.0)
+                    print("[dseek] 注入点「条外」ok=" + _str(ok)
+                          + "  画布 " + _str(_int(b.seekBar.get_w())) + "x" + _str(_int(ch))
+                          + "  点 y=2（条子中心 ≈ " + _str(_int(ch / 2.0)) + "）\n")
+                } eif st == 3 {
+                    gSeekOffText = stateLbl.get_text()      // 条外点击后的状态栏（期望空串 ✓）
+                    gSeekOffFx = b.clickFx                  // 涟漪该冒出来（期望 ≥ 0 ✓）
+                    // ② 点**条子正中**：这次必须真去跳（没播过 ⇒ 状态栏会写"先播一首再拖进度"✓）
+                    stateLbl.set_text("")
+                    SDL3.testMoveAt(wid, sx, sy + ch / 2.0)
+                    bool ok = SDL3.testClickAt(wid, sx, sy + ch / 2.0)
+                    print("[dseek] 注入点「条上」ok=" + _str(ok) + "\n")
+                } eif st == 4 {
+                    string onBar = stateLbl.get_text()
+                    bool pass = gSeekOffText == "" and gSeekOffFx >= 0.0 and onBar != ""
+                    print("[dseek] " + (if pass then "通过" else "**不通过**")
+                          + "：条外点击 -> 状态栏=\"" + gSeekOffText + "\"（期望空 ⇒ 只留涟漪）"
+                          + " 涟漪=" + (if gSeekOffFx >= 0.0 then "有" else "没有")
+                          + "；条上点击 -> 状态栏=\"" + onBar + "\"（期望非空 ⇒ 真去跳）\n")
+                    SDL3.requestExit()
+                }
+            }
+        }
         // 右键菜单自检（见 gCtxStep 注释 ✓）：注入**真实右键** ⇒ 断言菜单建在正确的数据源上
         if gCtxStep > 0 {
             int st = gCtxStep
@@ -2436,6 +2472,18 @@ struct MusicDlApp {
         return false
     }
 
+    // ★★ 2026-10-11 修（用户实测："窗口都关闭了，偶发音乐还在播放"✗✗）：
+    //   原先"停播 + 释放音频设备"只写在 `win.run` **返回之后**（见 run 末尾那段 ✓）——
+    //   而框架的主循环**只有等所有在册窗口都销毁才返回** ✗（见 sdl_window 的 `_runWids.len() == 0` ✓）
+    //   ⇒ 只要关主窗口那一刻还有别的窗口在册（下载窗口明明开着 / 已经点了"关闭"、但要等**下一拍事件**
+    //     才真正销毁的对话框与下载窗口 ✓），`win.run` 就不返回 ⇒ `pbar.shutdown()` 永远跑不到
+    //   ⇒ 窗口全没了、`Sound` 还在发声 ✓（"偶发"就是因为要看当时有没有那个窗口在册 ✓）
+    //   ⇒ 收尾改两条腿：① 本函数（主窗口一决定关就**立刻**停声 + 让程序整体退出 ✓）
+    //                  ② run 末尾那条（requestExit / SDL_QUIT 的路径兜底；两处都可重复调用 ✓）
+    func shutdownAudio() {
+        if pbar is PlayerBar => b { b.shutdown() }
+    }
+
     func handleEvent(Event ev): bool {
         // ★ 播放条的浮层先看事件：它开着时，点别处 / 按 ESC 由它收起（= 失去焦点即收 ✓）
         //   ⚠ 必须排在下面"ESC 关窗口"**之前**：否则开着歌单按 ESC 会直接退程序 ✗
@@ -2452,12 +2500,21 @@ struct MusicDlApp {
             SDL3.markFrameRedraw()
             return true
         }
-        if ev.isQuit() or ev.isWindowClose() { return false }
-        if titleBar.is_close_requested() {
-            titleBar.clear_close_request()
+        if ev.isQuit() or ev.isWindowClose() {
+            shutdownAudio()                          // ★ 先停声（见 shutdownAudio 的注释 ✓）
             return false
         }
-        if ev.isKeyDown() and ev.scancode() == Scancode.ESCAPE { return false }
+        if titleBar.is_close_requested() {
+            titleBar.clear_close_request()
+            shutdownAudio()                          // ★ 点 ✕ = 退出程序：立刻停声 + 把剩下的窗口一起收掉 ✓
+            SDL3.requestExit()
+            return false
+        }
+        if ev.isKeyDown() and ev.scancode() == Scancode.ESCAPE {
+            shutdownAudio()                          // ★ ESC 同口径（见上 ✓）
+            SDL3.requestExit()
+            return false
+        }
         return true
     }
 
@@ -2560,8 +2617,10 @@ struct MusicDlApp {
         )
         // ★ 退出前收摊：**释放音频设备** ✓
         //   `player` 的 `Sound` 会占着 miniaudio 的设备与线程；不释放的话点退出可能"卡着" ✗
-        //   （这里覆盖所有退出路径：点 ✕ / ESC / requestExit 都会先返回 `win.run` ✓）
-        if pbar is PlayerBar => pb2 { pb2.shutdown() }
+        //   ⚠ 本处是**兜底**：点 ✕ / ESC 那条路已经在 handleEvent 里提前停过声了（见 shutdownAudio 的
+        //     注释 ✓）；这里覆盖的是 SDL_QUIT / `requestExit()`（自检钩子）那几条不进 handleEvent 的路 ✓
+        //   （shutdownAudio 可重复调用：`Player.close()` 里 sound 已为 null 就直接过 ✓）
+        shutdownAudio()
         SDL3.ttfQuit()
     }
 }
@@ -2576,6 +2635,18 @@ int gExitTicks = 0
 //   （本仓有过"用窗口矩形坐标去点 ⇒ 整体偏一个标题栏高 ⇒ 点在按钮外面"的教训 ✓ 见 sdl_window:277）
 int gClickStep = 0
 int gClickRow3 = -1     // 自检记录：点第 3 行后的下标（期望 2 ✓）
+
+// 进度条点击自检（`DSEEK=1`）：往**播放条那条进度线**上注入两次真实点击，断言
+//   `[dseek] 通过/不通过：条外点击 -> 状态栏="…"（期望空 ⇒ 只留涟漪）；条上点击 -> 状态栏="…"（期望非空 ⇒ 真去跳）`
+//   为什么要它（2026-10-11 用户口径）："**只有点在进度条那一条上才跳转**，画布里别处只是点击有波浪" ——
+//     这是**改行为**，而且判据是**纵坐标的像素级闸门**（画布整行高 52、条子只占中间 8~12px ✓ 见
+//     player_bar.on_seek_bar）：光看代码 / 编译都发现不了"条外那一片到底还跳不跳"✗ ⇒ 必须注入真点击 ✓
+//   判据不依赖音频设备（这点很关键：本仓自检要能在没声卡的机器上跑 ✓）：
+//     ① 条外点击 ⇒ **一个字的提示都不该写**（状态栏保持空 ✓）但**涟漪要冒**（`clickFx >= 0` ✓）
+//     ② 条上点击 ⇒ 会走 seek 那条路：没播过 ⇒ 状态栏写"先播一首再拖进度"（非空 ✓）
+int gSeekStep = 0
+string gSeekOffText = ""      // 条外点击后的状态栏（期望空 ✓）
+float gSeekOffFx = -1.0       // 条外点击后的涟漪起点（期望 ≥ 0 ✓）
 
 // ★ 2026-10-09：`gPreviewCh / gPreviewThread / PREVIEW_BYTES` 与 `gBgDl*` **整套退役** ——
 //   它们服务的是"试听：拉前一段 + 静默下整首"那条老路；现在双击/右键「播放」= 播放整表 + 边下边播，
@@ -2707,6 +2778,8 @@ main() {
         int cxn = _int(_str(cx))
         if cxn > 0 { gCtxStep = 1; gCtxTarget = cxn }   // 1 = 榜单表 / 2 = 搜索表空白处 ✓
     }
+    var dsk = _env("DSEEK")
+    if dsk != null { if _int(_str(dsk)) > 0 { gSeekStep = 1 } }   // 进度条点击闸门（见 gSeekStep 注释 ✓）
     var bs = _env("DBANGSIZE")
     if bs != null { gBangSizeCheck = true }
     var bo = _env("DBANGONLY")
