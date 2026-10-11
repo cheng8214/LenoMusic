@@ -1567,6 +1567,11 @@ struct MusicDlApp {
         //   `lyricBox`（"同时下载歌词"）由**本文件**建：它是"要记住的设置项"那一族 ✓ 且搜索页要把它
         //     摆进操作行 ⇒ **必须赶在建页之前**建好（当参数交过去 ✓）
         lyricBox = SDL3.createCheckBox({text: "同时下载歌词", checked: cfg.lyric, font_size: 13})
+        //   `busyBar`（"忙"指示）也由本文件建（下载进度共用 ✓）—— ⚠ 同样**必须赶在建页之前** ✗✗
+        //     2026-10-11 踩过：先 create_search_page、之后才建 busyBar ⇒ 页里拿的是**当时那个空对象**，
+        //     `set_value` 写进去谁也不画 ⇒ 用户看到的就是"**搜索进度没有**"✗（搜索/下载两条都哑了 ✓）
+        busyBar = SDL3.createProgressBar({h: 6, show_text: false})
+        busyBar.set_value(0.0)
         //   ★ 2026-10-11：节奏是"先建页 → 套初值（set_*）→ 再 make_*"（顺序反了等于白设 ✗ 见 search_page 文件头）
         page = spg.create_search_page(rowIcon, lyricBox, busyBar)
         if page is SearchPage => spg0 {
@@ -1613,9 +1618,7 @@ struct MusicDlApp {
             page0.add(row2, {grow: 0, shrink: 0, align: 3})
             page0.add(spg0.make_action_row(), {grow: 0, shrink: 0, align: 3})
             page0.add(spg0.make_table(), {grow: 1, shrink: 1, align: 3})
-            // ---- 忙指示（属搜索页 ⇒ 挂 page0 ✓ 但由**本文件**建：下载进度也用它 ⇒ 见 busyBar 字段 ✓）----
-            busyBar = SDL3.createProgressBar({h: 6, show_text: false})
-            busyBar.set_value(0.0)
+            // ---- 忙指示（属搜索页 ⇒ 挂 page0 ✓ 本体见上面（**建页之前**就建好了 ✓））----
             page0.add(busyBar, {grow: 0, shrink: 0, align: 3})
             // ---- 状态行（页内那条 ✓ 本文件拿它的引用写别的信息 ⇒ 见 status_label ✓）----
             stateLbl = spg0.status_label()
