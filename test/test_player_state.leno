@@ -155,7 +155,12 @@ main() {
     var L5 = pl.lrc_from_text("[00:07.5]半秒一位\n")
     check("歌词：[mm:ss.x]（一位小数）也认 ", L5.secs.len() == 1 and _int(L5.secs[0] * 10.0) == 75)
     check("歌词：空串 -> 空表（不崩）", pl.lrc_from_text("").secs.len() == 0)
-    check("歌词：没标签的纯文本行 -> 跳过 ", pl.lrc_from_text("就是一行普通文字\n").secs.len() == 0)
+    // ★ 2026-10-11 **改口径**（用户要求）："歌词没有时间时，里面全是换行文字 -> 就显示文字就是" ——
+    //   整份都没有时间标签的**纯文本歌词**不再整份丢掉，而是照样列出来（时间记 -1 ⇒ 定位恒 -1 ✓）
+    //   逐项金标在 test_lrc_parse.leno 的 ⑩ 那段；这里只钉"Player 侧看到的句数 / 哨兵值" ✓
+    var L6 = pl.lrc_from_text("就是一行普通文字\n")
+    check("歌词：没标签的纯文本 -> 照样列出来（untimed、时间 -1）",
+          L6.secs.len() == 1 and L6.untimed and L6.secs[0] < 0.0 and L6.texts[0] == "就是一行普通文字")
     check("歌词定位：还没到第一句 -> -1 ", pl.lrc_index_at(L1.secs, 3.0) == -1)
     check("歌词定位：12.34~20 之间 -> 第 0 句 ", pl.lrc_index_at(L1.secs, 15.0) == 0)
     check("歌词定位：过了最后一句 -> 最后一句 ", pl.lrc_index_at(L1.secs, 99.0) == 1)

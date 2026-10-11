@@ -142,6 +142,11 @@ export struct Lrc {
     //     （那就又变回近似了 ✓）；有了结束 ⇒ 停顿期间**一格都不刷** ✓✓（真同步的关键 ✓）
     //   时长缺失/为 0（少见）⇒ 记 -1 ⇒ 退回"唱到下一个字的起点" ✓
     Array[float] wt_end
+    // ★★ 2026-10-11（用户口径）：这份歌词**整份都没有时间**（纯文本：一行行文字 ✓）
+    //   —— 见 lrc_plain_lines：不丢掉、照样列出来；此时 `secs[i]` 全是 **-1**（哨兵，
+    //      不是 0 ✗ —— 全 0 会让 lrc_index_at 一路命中到末句 ⇒ 界面钉死在最后一行 ✓）
+    //   界面据此走"静态列出来"那条路（不高亮当前句、不逐字、不自动滚 ✓ 见 player_bar.draw_lyrics）
+    bool untimed = false
 }
 
 // 码点数组的一段 ⇒ 字符串（按码点拼 ✓）
@@ -419,6 +424,38 @@ func lrc_fix_words(Lrc out) {
     out.wt_end = ne
 }
 
+// ★★ 2026-10-11（用户口径）：整份歌词**一个时间标签都没有**（纯文本歌词 —— 就是一行行文字 ✓）
+//   原先这种文件被**整份丢掉**（`lrc_add_line` 见不到时间戳就 return ✓）⇒ 界面只能说"这首没有歌词" ✗，
+//   而文件里明明写着词 ✓ ⇒ 退回这里：**把文字照样列出来**（"就显示文字就是" ✓）
+//   ⚠ 时间记 **-1.0**（"这句没有时间"的哨兵）✗ 不要记 0：
+//     全 0 的话 `lrc_index_at` 会一路命中到**最后一句** ⇒ 界面永远高亮末句（比不高亮更怪 ✓）；
+//     -1 + `lrc_index_at` 跳过负数 ⇒ 定位恒为 -1（不高亮、不自动滚、不逐字 ✓）
+//   ⚠ 只跳过"**整行都是 `[...]` 标签**"的行（`[ti:歌名]` / `[ar:…]` / `[offset:0]` 这类元信息 ✓）；
+//     `[男] 歌词` 这种**带正文**的照原样留着（别把内容吃掉 ✗）
+func lrc_tag_only(Array[int] cps): bool {
+    int i = 0
+    int n = cps.len()
+    while i < n and cps[i] == 91 {                  // '['
+        int j = i + 1
+        while j < n and cps[j] != 93 { j = j + 1 }  // ']'
+        if j >= n { return false }                  // 不闭合 ⇒ 当正文（别吞内容 ✗）
+        i = j + 1
+    }
+    return i >= n
+}
+
+// 纯文本歌词 ⇒ 一行一句（时间全 -1 ✓；空行与纯元信息行跳过 ✓）
+func lrc_plain_lines(string s, Lrc out) {
+    Array[string] lines = s.split("\n")
+    for lines to ln {
+        string t = _str(ln).trim()
+        if t == "" { continue }
+        if lrc_tag_only(strings.to_codepoints(t)) { continue }
+        out.secs.add(-1.0)
+        out.texts.add(t)
+    }
+}
+
 // 解析一整份 .lrc（换行 `\r\n` / `\n` / `\r` 都认 ✓）
 export func lrc_from_text(string raw): Lrc {
     Lrc out = new Lrc()
@@ -434,6 +471,13 @@ export func lrc_from_text(string raw): Lrc {
     for lines to ln { lrc_add_line(_str(ln), out) }
     lrc_sort(out)
     lrc_fix_words(out)          // ★ 逐字：逐句校验/换算，脏句丢掉 ⇒ 那段自动退回线性 ✓
+    // ★ 一句都没解析出来（没有时间标签）⇒ 按**纯文本歌词**再来一遍（见上面那段 ✓）
+    //   ⚠ 判据是"真的一句都没有"✗ 不是"有几行是纯文本" —— 混排的文件按老口径走（纯文本行仍跳过 ✓）
+    //     （那是有时间轴的歌词，插进来的说明文字本来就不该当歌词句 ✓）
+    if out.secs.len() == 0 {
+        lrc_plain_lines(s, out)
+        if out.secs.len() > 0 { out.untimed = true }
+    }
     return out
 }
 
@@ -474,11 +518,16 @@ export func word_sung(Array[float] ws, Array[float] we, float p, int cnt): float
 }
 
 // 当前唱到第几行：最后一个 `secs[i] <= sec` 的下标 ✓（一条都没到 ⇒ -1 ✓）
+//   ★ 2026-10-11：**负时间 = "这句没有时间"**（纯文本歌词，见 lrc_plain_lines ✓）⇒ 跳过、不参与定位
+//     ⇒ 那种歌词的定位恒为 -1（界面走"静态列出来"那条路：不高亮当前句、不自动滚 ✓）
+//     ⚠ 有条目就 `if...else return` 的老口径不动：真实 .lrc 的时间戳不会是负数 ✓（行为逐位一致 ✓）
 export func lrc_index_at(Array[float] secs, float sec): int {
     int hit = -1
     int i = 0
     while i < secs.len() {
-        if secs[i] <= sec { hit = i } else { return hit }
+        if secs[i] >= 0.0 {
+            if secs[i] <= sec { hit = i } else { return hit }
+        }
         i = i + 1
     }
     return hit
@@ -1111,6 +1160,12 @@ export struct Player {
     func lyric_count(): int {
         ensure_lrc()
         return lrc.secs.len()
+    }
+
+    // ★ 这份歌词**整份都没有时间**吗（纯文本歌词 ⇒ 界面走"静态列出来"那条路 ✓ 见 lrc_from_text）
+    func lyric_untimed(): bool {
+        ensure_lrc()
+        return lrc.untimed
     }
 
     // 第 i 句的文字 / 时间（越界 ⇒ "" / -1 ✓ 不崩）

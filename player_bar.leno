@@ -124,6 +124,10 @@ export struct PlayerBar {
     Array[string] lrcRowText = []// 第 k 个"文本行"的内容 ✓
     float lrcCurRow = 0.0        // 当前句在这串文本行里的**中心**位置（居中基准 ✓）
     int lrcCurRows = 1           // 当前句折了几行（平滑滚动与高亮条高度都按它 ✓）
+    // ★★ 2026-10-11（用户口径）：这份歌词**整份没有时间**（纯文本歌词 ✓ 见 player.lrc_from_text）
+    //   ⇒ 面板走"静态列出来"那条路：所有行同档、**没有"当前句"**（不高亮、不逐字、不自动滚 ✓），
+    //     滚轮照常能翻（能翻到最末一行 ✓ 见 on_wheel 的上限与 draw_lyrics 里那条分支 ✓）
+    bool lrcUntimed = false
     bool wantLyricFetch = false  // ★ 面板里"立即下载歌词"被点了 ⇒ 宿主（主界面）看到就去下 ✓
 
     // ★ 歌单右击菜单里"动文件系统 / 弹窗"的那几项 ⇒ 同样交给宿主 ✓（2026-10-08 ✓）
@@ -160,6 +164,10 @@ export struct PlayerBar {
     bool seekHover = false       // 鼠标在进度条上吗 ✓
     float hoverEase = 0.0        // 悬停缓动 0..1（别"啪"一下变粗 ✗ ⇒ 平滑逼近 ✓）
     float clickFx = -1.0         // 点击涟漪起点（比例 0..1；< 0 = 没有 ✓）
+    // ★★ 2026-10-11（用户口径）：涟漪要**就地冒在点的地方** ✗ 先前只存了横向比例、
+    //   纵坐标一律画在**条子身上**（`by + rad`）⇒ 点条子上方/下方那一片时，涟漪"跑到条上去了" ✓
+    //   ⇒ 连纵坐标一起记：`clickCy` = 点击处**画布内** y（< 0 = 没点过 ⇒ 退回条子中心 ✓）
+    float clickCy = -1.0
     float clickT = 0.0           // 涟漪进度 0..1 ✓
     // （原 `dlPct`：试听期的"整首下载 %" 已随试听退役 ⇒ 边下边播的进度改由 buf_ratio() 现算 ✓）
 
@@ -231,6 +239,7 @@ export struct PlayerBar {
                 if rr < 0.0 { rr = 0.0 }
                 if rr > 1.0 { rr = 1.0 }
                 clickFx = rr                              // 涟漪：点哪儿都冒（手感反馈 ✓）
+                clickCy = cy                              // ★ 就地：纵坐标也记下来（见 clickCy 的注释 ✓）
                 clickT = 0.0
                 if not on_seek_bar(cy, seekBar.get_h()) {  // ★ 没点在条上 ⇒ 到此为止（只留涟漪 ✓）
                     SDL3.markFrameRedraw()
@@ -423,8 +432,12 @@ export struct PlayerBar {
             //     ⇒ 往上滚（dy > 0）要"看更早" ⇒ `lrcWheel` **加** ✓（先前写成减 ⇒ 滚上去反而往后跑 ✗）
             lrcView.on_wheel(func(float lx, float ly, float dx, float dy) {
                 lrcWheel = lrcWheel + dy * 0.6
-                if lrcWheel > 60.0 { lrcWheel = 60.0 }
-                if lrcWheel < -60.0 { lrcWheel = -60.0 }
+                // ★ 2026-10-11：纯文本歌词是"整段列出来"的 ⇒ 上限得按**行数**给
+                //   （写死 60 的话，超过 60 行的纯文本滚不到最末一行 ✗）
+                float lim = 60.0
+                if lrcUntimed { lim = _float(lrcRowText.len()) + 2.0 }
+                if lrcWheel > lim { lrcWheel = lim }
+                if lrcWheel < -lim { lrcWheel = -lim }
                 SDL3.markFrameRedraw()
             })
             // 点击：先看两颗药丸（回到当前句 / 立即下载歌词 ✓），否则当"点某句 ⇒ 跳那一句" ✓
@@ -724,10 +737,22 @@ export struct PlayerBar {
     // ==================== 折行窗口：把"当前句 ±6 句"摊成文本行（2026-10-08 ✓）====================
     //   为什么摊平：折行后"一句"可能占 1..N 行 ⇒ 后面画/点/居中全按**文本行**算最简单 ✓
     //   重算时机：换句 / 换歌 / 之前还是空的（歌词刚补读 ✓）—— **不是每帧** ✗
+    // ★★ 2026-10-11（用户口径）：**纯文本歌词**（整份没有时间 ✓ 见 player.lrc_from_text）走同一套
+    //   摊平 + 同一套绘制，只把两件事改掉 ⇒ **一行绘制代码都不用另写** ✓：
+    //     ① `lrcRowLine[k]` 记 **-1**（"不属于任何一句"）⇒ 画字那段的 `dist = |−1 − 0| = 1`
+    //        ⇒ 一律走**中档字号/淡色**那支（不大号、不高亮、不逐字 ✓ 正是"就显示文字" ✓）
+    //     ② 锚点从"当前句"改成**列表顶**（`lrcCurRow` 反推出"第 0 行落在面板上方 10px"✓）
+    //        —— `shift = (lrcCurRow - lrcWheel) * LRC_ROW` ⇒ y(第 0 行) = centerY − lrcCurRow*ROW ✓
+    //   且一次性摊**所有**行（那种歌词没有"当前句"⇒ 窗口化会让"第 7 行以后"永远看不到 ✗）；
+    //   它不随时间变 ⇒ 只算一次，几十行摊平的开销可忽略 ✓
     func rebuild_lrc_window(Player q) {
         int cur = lastLrcLine
         if cur < 0 { cur = 0 }
-        lrcWinCur = cur
+        bool plain = q.lyric_untimed()
+        lrcUntimed = plain
+        // ⚠ 存**原值**（纯文本时 lastLrcLine 是 -1）：tick_lrc 的"要不要重算"是拿 `lrcWinCur != li`
+        //   比的 ⇒ 存成 clamp 后的 0 就会**每拍都重算** ✗（本文件的纪律：不是每帧都重算 ✓）
+        lrcWinCur = lastLrcLine
         lrcWinTrack = q.current_name()
         lrcRowLine = []
         lrcRowText = []
@@ -737,6 +762,7 @@ export struct PlayerBar {
         if n <= 0 { return }
         int lo = cur - 6
         int hi = cur + 6
+        if plain { lo = 0; hi = n - 1 }
         if lo < 0 { lo = 0 }
         if hi > n - 1 { hi = n - 1 }
         int i = lo
@@ -745,17 +771,27 @@ export struct PlayerBar {
             if dist < 0 { dist = -dist }
             float fsz = 12.5
             if dist == 0 { fsz = 17.0 } eif dist == 1 { fsz = 14.0 }
+            if plain { fsz = 14.0 }          // 纯文本：一律中档（与下面"记 -1"那支对得上 ✓）
             // 可用宽度 ÷ 半个字号 = 允许多少"半角单元"（留 34px 给左右留白 + 竖条 ✓）
             int units = _int((LRC_W - 34.0) / (fsz * 0.5))
             Array[string] ps = pl.wrap_units(q.lyric_text_at(i), units)
             if ps.len() == 0 { ps = [""] }
             if i == cur {
-                lrcCurRows = ps.len()
-                lrcCurRow = _float(lrcRowLine.len()) + (_float(ps.len()) - 1.0) * 0.5
+                if plain {
+                    lrcCurRows = 1
+                    // 让"第 0 行"落在面板上方 **30px**：y(0) = centerY − lrcCurRow*ROW = oy + 30
+                    //   ⚠ 面板高就是常量 LRC_H（浮层按它挂的 ✓）⇒ 这个反推是稳的 ✓
+                    //   ⚠ 别贴太顶（10px 试过 ✗）：顶部有 ⑤ 那条**渐隐带**（oy+1 起 5 层 25px ✓）
+                    //     ⇒ 第一行会被压暗（截图里一眼就能看出来 ✓）⇒ 让出一整条带子 ✓
+                    lrcCurRow = (LRC_H / 2.0 - 30.0) / LRC_ROW
+                } else {
+                    lrcCurRows = ps.len()
+                    lrcCurRow = _float(lrcRowLine.len()) + (_float(ps.len()) - 1.0) * 0.5
+                }
             }
             int k = 0
             while k < ps.len() {
-                lrcRowLine.add(i)
+                lrcRowLine.add(if plain then -1 else i)   // -1 = "不是时间轴上的某一句"（见函数头 ① ✓）
                 lrcRowText.add(ps[k])
                 k = k + 1
             }
@@ -820,12 +856,15 @@ export struct PlayerBar {
         //   ⚠ 2026-10-08 用户点名去掉底框 ✗：大字 + 逐字刷色本身已经够显眼 ✓
         //     （先前那条底框还要照顾"折不折行/上下对称"⇒ 一堆偏差 ✗ 现在省了 ✓）
         //   竖条仍按"这几行文本行的几何中心"上下居中 ✓（折行也正 ✓）
-        float rowsC = lrcCurRow + (_float(lrcCurRows) - 1.0) * 0.5
-        float bandH = _float(lrcCurRows) * LRC_ROW - 6.0
-        float bandTop = centerY + rowsC * LRC_ROW - shift - bandH * 0.5
-        float a = lrcFade
-        r.setColorFloat(0.24, 0.51, 0.86, 0.30 + 0.60 * a)
-        r.fillRoundedRect(ox + 10.0, bandTop + 6.0, 3.0, bandH - 12.0, 1.5)
+        // ⚠ 2026-10-11：**纯文本歌词不画它**（那种歌词没有"当前句"⇒ 画一条竖条等于凭空指一行 ✗）
+        if not lrcUntimed {
+            float rowsC = lrcCurRow + (_float(lrcCurRows) - 1.0) * 0.5
+            float bandH = _float(lrcCurRows) * LRC_ROW - 6.0
+            float bandTop = centerY + rowsC * LRC_ROW - shift - bandH * 0.5
+            float a = lrcFade
+            r.setColorFloat(0.24, 0.51, 0.86, 0.30 + 0.60 * a)
+            r.fillRoundedRect(ox + 10.0, bandTop + 6.0, 3.0, bandH - 12.0, 1.5)
+        }
         // ---- ②③④ 逐"文本行"画字 ----
         // ★ 唱到第几个字：**有逐字时间就按逐字 ✓ 没有就退回"句内进度 × 字数"** ✓（规则在 player.leno ✓）
         //   浮点、亚字素 ✓（别取整 ✗ —— 取整就是"一跳一跳"的元凶 ✓）
@@ -894,7 +933,10 @@ export struct PlayerBar {
             float by2 = oy + ch - bh2 - 10.0
             r.setColorFloat(0.55, 0.62, 0.74, 0.22)
             r.fillRoundedRect(bx2, by2, bw2, bh2, 13.0)
-            r.drawTextCentered(lrcFontSmall, "回到当前句", bx2, bw2, by2 + (bh2 - lrcHSmall) * 0.5, #4A5566FF)
+            //   ★ 纯文本歌词没有"当前句" ⇒ 这颗药丸的意思是"回到**开头**"（同一件事：lrcWheel 归零 ✓）
+            string pillTx = "回到当前句"
+            if lrcUntimed { pillTx = "回到开头" }
+            r.drawTextCentered(lrcFontSmall, pillTx, bx2, bw2, by2 + (bh2 - lrcHSmall) * 0.5, #4A5566FF)
             pillBackX = bx2 - ox
             pillBackY = by2 - oy
         }
@@ -1024,6 +1066,7 @@ export struct PlayerBar {
                 clickT = clickT + 0.055
                 if clickT >= 1.0 {
                     clickFx = -1.0
+                    clickCy = -1.0                 // 涟漪收掉 ⇒ 纵坐标一起清（见 clickCy 的注释 ✓）
                     clickT = 0.0
                 }
             }
@@ -1358,10 +1401,15 @@ export struct PlayerBar {
         }
         if clickFx >= 0.0 {                                          // ⑥ 点击涟漪（两圈描边 ✓）
             float rx = ox + cw * clickFx
+            // ★★ 2026-10-11（用户口径）：涟漪**就地冒在点击处** —— 纵向用记下来的 `clickCy`
+            //   （先前一律画在 `by + rad` 那条条子上 ⇒ 点条子上方/下方时"涟漪跑到条上去了" ✗）
+            //   没记过（< 0：老状态/退化）⇒ 退回条子中心（观感与先前一致 ✓）
+            float ry = by + rad
+            if clickCy >= 0.0 { ry = oy + clickCy }
             float rr2 = rad * (1.6 + 9.0 * clickT)
             r.setColorFloat(0.24, 0.51, 0.86, 0.55 * (1.0 - clickT))
-            r.drawCircle(rx, by + rad, rr2)
-            r.drawCircle(rx, by + rad, rr2 - 1.5)
+            r.drawCircle(rx, ry, rr2)
+            r.drawCircle(rx, ry, rr2 - 1.5)
         }
     }
 

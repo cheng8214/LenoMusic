@@ -796,6 +796,13 @@ struct MusicDlApp {
                 }
             }
         }
+        // 歌词浮层自检（见 gLrcTick 注释 ✓）：第 2 拍把「词」面板打开（配 DSHOT 截它的样子 ✓）
+        if gLrcTick > 0 {
+            gLrcTick = gLrcTick - 1
+            if gLrcTick == 0 {
+                if pbar is PlayerBar => b { b.toggle_lrc() }
+            }
+        }
         // 歌单点击自检（见 gClickStep 注释 ✓）：注入真实点击 ⇒ 断言到底有没有落到控件上 ✓
         if gClickStep > 0 {
             int st = gClickStep
@@ -859,6 +866,7 @@ struct MusicDlApp {
                 } eif st == 3 {
                     gSeekOffText = stateLbl.get_text()      // 条外点击后的状态栏（期望空串 ✓）
                     gSeekOffFx = b.clickFx                  // 涟漪该冒出来（期望 ≥ 0 ✓）
+                    gSeekOffCy = b.clickCy                  // 且**就地**（期望 ≈ 2；条子中心是 26 ✓）
                     // ② 点**条子正中**：这次必须真去跳（没播过 ⇒ 状态栏会写"先播一首再拖进度"✓）
                     stateLbl.set_text("")
                     SDL3.testMoveAt(wid, sx, sy + ch / 2.0)
@@ -866,10 +874,13 @@ struct MusicDlApp {
                     print("[dseek] 注入点「条上」ok=" + _str(ok) + "\n")
                 } eif st == 4 {
                     string onBar = stateLbl.get_text()
-                    bool pass = gSeekOffText == "" and gSeekOffFx >= 0.0 and onBar != ""
+                    // 涟漪的纵向必须**落在点击处**（≈2）：不是条子中心（≈26）⇒ 证明"就地冒"✓
+                    bool local = _int(gSeekOffCy) <= 6
+                    bool pass = gSeekOffText == "" and gSeekOffFx >= 0.0 and local and onBar != ""
                     print("[dseek] " + (if pass then "通过" else "**不通过**")
                           + "：条外点击 -> 状态栏=\"" + gSeekOffText + "\"（期望空 ⇒ 只留涟漪）"
                           + " 涟漪=" + (if gSeekOffFx >= 0.0 then "有" else "没有")
+                          + " 纵坐标=" + _str(_int(gSeekOffCy)) + "（期望 ≈2 就地，条子中心 " + _str(_int(ch / 2.0)) + "）"
                           + "；条上点击 -> 状态栏=\"" + onBar + "\"（期望非空 ⇒ 真去跳）\n")
                     SDL3.requestExit()
                 }
@@ -2643,10 +2654,19 @@ int gClickRow3 = -1     // 自检记录：点第 3 行后的下标（期望 2 �
 //     player_bar.on_seek_bar）：光看代码 / 编译都发现不了"条外那一片到底还跳不跳"✗ ⇒ 必须注入真点击 ✓
 //   判据不依赖音频设备（这点很关键：本仓自检要能在没声卡的机器上跑 ✓）：
 //     ① 条外点击 ⇒ **一个字的提示都不该写**（状态栏保持空 ✓）但**涟漪要冒**（`clickFx >= 0` ✓）
-//     ② 条上点击 ⇒ 会走 seek 那条路：没播过 ⇒ 状态栏写"先播一首再拖进度"（非空 ✓）
+//     ② 涟漪要**就地**冒：`clickCy` 落在点击的那个 y（≈2）上，而**不是**条子中心（≈26）✓
+//     ③ 条上点击 ⇒ 会走 seek 那条路：没播过 ⇒ 状态栏写"先播一首再拖进度"（非空 ✓）
 int gSeekStep = 0
 string gSeekOffText = ""      // 条外点击后的状态栏（期望空 ✓）
 float gSeekOffFx = -1.0       // 条外点击后的涟漪起点（期望 ≥ 0 ✓）
+float gSeekOffCy = -1.0       // 条外点击后的涟漪**纵坐标**（期望 ≈ 2，即**就地**而不是条子中心 26 ✓）
+
+// 歌词浮层自检（`DLRC=1` ⇒ 第 2 拍把「词」面板打开 ✓）：
+//   为什么要它：歌词浮层是**自绘画布**（折行 / 当前句放大 / 逐字刷色 / **纯文本静态列** ✓）——
+//   这些只能"看"，而在无头/自动化里没人能点那颗「词」按钮 ✗；浮层属于**主窗口** ⇒ `DSHOT` 截得到 ✓
+//   用法：`DLRC=1 DSHOT=<png> DSHOT_AT=150 build\leno.exe <本文件>`（配 `DCROP` 只截下面那一条 ✓）
+//   想连"在播 + 有歌词"一起看：先往 `downloads\` 放同名 `.mp3 + .lrc`，再配 `DPLAY=1` ✓
+int gLrcTick = 0
 
 // ★ 2026-10-09：`gPreviewCh / gPreviewThread / PREVIEW_BYTES` 与 `gBgDl*` **整套退役** ——
 //   它们服务的是"试听：拉前一段 + 静默下整首"那条老路；现在双击/右键「播放」= 播放整表 + 边下边播，
@@ -2780,6 +2800,8 @@ main() {
     }
     var dsk = _env("DSEEK")
     if dsk != null { if _int(_str(dsk)) > 0 { gSeekStep = 1 } }   // 进度条点击闸门（见 gSeekStep 注释 ✓）
+    var dlrc = _env("DLRC")
+    if dlrc != null { if _int(_str(dlrc)) > 0 { gLrcTick = 2 } }  // 歌词浮层（见 gLrcTick 注释 ✓）
     var bs = _env("DBANGSIZE")
     if bs != null { gBangSizeCheck = true }
     var bo = _env("DBANGONLY")
