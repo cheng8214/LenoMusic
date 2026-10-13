@@ -465,10 +465,10 @@ export struct BangPage {
     // ==================== 页盒（交给宿主 tab.setPageLayout(1, …)）====================
     //   页内用布局驱动（setPageLayout ⇒ 窗口缩放跟着重排 ✓ 照 dashboard 的做法 ✓）
     func make_page(): VBox {
-        var page1 = SDL3.createVBox({padX: 0, padY: 0, spacing: 6})    // 与搜索页同一个行距口径 ✓
+        var page1 = SDL3.createVBox({pad_x: 0, pad_y: 0, spacing: 6})    // 与搜索页同一个行距口径 ✓
 
         // ---- 工具行：站点 + 榜单 + 重新加载 ----
-        var brow = SDL3.createHBox({h: 32, padX: 0, padY: 0, spacing: 8})
+        var brow = SDL3.createHBox({h: 32, pad_x: 0, pad_y: 0, spacing: 8})
         brow.add(SDL3.createLabel({text: "站点", font_size: 13}), {grow: 0, shrink: 0, align: 1})
         //   站点下拉：只用**有榜单的四个源**（咪咕还没接 ⇒ 不进这个下拉 ✓）
         srcBox = SDL3.createComboBox({
@@ -531,7 +531,7 @@ export struct BangPage {
         page1.add(table, {grow: 1, shrink: 1, align: 3})
 
         // ---- 状态行 ----
-        var bstatus = SDL3.createHBox({h: 24, padX: 0, padY: 0, spacing: 12})
+        var bstatus = SDL3.createHBox({h: 24, pad_x: 0, pad_y: 0, spacing: 12})
         lbl = SDL3.createLabel({text: "切到本页会自动加载所选站点的第 1 个榜单（免登录）", font_size: 12, truncate: 1, max_w: 1040.0})
         bstatus.add(lbl, {grow: 1, shrink: 1, align: 1})
         page1.add(bstatus, {grow: 0, shrink: 0, align: 3})

@@ -904,14 +904,14 @@ struct MusicDlApp {
         win.add(titleBar)
         float titleH = titleBar.get_h()
 
-        var root = SDL3.createVBox({padX: 12, padY: 10, spacing: 8})
+        var root = SDL3.createVBox({pad_x: 12, pad_y: 10, spacing: 8})
 
         // ---- 搜索页（页 0）：整页在 search_page.leno ✓ 这里只"建页 + 套初值 + 摆四行一表 + 接线" ----
         //   ★ 2026-10-09：整页交给一个 VBox + `tab.setPageLayout(0, page0)` ⇒ **页内也布局驱动**
         //     （窗口缩放时页里跟着重排 ✓ 不用一行绝对坐标；做法照数据看板 dashboard.leno ✓）
         //   ⚠ `spacing` 别给 0：三行控件行的高（34/30/32）里控件自己就占了 32/30/32 ⇒ 行间只剩
         //     2~4px、"操作行 → 表格"更是**只有 1px**（实测 ✓ 表格像贴在按钮上 ✗）⇒ 统一给 6 ✓
-        var page0 = SDL3.createVBox({padX: 0, padY: 0, spacing: 6})
+        var page0 = SDL3.createVBox({pad_x: 0, pad_y: 0, spacing: 6})
         //   `lyricBox`（"同时下载歌词"）由**本文件**建：它是"要记住的设置项"那一族 ✓ 且搜索页要把它
         //     摆进操作行 ⇒ **必须赶在建页之前**建好（当参数交过去 ✓）
         lyricBox = SDL3.createCheckBox({text: "同时下载歌词", checked: cfg.lyric, font_size: 13})
@@ -949,7 +949,7 @@ struct MusicDlApp {
             page0.add(spg0.make_search_row(), {grow: 0, shrink: 0, align: 3})
             //   ⚠ 源行是**交叉**的：本页的复选框在前、宿主的"输出目录 + 选择目录"在后 ✓
             //     （所以页只把复选框"追加"进这一行 ⇒ 视觉与拆分前一模一样 ✓）
-            var row2 = SDL3.createHBox({h: 30, padX: 0, padY: 0, spacing: 10})
+            var row2 = SDL3.createHBox({h: 30, pad_x: 0, pad_y: 0, spacing: 10})
             row2.add(SDL3.createLabel({text: "音源：", font_size: 13}), {grow: 0, shrink: 0, align: 1})
             spg0.build_sources_into(row2)
             // ★ 弹性空隙放在这里 ⇒「输出目录 + 路径 + 选择目录」整组被推到**行右侧**、
@@ -1013,7 +1013,7 @@ struct MusicDlApp {
                         //       框架原先只把**文字**在"图标右边的剩余区"里居中 ⇒ 96 宽时左 6 / 右 30 ✗，
                         //       越宽越偏左（所以"变长"直接卡在这，不是单纯把 w 写大就完事 ✗）
                         //       框架改成 [图标 + 间距 + 文字] 整块居中后，本处只要写 w 即可 ✓
-                        var side = SDL3.createVBox({padX: 0, padY: 16, spacing: 8})
+                        var side = SDL3.createVBox({pad_x: 0, pad_y: 16, spacing: 8})
                                                 navSearch = SDL3.createButton({w: 92, h: 36, text: "搜索", font_size: 14, padding: 0,
                                       background: true, bg_color: #F2D33CFF, text_color: #1F1F1FFF,
                                 image_path: iconNavSearch, image_size: 20, image_gap: 8,
@@ -1058,7 +1058,7 @@ struct MusicDlApp {
                   tab.on_change(func(int idx) { onTabChanged(idx) })
 
                         // 侧栏 + 页签内容并排（TabControl 吃剩余宽度 ⇒ 窗口缩放时页内跟着重排 ✓）
-                        var body = SDL3.createHBox({padX: 0, padY: 0, spacing: 0})
+                        var body = SDL3.createHBox({pad_x: 0, pad_y: 0, spacing: 0})
                         body.add(side, {grow: 0, shrink: 0, basis: 104, align: 3})
                         body.add(tab, {grow: 1, shrink: 1, align: 3})
                 root.add(body, {grow: 1, shrink: 1, align: 3})

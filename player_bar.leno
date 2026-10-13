@@ -187,7 +187,7 @@ export struct PlayerBar {
         if p == null { p = new Player() }
 
         // 外盒：AnchorBox（绝对定位 ✓）—— 高度就是主行 + 细线；浮层向上溢出，不占它的高 ✓
-        box = SDL3.createAnchorBox({x: 0, y: 0, w: 0, h: BAR_TOTAL, padX: 0, padY: 0})
+        box = SDL3.createAnchorBox({x: 0, y: 0, w: 0, h: BAR_TOTAL, pad_x: 0, pad_y: 0})
 
         if p is Player => q {
             q.scan(dir)
@@ -198,7 +198,7 @@ export struct PlayerBar {
             //     进度条**不再独占一行** ✗ —— 原来它顶在最上面却是"0% 的空槽 + 大片留白" ✗
             //     ⇒ 挪到"歌名之后"那段空白里 ✓：省掉一整行高度、中间也不再空 ✗✓
             //     只读：拖拽定位是二期（要先看护"正在读的文件被换掉" ✓）
-            var row = SDL3.createHBox({h: BAR_H, padX: 0, padY: 0, spacing: 10})
+            var row = SDL3.createHBox({h: BAR_H, pad_x: 0, pad_y: 0, spacing: 10})
             //   ⚠⚠ 为什么用**画布自绘**而不是 `ProgressBar` 控件：
             //     布局里 `grow: 1` 在 HBox 会**连高度一起撑满**（sdl_layout:213 `else if g > 0.0 { ch = innerH }` ✓）
             //     ⇒ 控件版进度条会变成 60×52 的**圆饼** ✗（`drawBar` 用 h/2 当圆角 ⇒ 宽≈高就是圆 ✓）
@@ -284,7 +284,7 @@ export struct PlayerBar {
             //     ⇒ 先前用 `align: 0`：宽度被**冻结在建窗时的文字宽**（那会儿还没歌 ⇒ ~45px ✗）
             //       ⇒ `min(200, 45) = 45` ⇒ 标题永远只剩「试听…」，右边空一大片 ✗✗（就是你看到的 ✓）
             //     ⇒ 想"文字随块宽自动伸缩 + 超长才省略"：**align: 3 + max_w 与块宽同源** ✓（INFO_W ✓）
-            var info = SDL3.createVBox({h: 46, padX: 0, padY: 3, spacing: 2})
+            var info = SDL3.createVBox({h: 46, pad_x: 0, pad_y: 3, spacing: 2})
             songLbl = SDL3.createLabel({text: song_text(q), font_size: 14, truncate: 1, max_w: INFO_W})
             info.add(songLbl, {grow: 0, shrink: 0, align: 3})
             artistLbl = SDL3.createLabel({text: artist_text(q), font_size: 12, truncate: 1, max_w: INFO_W})
@@ -299,7 +299,7 @@ export struct PlayerBar {
             row.add(timeLbl, {grow: 0, shrink: 0, basis: 92, align: 1})
 
             // 中：控制按钮（`justify: 1` = 居中 ✓；子项都 grow:0 它才生效 ✓）
-            var mid = SDL3.createHBox({h: BAR_H, padX: 0, padY: 0, spacing: 4, justify: 1})
+            var mid = SDL3.createHBox({h: BAR_H, pad_x: 0, pad_y: 0, spacing: 4, justify: 1})
             btnPrev = icon_btn("prev", "上一曲", 34.0, 34.0)
             btnPrev.on_click(func() {
                 if p is Player => w { w.prev() }
@@ -331,7 +331,7 @@ export struct PlayerBar {
             row.add(mid, {grow: 0, shrink: 0, basis: 122, align: 1})
 
             // 右：循环 / 音量 / 重扫 / **列表（最右，与酷狗一致 ✓）**
-            var right = SDL3.createHBox({h: BAR_H, padX: 0, padY: 0, spacing: 6})
+            var right = SDL3.createHBox({h: BAR_H, pad_x: 0, pad_y: 0, spacing: 6})
             btnLoop = icon_btn("loop_all", "循环：关 / 列表 / 单曲（点一下切一档）", 32.0, 26.0)
             btnLoop.on_click(func() {
                 if p is Player => w {

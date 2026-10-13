@@ -62,16 +62,16 @@ struct AboutDialog {
         int tbH = SDL3.DIALOG_TB_H
         var dlg = SDL3.createDialogWindow({title: title, w: dw, h: tbH + dh})
         var tb = SDL3.dialogTitleBar(dlg, title)
-        var root = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, padX: 22, padY: 16, spacing: 8})
+        var root = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, pad_x: 22, pad_y: 16, spacing: 8})
         dlg.setRootAt(root, 0, tb.get_h())
 
         float innerW = _float(dw - 44)       // 正文折行宽度 = 宽 − 两侧 padX(22 × 2) ✓
 
         // ---- ① 头部：图标 + 名称 + 版本（图标与两行文字**同一行**、交叉轴居中 ✓）----
-        var head = SDL3.createHBox({h: 46, padX: 0, padY: 0, spacing: 12})
+        var head = SDL3.createHBox({h: 46, pad_x: 0, pad_y: 0, spacing: 12})
         head.add(SDL3.createImageView({w: 44, h: 44, image_path: appicon()}),
                  {grow: 0, shrink: 0, basis: 44, align: 1})
-        var htext = SDL3.createVBox({padX: 0, padY: 0, spacing: 2})
+        var htext = SDL3.createVBox({pad_x: 0, pad_y: 0, spacing: 2})
         htext.add(SDL3.createLabel({text: "Leno 音乐下载器", font_size: 18}), {grow: 0, shrink: 0, align: 0})
         htext.add(SDL3.createLabel({text: "v" + APP_VERSION + " · MIT 许可 · 搜索 / 试听 / 下载 / 播放（GUI 与 CLI 共用同一套引擎）",
                                     font_size: 11, text_color: COLOR_DIM, wrap: true, wrap_w: innerW - 56.0}),

@@ -182,7 +182,7 @@ export struct DlWindow {
         dlg = SDL3.createModelessDialog({title: title, w: dw, h: tbH + dh})
         dlg.raise()
         TitleBar tb = SDL3.dialogTitleBar(dlg, title)
-        var droot = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, padX: 16, padY: 14, spacing: 8})
+        var droot = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, pad_x: 16, pad_y: 14, spacing: 8})
         dlg.setRootAt(droot, 0, tb.get_h())
         // ★ 2026-10-09：内容拆成**两个页签**（页 0 = 下载任务 / 页 1 = 下载历史 ✓）
         //   为什么用页签、不再开一个窗口：任务与历史是同一条流程的两面（刚下完就想回头看看 ✓），
@@ -190,7 +190,7 @@ export struct DlWindow {
         //   （做法照 leno_gui 数据看板 dashboard.leno 与主界面：`setPageLayout` ⇒ 页内也是布局驱动 ✓）
         //   padY 12：页签头与页内容之间留一口气（原先 0 ⇒ 按钮行紧贴「下载 / 历史」标签，挤 ✗）
         //   spacing 10：表 / 进度条 / 说明 / 按钮各行之间也松一点 ✓
-        var page0 = SDL3.createVBox({padX: 0, padY: 12, spacing: 10})
+        var page0 = SDL3.createVBox({pad_x: 0, pad_y: 12, spacing: 10})
 
         // 重置本轮状态
         closing = false
@@ -560,10 +560,10 @@ export struct DlWindow {
 
     func buildHistoryPage(): VBox {
         // 口径与下载页一致：padY 12（页签头与工具行拉开）/ spacing 10 ✓
-        var page = SDL3.createVBox({padX: 0, padY: 12, spacing: 10})
+        var page = SDL3.createVBox({pad_x: 0, pad_y: 12, spacing: 10})
 
         // 工具行：按钮**同高同距**（30/8 太挤 ⇒ 32/10），宽度按文字长短给（96 / 116 / 116 ✓）
-        var row = SDL3.createHBox({h: 32, padX: 0, padY: 0, spacing: 10})
+        var row = SDL3.createHBox({h: 32, pad_x: 0, pad_y: 0, spacing: 10})
         Button refreshBtn = SDL3.createButton({w: 96, h: 32, text: "刷新", type: "dark", font_size: 13})
         refreshBtn.set_tip("重新从磁盘读一遍历史（在别处改过文件时用）")
         refreshBtn.on_click(func() { reloadHistory(); SDL3.markFrameRedraw() })

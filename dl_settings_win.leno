@@ -27,13 +27,13 @@ struct SettingsDialog {
         int tbH = SDL3.DIALOG_TB_H
         var dlg = SDL3.createDialogWindow({title: title, w: dw, h: tbH + dh})
         TitleBar tb = SDL3.dialogTitleBar(dlg, title)
-        var root = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, padX: 20, padY: 16, spacing: 10})
+        var root = SDL3.createVBox({x: 0, y: 0, w: dw, h: dh, pad_x: 20, pad_y: 16, spacing: 10})
         dlg.setRootAt(root, 0, tb.get_h())
 
         DlSettings cur = cfg.load()
 
         // ---- 并行下载线程数（**多首歌同时下**）----
-        var row1 = SDL3.createHBox({h: 34, padX: 0, padY: 0, spacing: 10})
+        var row1 = SDL3.createHBox({h: 34, pad_x: 0, pad_y: 0, spacing: 10})
         row1.add(SDL3.createLabel({text: "并行下载线程数（多首歌同时下）", font_size: 13}), {grow: 1, shrink: 1, align: 1})
         spin = SDL3.createSpinBox({w: 96, h: 30, min: cfg.WORKERS_MIN, max: cfg.WORKERS_MAX, step: 1,
                                    value: cur.workers, int_mode: true, font_size: 13})

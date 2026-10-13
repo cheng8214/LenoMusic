@@ -543,7 +543,7 @@ export struct SearchPage {
     // ==================== 页内四行一表（由宿主按原顺序摆进 page0 ✓）====================
     // ---- ① 搜索行：图标 + 关键词 + 搜索按钮 + 格式 + 每源条数 ----
     func make_search_row(): HBox {
-        var row1 = SDL3.createHBox({h: 34, padX: 0, padY: 0, spacing: 8})
+        var row1 = SDL3.createHBox({h: 34, pad_x: 0, pad_y: 0, spacing: 8})
         // ★ 搜索框左边的小音符（2026-10-08 ✓）：`images\music.png`
         //   它是**彩色**图（绿色音符 + 透明底 ✓）⇒ 不用 tint ✓；不给 `image_mode` ⇒ 走默认
         //   `MODE_ASPECT_FIT`（保持比例、完整显示 ✓）—— 给了 1（拉伸）就会被拉变形 ✗
@@ -620,7 +620,7 @@ export struct SearchPage {
 
     // ---- ③ 操作行：下载勾选 / 下载选中行 / 歌词开关 / 分组（全选·全不选）/ 已选统计 ----
     func make_action_row(): HBox {
-        var row3 = SDL3.createHBox({h: 32, padX: 0, padY: 0, spacing: 8})
+        var row3 = SDL3.createHBox({h: 32, pad_x: 0, pad_y: 0, spacing: 8})
         dlCheckedBtn = SDL3.createButton({w: 140, h: 30, text: "下载勾选", type: "success", font_size: 13})
         dlCheckedBtn.set_tip("下载列表里勾选的歌曲（默认全勾）；一首都没勾也能点 —— 会打开（空的）下载窗口，可看「历史」")
         dlCheckedBtn.on_click(func() { if dlChecked != null { dlChecked() } })
@@ -649,7 +649,7 @@ export struct SearchPage {
         //     `get_w()`，而 HBox 的 `w` 默认 **300**（不是内容宽 ✗）⇒ 不给就白占 300-176=124px，
         //     把它后面的「已选 N / M 首」顶到**行中间**（左侧本该 8px，实测 148px ✗）
         //     （176 = padX14 + 全选70 + spacing8 + 全不选70 + padX14 ✓）
-        var selGroup = SDL3.createHBox({w: 176, h: 32, padX: 14, padY: 0, spacing: 8})
+        var selGroup = SDL3.createHBox({w: 176, h: 32, pad_x: 14, pad_y: 0, spacing: 8})
         selAllBtn = SDL3.createButton({w: 70, h: 30, text: "全选", font_size: 13})
         selAllBtn.on_click(func() { table.check_all(); update_count(); SDL3.markFrameRedraw() })
         selGroup.add(selAllBtn, {grow: 0, shrink: 0, basis: 70, align: 3})
@@ -711,7 +711,7 @@ export struct SearchPage {
 
     // ---- ⑤ 状态行（★ 属搜索页 ⇒ 与榜单页各有一条 ✓；宿主要用它写别的信息 ⇒ 走 status_label() ✓）----
     func make_status_row(): HBox {
-        var statusRow = SDL3.createHBox({h: 24, padX: 0, padY: 0, spacing: 12})
+        var statusRow = SDL3.createHBox({h: 24, pad_x: 0, pad_y: 0, spacing: 12})
         stateLbl = SDL3.createLabel({text: "就绪", font_size: 13})
         statusRow.add(stateLbl, {grow: 1, shrink: 1, align: 1})
         statusRow.add(SDL3.createLabel({text: "双击某行 = 播放（没下过的边下边播）；右键 = 下载/批量/复制/打开目录", font_size: 12}), {grow: 0, shrink: 0, align: 2})
