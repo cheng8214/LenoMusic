@@ -208,7 +208,7 @@ export struct PlayerBar {
             //     "输入框底色"（sdl_canvas:107 `bgColor = th.bgInput` ✓）⇒ 浅色主题下就是**白白一块** ✗
             //     （看着像"进度条带白底" ✓ 其实那是控件底、不是我画的条 ✗）
             //     ⇒ 必须 `bg_color` 透明 ✓；且要用 **setter**（写 opts 会被主题覆盖 ✓ 同 Button 那次 ✗）
-            seekBar = SDL3.createCanvas({w: 400, h: BAR_H, pad: 0, border: false, border_width: 0})
+            seekBar = SDL3.createCanvas({w: 400, h: BAR_H, pad: 0, border: false, border_w: 0})
             seekBar.set_bg_color(#00000000)
             seekBar.on_draw(func(Renderer r, float ox, float oy, float cw, float ch) {
                 float ratio = 0.0
@@ -268,7 +268,7 @@ export struct PlayerBar {
 
             // 左①：转动的唱片（44 见方 ✓）
             //   ⚠ `align: 1` = **垂直居中**；在 HBox 里 `align: 3` 是"撑满交叉轴"⇒ 控件会被抻高 ✗
-            disc = SDL3.createCanvas({w: 44, h: 44, pad: 0, border: false, border_width: 0})
+            disc = SDL3.createCanvas({w: 44, h: 44, pad: 0, border: false, border_w: 0})
             disc.set_bg_color(#00000000)     // 转盘画布同理：透明底（否则圆外的四个角是一块实心底 ✗）
             disc.on_draw(func(Renderer r, float ox, float oy, float cw, float ch) {
                 draw_disc(r, ox + cw / 2.0, oy + ch / 2.0, (if cw < ch then cw else ch) / 2.0 - 1.0)
@@ -382,7 +382,7 @@ export struct PlayerBar {
             //   为什么是"每帧登记"：框架每帧渲染前会 clear（sdl_window:1611 ✓ 见 SDL3.leno 的说明 ✓）
             //   ⚠ 画布默认有**不透明底** ⇒ 必须显式透明（速查 ④.5 ✓）
             //   ⚠ 必须排在 `lb` **之前** add：AnchorBox 按插入顺序渲染 ⇒ 它在浮层下面（不遮字 ✓）
-            capSink = SDL3.createCanvas({w: LIST_W, h: LRC_H, pad: 0, border: false, border_width: 0})
+            capSink = SDL3.createCanvas({w: LIST_W, h: LRC_H, pad: 0, border: false, border_w: 0})
             capSink.set_bg_color(#00000000)
             capSink.on_draw(func(Renderer r, float ox, float oy, float cw, float ch) {
                 // 登记**当前展开的那个**浮层（歌单 / 歌词 二选一 ✓ 同时只开一个 ⇒ 不会打架 ✓）
@@ -424,7 +424,7 @@ export struct PlayerBar {
             lrcHBig = mh1
             lrcHMid = mh2
             lrcHSmall = mh3
-            lrcView = SDL3.createCanvas({w: LRC_W, h: LRC_H, pad: 0, border: false, border_width: 0})
+            lrcView = SDL3.createCanvas({w: LRC_W, h: LRC_H, pad: 0, border: false, border_w: 0})
             lrcView.set_bg_color(#00000000)      // 底由我自己画（圆角白底 ✓ 见 draw_lyrics）
             lrcView.on_draw(func(Renderer r, float ox, float oy, float cw, float ch) {
                 draw_lyrics(r, ox, oy, cw, ch)

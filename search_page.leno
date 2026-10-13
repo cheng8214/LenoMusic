@@ -689,8 +689,8 @@ export struct SearchPage {
             //   先前必须每次 set_rows 后重贴（`set_rows` 会清 rowImages ✗ 见 fill_table 的历史注释 ✓）
             //   ⇒ 现在一次给、永不掉 ✓
             image_path: rowIcon,
-            sortable: true, zebra: true, row_h: 26, header_h: 30, font_size: 14,
-            multi: true,
+            sortable: true, zebra: true, item_h: 26, header_h: 30, font_size: 14,
+            multi_select: true,
             empty_text: "还没有结果 —— 输入关键词后回车搜索"
         })
         table.on_check(func(int col, Array[int] checked) { update_count() })

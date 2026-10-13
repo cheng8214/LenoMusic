@@ -866,7 +866,7 @@ struct MusicDlApp {
         }
         if dlShot != "" { print("[musicdl] 图标目录（自检）：" + imgDir + "\n") }
         titleBar = SDL3.createTitleBar({
-            title: "Leno 音乐下载器", height: 32, font_size: 14,
+            title: "Leno 音乐下载器", h: 32, font_size: 14,
             // ★ 标题前的应用图标（2026-10-07 新增）：只有文字时标题前面空一块、观感差 ✗
             //   与文字**整体**居中/左对齐，尺寸比窗口按钮图标略大一点（18 vs 16 ✓）
             title_icon: iconApp, title_icon_size: 18,
@@ -882,7 +882,7 @@ struct MusicDlApp {
             //     （实测：download.png/setting.png 是**纯白** glyph，放浅色栏上直接"消失" ✗）
             //     ⇒ 两个动作按钮改用**内置矢量名**（"download"/"settings"）⇒ 跟着这个色走、永不会白 ✓
             icon_color: #3C414BFF,          // 深灰而不纯黑，浅底上更耐看 ✓
-            separator_color: #D5D8DFFF,     // 发丝分隔线（比底色深一档 ⇒ 与页面分开 ✓）
+            sep_color: #D5D8DFFF,     // 发丝分隔线（比底色深一档 ⇒ 与页面分开 ✓）
             hover_color: #D9DBE3FF,         // 悬停：再深一档灰 ✓
             //   关闭键悬停：用**浅红**而不是深红 —— 图标色是深的，压在深红上会糊成一片 ✗
             //   （框架的关闭图标不随悬停换色 ⇒ 浅红底 + 深 ✕ 才看得清 ✓）

@@ -514,8 +514,8 @@ export struct BangPage {
             header_aligns: [1, 0, 0, 0, 1, 1, 2],
             check_col: 0,
             image_col: 1, image_size: 18, image_gap: 6, image_path: rowIcon,
-            sortable: true, zebra: true, row_h: 26, header_h: 30, font_size: 14,
-            multi: true,
+            sortable: true, zebra: true, item_h: 26, header_h: 30, font_size: 14,
+            multi_select: true,
             empty_text: "还没有榜单 —— 切到本页会自动加载所选站点的第1 个榜单"
         })
         //   双击 = 播放整表（★ 与搜索表同一套语义：都走宿主的 playFrom ✓）

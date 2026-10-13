@@ -229,7 +229,7 @@ export struct DlWindow {
             col_widths: [360.0, 64.0, 96.0, 104.0, 200.0],
             aligns: [0, 1, 2, 1, 1],
             header_aligns: [0, 1, 2, 1, 1],
-            zebra: true, row_h: 26, header_h: 28, font_size: 13,
+            zebra: true, item_h: 26, header_h: 28, font_size: 13,
             sortable: false, col_reorder: false, resizable: false,
             empty_text: "还没有任务 —— 勾选歌曲后点「下载勾选」",
             // ★ 进度列 = **真进度条**（2026-10-07）：原先这列只能把进度写成文字"37%" ✗
@@ -592,7 +592,7 @@ export struct DlWindow {
             col_widths: [380.0, 64.0, 96.0, 134.0, 150.0],
             aligns: [0, 1, 2, 1, 1],
             header_aligns: [0, 1, 2, 1, 1],
-            zebra: true, row_h: 26, header_h: 28, font_size: 13,
+            zebra: true, item_h: 26, header_h: 28, font_size: 13,
             sortable: false, col_reorder: false, resizable: false,
             empty_text: "还没有下载记录 —— 下完一首就会自动记在这儿"
         })
