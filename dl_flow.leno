@@ -198,16 +198,27 @@ export struct DlFlow {
         }
         if streamRunning and streamTag == tag { return }   // 同一首已在流 ⇒ 不重复起 ✗
         // ⚠⚠ 同一首别让两个线程写**同一个路径**（并发写会把文件写坏 ✗✗）
-        //   下载窗口里正在下这首 ⇒ 不起流，明确说清（它下完 sync_locals 之后这首就是"本地已有" ✓）
+        //   下载窗口里**正在下**这首 ⇒ 不起流，明确说清（它下完 sync_locals 之后这首就是"本地已有" ✓）
+        //   ★★ 2026-10-16 修（用户实测："打开下载窗口、不管它，再去点播另一首 ⇒ 只有歌名、不出声"）：
+        //     原先条件只有 **`w.open` + 任务表里有这首** ⇒ 太宽 ✗✗
+        //     而主界面那两个下载入口**没勾选也开窗**、搜索表又默认全勾 ⇒ 极容易造成
+        //     "窗口里躺着一堆**还没点开始**的任务" ⇒ 于是点**任何一首**都被拦，全都播不了 ✗
+        //     ⇒ 现在只在**这一轮真的在下载**（已开始、没结束、也没暂停）、
+        //        并且**那一行确实还没到终态**时才拦 ✓
+        //       （没开始 / 暂停 / 已完成 / 已取消 / 失败 ⇒ 一律放行，让播放器自己去播 ✓）
         if dl is DlWindow => w {
-            if w.open {
+            if w.open and w.started and not w.finished and not w.paused {
                 int k = 0
                 while k < w.jobs.len() {
                     if eng.songlabel(w.jobs[k]) == tag {
-                        stateLbl.set_text("这首正在下载窗口里下着 —— 先别听（等它下完再点一次即可）")
-                        if pbar is PlayerBar => b2 { b2.fail_stream("这首正在下载窗口里下载中") }
-                        SDL3.markFrameRedraw()
-                        return
+                        bool busyRow = true                    // 该行还没到终态 ⇒ 这一轮真会写这个文件 ✓
+                        if k < w.status.len() { busyRow = not w.istaskdone(w.status[k]) }
+                        if busyRow {
+                            stateLbl.set_text("这首正在下载窗口里下着 —— 先别听（等它下完再点一次即可）")
+                            if pbar is PlayerBar => b2 { b2.fail_stream("这首正在下载窗口里下载中") }
+                            SDL3.markFrameRedraw()
+                            return
+                        }
                     }
                     k = k + 1
                 }

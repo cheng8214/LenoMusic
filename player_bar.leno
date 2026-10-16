@@ -1548,6 +1548,11 @@ func artist_text(Player q): string {
         return "边下边播 " + _str(pct) + "%（下完就能随便拖）"
     }
     if q.count() == 0 { return "下几首就有得听了（也可以双击表格里的一首）" }
+    // ★ 2026-10-16：把**最近一次失败原因**显示出来 —— 字段 `err` 一直都有（打开失败 / 流建不起来 /
+    //   "这首正在下载窗口里下着" 都会写它 ✓），但界面上从来没有显示它的地方 ✗✗
+    //   ⇒ 用户看到的就是"点了播放、只有歌名、不出声、也没任何提示"，纯粹莫名其妙 ✗（实测反馈 ✓）
+    //   ⚠ 只在**没在播**时显示：正播着还挂着上次的旧错误就是噪音 ✓（下次成功播放会自动清掉它 ✓）
+    if q.err != "" and not q.playing { return q.err }
     string a = pl.split_artist(q.current_name())
     if a == "" { return (if q.playing then "正在播放" else "已暂停") }
     return a
