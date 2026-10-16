@@ -7,6 +7,6 @@ downloads/
 
 # 模块编译缓存（跨运行缓存 import 的 .leno 模块编译产物）
 .lenocache/
-
+.lenocache_lsp/
 # 打包输出（leno -p）—— 产物落在 <源码目录>/dist
 dist/
