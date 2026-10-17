@@ -15,6 +15,7 @@ import dirs
 import "web_net" as net
 import "kuwo_core.leno" as kuwo
 import "kuwo_lyric.leno" as lyric
+import "CLI" as cli          // 2026-10-17：手写参数解析换成 LenoCLI
 
 use net.(HttpClient)
 use kuwo.(SongInfo)
@@ -43,15 +44,6 @@ func printhelp() {
     print("  leno.exe musicdl.leno 周杰伦 晴天")
     print("  leno.exe musicdl.leno -n 3 -o D:\\Music 许嵩 有何不可")
     print("  leno.exe musicdl.leno --lyric-only -n 5 周杰伦")
-}
-
-// ==================== 命令行参数 ====================
-func takevalue(Array args, int idx, string flag, string fallback): string {
-    // 取 -x 后面的值：缺值就沿用 fallback
-    if idx + 1 >= args.len() { return fallback }
-    string value = _str(args[idx + 1])
-    if value.starts_with("-") { return fallback }
-    return value
 }
 
 // ==================== 列表输出 ====================
@@ -131,50 +123,40 @@ func downloadtop(HttpClient client, Array[SongInfo] songs, int top, string outdi
 main() {
     net.globalInit()
 
-    Array args = _args()
-    int top = 1
-    int limit = DEFAULT_LIMIT
-    string outdir = ""
-    bool searchonly = false
-    bool wantlyric = true          // 默认连歌词一起下
-    bool lyriconly = false
-    Array[string] words = []
+    // ---- 参数解析：LenoCLI（原来是一大段手写 while+if+takevalue）----
+    var spec = cli.spec("musicdl", "酷我音乐搜索 + 下载（音频 + 歌词）",
+                        "leno.exe musicdl.leno [选项] <关键词…>")
+    cli.flag(spec, "-s", "--search", "只搜索并列出，不下载")
+    cli.flag(spec, "-y", "--lyric", "下载音频时同时保存同名 .lrc（默认开）")
+    cli.flag(spec, "", "--no-lyric", "只下音频，不存歌词")
+    cli.flag(spec, "", "--lyric-only", "只下歌词，不碰音频")
+    cli.optionInt(spec, "-n", "--top", "下载前 N 首", 1)
+    cli.optionInt(spec, "-l", "--limit", "每个关键词搜索多少条", 10)   // 10 = DEFAULT_LIMIT
+    cli.option(spec, "-o", "--output", "输出目录（默认 <脚本目录>/downloads）", "")
+    cli.positional(spec, "keyword", "搜索关键词（可以给多个词）", true)
 
-    int i = 0
-    while i < args.len() {
-        string arg = _str(args[i])
-        if arg == "-h" or arg == "--help" {
-            printhelp()
-            return
-        } else if arg == "-s" or arg == "--search" {
-            searchonly = true
-        } else if arg == "-y" or arg == "--lyric" {
-            wantlyric = true
-        } else if arg == "--no-lyric" {
-            wantlyric = false
-        } else if arg == "--lyric-only" {
-            lyriconly = true
-            wantlyric = true
-        } else if arg == "-n" {
-            top = _int(takevalue(args, i, "-n", _str(top)))
-            i = i + 1
-        } else if arg == "-l" {
-            limit = _int(takevalue(args, i, "-l", _str(limit)))
-            i = i + 1
-        } else if arg == "-o" {
-            outdir = takevalue(args, i, "-o", outdir)
-            i = i + 1
-        } else {
-            words.add(arg)
-        }
-        i = i + 1
-    }
-
-    if words.len() == 0 {
+    Array[string] argv = []
+    for _args() to a { argv.add(_str(a)) }
+    var parsed = cli.parse(spec, argv)
+    if (parsed["help"] as bool) or not (parsed["ok"] as bool) {
         printhelp()
+        if not (parsed["ok"] as bool) {
+            print("")
+            print("错误: " + (parsed["err"] as string))
+        }
         return
     }
-    string keyword = strings.join(words, " ")
+
+    Dict opt = parsed["values"] as Dict
+    bool searchonly = opt.get("search", false) as bool
+    bool lyriconly = opt.get("lyric_only", false) as bool
+    bool wantlyric = not (opt.get("no_lyric", false) as bool)   // 默认连歌词一起下
+    if lyriconly { wantlyric = true }
+    int top = opt.get("top", 1) as int
+    int limit = opt.get("limit", 10) as int
+    string outdir = opt.get("output", "") as string
+    var keyword = (parsed["positionals"] as Dict).get("keyword", "") as string
+    for (parsed["rest"] as Array[string]) to w { keyword = keyword + " " + w }
     if outdir == "" { outdir = dirs.script_dir() + _sep() + "downloads" }
     if top < 1 { top = 1 }
     // 必须先建目录：downloadResume 在目录不存在时是**抛异常**而不是返回 -1
