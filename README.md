@@ -2,10 +2,10 @@
 
 多音源的音乐搜索 / **边下边播** / 下载工具，**GUI 与 CLI 两个入口共用同一套引擎**。
 
-> 本仓库是从 [LenoLang](https://github.com/cheng8214/LenoLang) 的
-> `leno_gui/应用/音乐下载器/` 用 `git subtree` 切出来的**镜像**：
-> 源码与提交历史都在，但**开发仍在主仓库进行**，这里只做同步。
-> 提 issue / PR 请到主仓库。
+> 本仓库最早由 [LenoLang](https://github.com/cheng8214/LenoLang) 的
+> `leno_gui/应用/音乐下载器/` 用 `git subtree` 切分而来。
+> **现在它是独立仓库**：源码与提交历史都在这里，后续**开发、issue、PR 都在本仓库进行**，
+> 不再回同步主仓库（主仓库里那份不再维护）。
 
 > **只想直接用？** 到 [Releases](../../releases) 下载 `LenoMusic.exe` —— 单文件，
 > 图标 / 原生库 / 资源全内嵌，目标机器**不需要装 LenoLang**（也不需要装 SDL3），
@@ -369,4 +369,5 @@ leno.exe musicdl.leno --help
 
 ## 九、许可
 
-本目录**大部分**代码与 [LenoLang](https://github.com/cheng8214/LenoLang) 主仓库一致，采用 MIT。
+本仓库的代码源自 [LenoLang](https://github.com/cheng8214/LenoLang) 的 `leno_gui/应用/音乐下载器/`，
+切分后已**独立维护**（不再与主仓库同步），采用 MIT。
