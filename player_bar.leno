@@ -630,20 +630,23 @@ export struct PlayerBar {
             lb.addContextItem({label: "在资源管理器里定位", id: "reveal"})
             lb.addContextItem({label: "删除本地文件…", id: "delfile"})
             lb.addContextSeparator()
+            // ★ 2026-10-18：这一行**没有本地文件**（队列里还没下载）⇒ 定位/删除置灰 ✓
+            //   路径取 `local_file_at`（两种口径统一，见 player.leno ✓）—— 扫目录模式也有路径 ✓
+            bool rowLocal = false
+            if p is Player => qr { rowLocal = (qr.local_file_at(row) != "") }
+            lb.setContextItemEnabled("reveal", rowLocal)
+            lb.setContextItemEnabled("delfile", rowLocal)
         }
         lb.addContextItem({label: "打开下载目录", id: "open"})
         // ★ 2026-10-09（用户要求）：**列表级**的两个动作（任何位置右击都能看到 ✓）
         //   · 「清空列表」= 清掉播放列表本身（**不动文件** ✓ 与下载窗口的"清空任务列表"同一口径）
         //   · 「删除全部本地文件…」= 删列表里**已下载**的那些（不可撤销 ⇒ 弹确认框，由宿主做 ✓）
         //     只删"列表里有的"，不碰下载目录里的其它文件 ✓（没下载的项本来就没文件 ✓）
+        //   ★ 2026-10-18 修（用户实测"有时是禁用状态"✗）：原先只数 `qLocal` ⇒ **扫目录模式**
+        //     每一首都被当成"没下载"（那个模式里 qLocal 本来就是空的）⇒ 永远置灰 ✗
+        //     ⇒ 改问 Player.local_count()（两种口径都算 ✓）
         int localcnt = 0
-        if p is Player => ql {
-            int k2 = 0
-            while k2 < ql.count() {
-                if ql.local_at(k2) != "" { localcnt = localcnt + 1 }
-                k2 = k2 + 1
-            }
-        }
+        if p is Player => ql { localcnt = ql.local_count() }
         lb.addContextSeparator()
         lb.addContextItem({label: "清空列表（不动文件）", id: "clearall"})
         lb.addContextItem({label: "删除全部本地文件…", id: "delall"})
@@ -660,9 +663,11 @@ export struct PlayerBar {
         string rowName = ""
         string rowPath = ""
         if p is Player => q {
-            if row >= 0 and row < q.list.len() {
+            if row >= 0 and row < q.count() {
                 rowName = q.name_at(row)
-                rowPath = q.list[row]              // `Player.list` 存的就是**文件全路径** ✓
+                // ★ 2026-10-18：两种口径统一取本地路径（队列模式看 qLocal、扫目录模式看 list ✓）
+                //   先前只读 `q.list[row]` ⇒ 队列模式下 list 往往是空的/旧的 ⇒ 定位/删除拿不到路径 ✗
+                rowPath = q.local_file_at(row)
             }
         }
         if id == "play" {
@@ -1345,8 +1350,10 @@ export struct PlayerBar {
     }
 
     // 队列第 i 首的本地路径（"" = 还没下载 ⇒ 宿主据此决定要不要起"边下边播" ✓）
+    //   ★ 2026-10-18：改走 `local_file_at`（扫目录模式下也如实给出文件路径 ✓）——
+    //     宿主「删除全部本地文件…」就是靠它收集要删的清单 ✓
     func queue_local(int i): string {
-        if p is Player => q { return q.local_at(i) }
+        if p is Player => q { return q.local_file_at(i) }
         return ""
     }
 

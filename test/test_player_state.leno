@@ -56,6 +56,11 @@ main() {
     check("扫完默认选中第 0 首", p.index == 0)
     check("current_name 给出文件名（不是全路径）", p.current_name() == "a.flac")
     check("count() 与 list 一致", p.count() == 3)
+    // ★ 2026-10-18：扫目录模式的"本地文件"口径（右键「删除全部本地文件…」置灰的根因 ✓）
+    //   那个模式里 `qLocal` 本来就是空的 ⇒ 只能看 list；界面层统一走 local_count / local_file_at ✓
+    check("local_count：扫目录模式每首都是本地文件（不再误判成 0 ✗）", p.local_count() == 3)
+    check("local_file_at：扫目录模式给文件全路径 / 越界给空串",
+          p.local_file_at(0) == p.list[0] and p.local_file_at(99) == "")
 
     // ---- ①.5 ★ 边扫描边显示（2026-10-18）：begin/step 分批上屏，结果必须与同步 scan 一致 ----
     //   为什么钉它：界面每 120ms step 一批 ⇒ 分批插入后的**顺序 / 总数 / 默认选中**
@@ -350,6 +355,9 @@ main() {
     check("index_of 按本地路径命中", pq.index_of("D:/x/A - a.mp3") == 0)
     check("index_of：没下载的行匹配不上（免得误判成'已经有本地文件' ✗）", pq.index_of("") == -1)
     check("current()（未下载那首）=> 空串（界面据此知道它在边下边播 ✓）", pq.count() == 2 and pq.local_at(1) == "")
+    check("local_count：队列模式只数**已下载**的（1/2 ✓）", pq.local_count() == 1)
+    check("local_file_at：队列模式未下载给空串（定位/删除据此置灰 ✓）",
+          pq.local_file_at(0) == "D:/x/A - a.mp3" and pq.local_file_at(1) == "")
 
     // 边下边播的进度折算（纯 ✓）：buf_ratio / avail_seconds 是"能拖到哪 / 要不要等缓冲"的判据 ✓
     pq.streaming = true

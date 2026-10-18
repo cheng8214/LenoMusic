@@ -1558,6 +1558,42 @@ struct MusicDlApp {
 
     // 注入点击类：歌单按钮 / 进度条 / 右键菜单 / 双击 / 退出路径
     func selfcheck_click_tick() {
+        // ★ 2026-10-18 歌单右击菜单自检（`DPLCTX=1`）：**关掉再右击还能不能弹** ✓
+        //   为什么必须有：用户实测"歌单有时右击不出菜单"——真因是框架把浮层捕获区写进了
+        //   "无窗口"槽（永远不会被清）⇒ **菜单只能弹一次**，关掉后再右击全被挡住 ✗
+        //   （修在 sdl_core.setPopupCapture：无派发上下文时一律不登记 ✓）
+        if gPlCtxStep > 0 {
+            int ps2 = gPlCtxStep
+            gPlCtxStep = gPlCtxStep + 1
+            if pbar is PlayerBar => pbx {
+                int wid2 = win.getID()
+                float cx3 = pbx.lb.x + 60.0
+                if ps2 == 2 {
+                    pbx.toggle_pop()                 // 先开歌单（tick 里挂上去 ✓）
+                } eif ps2 == 4 {
+                    SDL3.testMoveAt(wid2, cx3, pbx.lb.y + 13.0)
+                    SDL3.testRightClickAt(wid2, cx3, pbx.lb.y + 13.0)
+                } eif ps2 == 5 {
+                    bool first = pbx.lb.is_context_menu_open()
+                    pbx.lb.get_context_menu().close()
+                    // 第二次点在**另一个行**上（同时验"关掉之后"这条路 ✓）
+                    int r2 = pbx.queue_count() - 1
+                    if r2 > 6 { r2 = 6 }
+                    if r2 < 0 { r2 = 0 }
+                    float cy4 = pbx.lb.y + _float(r2) * 22.0 + 11.0
+                    SDL3.testMoveAt(wid2, cx3, cy4)
+                    SDL3.testRightClickAt(wid2, cx3, cy4)
+                    print("[dplctx] 第一次右击菜单开着=" + _str(first) + "\n")
+                } eif ps2 == 6 {
+                    bool second = pbx.lb.is_context_menu_open()
+                    bool pass = second
+                    print("[dplctx] " + (if pass then "通过" else "**不通过**")
+                          + "：关掉后再右击，菜单开着=" + _str(second) + "（期望 true）\n")
+                    pbx.lb.get_context_menu().close()
+                    SDL3.requestExit()
+                }
+            }
+        }
         // 退出路径自检（见 gExitTicks 注释 ✓）
         // 歌单点击自检（见 gClickStep 注释 ✓）：注入真实点击 ⇒ 断言到底有没有落到控件上 ✓
         if gClickStep > 0 {
@@ -1851,6 +1887,7 @@ int gAutoSearchTick = 0
 //   （同一套"注入真事件"的惯例见 gClickStep / DHOVER ✓；配合 DSHOT 可截到"菜单正开着"✓）
 int gCtxStep = 0
 int gCtxTarget = 1
+int gPlCtxStep = 0            // 歌单右击菜单自检（DPLCTX=1；见 selfcheck_click_tick ✓）
 
 // 榜单"补格式/大小"自检（`DBANG=1 DBANGSIZE=1` ⇒ 等那批线程收尾，打印耗时/补到几首/首行有没有变 ✓）
 //   为什么要它：这条链路是"联网 × 线程 × 顺序敏感"的 —— 顺序被轮转切片打乱过一次（设计时发现 ✓），
@@ -1936,6 +1973,8 @@ main() {
     }
     var dsk = _env("DSEEK")
     if dsk != null { if _int(_str(dsk)) > 0 { gSeekStep = 1 } }   // 进度条点击闸门（见 gSeekStep 注释 ✓）
+    var dpc2 = _env("DPLCTX")
+    if dpc2 != null { if _int(_str(dpc2)) > 0 { gPlCtxStep = 1 } }   // 歌单右击菜单（关掉再弹 ✓）
     var dlrc = _env("DLRC")
     if dlrc != null { if _int(_str(dlrc)) > 0 { gLrcTick = 2 } }  // 歌词浮层（见 gLrcTick 注释 ✓）
     var bs = _env("DBANGSIZE")

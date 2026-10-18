@@ -788,6 +788,31 @@ export struct Player {
         return qLocal[i]
     }
 
+    // 列表第 i 首的**本地文件** —— ★ 2026-10-18：两种口径统一在这里
+    //   · 队列模式（搜索结果/榜单整表喂进来）⇒ 看 qLocal（没下过就是 "" ✓）
+    //   · 老口径（扫下载目录）⇒ `list` 里存的**本来就是本地文件全路径** ✓
+    //   ⚠ 先前界面层只认 `local_at()` ⇒ 扫目录模式下每一首都被当成"没下载"✗
+    //     （「删除全部本地文件…」置灰、右键"定位/删除"也拿不到路径 ✓）
+    func local_file_at(int i): string {
+        if has_queue() { return local_at(i) }
+        if i < 0 or i >= list.len() { return "" }
+        return list[i]
+    }
+
+    // 列表里"有本地文件"的条数（两种口径都算 ✓ —— 右键菜单据此决定要不要置灰 ✓）
+    func local_count(): int {
+        if has_queue() {
+            int n = 0
+            int k = 0
+            while k < qLocal.len() {
+                if qLocal[k] != "" { n = n + 1 }
+                k = k + 1
+            }
+            return n
+        }
+        return list.len()
+    }
+
     // 队列第 i 首的消毒基名（拼 .lrc 路径用 ✓）
     func tag_at(int i): string {
         if i < 0 or i >= qTag.len() { return "" }
