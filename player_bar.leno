@@ -61,6 +61,10 @@ const float LRC_H = 248.0
 const float LRC_ROW = 26.0
 const float LRC_W = 460.0
 const float LIST_GAP = 16.0          // 浮层下沿与播放条上沿的缺口（躲开忙指示细线 ✓）
+// ★ 2026-10-18：边扫边显示 —— 每 120ms 一拍上屏多少首
+//   ⚠ 别按"每拍几十条"来想：现在排序是二分插入（实测 5000 首全扫完才 ~30ms ✓）
+//     ⇒ 一拍 1000 条，5000 首大约分 5 拍（≈0.6 秒）出完：既不冻界面，也不故意拖慢 ✓
+const int SCAN_PER_TICK = 1000
 // 播放条主行高度（进度条已并入本行 ✓ 见下面布局注释）
 const float BAR_H = 52.0
 // 总高 = 主行（**不再有单独那行细进度线** ✓ ⇒ 整体矮了 6px ✓）
@@ -190,7 +194,9 @@ export struct PlayerBar {
         box = SDL3.createAnchorBox({x: 0, y: 0, w: 0, h: BAR_TOTAL, pad_x: 0, pad_y: 0})
 
         if p is Player => q {
-            q.scan(dir)
+            // ★ 2026-10-18：起扫交给 tick 分片上屏（**边扫边显示** ✓）——别在这里一口气扫完，
+            //   否则几千首时建界面的那一拍会**整段冻住** ✗（见 Player.scan_begin / scan_step ✓）
+            q.scan_begin(dir)
 
             // ---- 主行（铺满宽度 ✓）----
             //   ★ 布局（2026-10-07 用户建议后定稿）：
@@ -582,7 +588,11 @@ export struct PlayerBar {
                     lastClickTick = tickSeq
                     if dbl {
                         if p is Player => w {
-                            if r < w.count() {
+                            // ★ 2026-10-18：扫描中途**不让点歌** —— 列表还在按二分插入，
+                            //   行号随时会变；播了之后下标一挪就"跳到别的歌"✗（扫完再说 ✓）
+                            if w.is_scanning() {
+                                hostLbl?.set_text("正在扫描下载目录… 扫完再点歌 ")
+                            } eif r < w.count() {
                                 w.play_index(r)
                                 lastIdx = -1    // 让 tick 下一拍必然刷一次状态栏 ⇒ 点了立刻有反馈 ✓
                             }
@@ -1029,6 +1039,24 @@ export struct PlayerBar {
 
         if p is Player => q {
             tickSeq = tickSeq + 1          // ★ 歌单"双击判定"的拍号（见字段处 ✓ 约 120ms 一拍）
+
+            // ★ 2026-10-18：**边扫描边显示**（用户提议 ✓ 见 Player.scan_begin / scan_step）
+            //   每拍上屏一批 ⇒ 歌单开着就能看着它一条条长出来；关着也没关系，扫完有提示 ✓
+            if q.is_scanning() {
+                q.scan_step(SCAN_PER_TICK)
+                if q.is_scanning() {
+                    if popOpen { lb.set_items(list_items(q)) }
+                    hostLbl?.set_text("正在扫描下载目录… 已找到 " + _str(q.scan_found()) + " 首")
+                    SDL3.markFrameRedraw()
+                } else {
+                    // 扫完：补一次整体刷新（此时 `list` 已是最终顺序 ✓）
+                    lastIdx = q.index              // 让下面"换曲"那段别再改文案（保留"已刷新" ✓）
+                    if popOpen { lb.set_items(list_items(q)); lb.clear_selection() }
+                    hostLbl?.set_text("播放列表已刷新：找到 " + _str(q.count()) + " 首")
+                    SDL3.markFrameRedraw()
+                }
+            }
+
             q.tick()                       // 放完自动下一首（规则在 player.leno ✓）
 
             songLbl.set_text(song_text(q))
@@ -1384,9 +1412,28 @@ export struct PlayerBar {
     //   现在"下完一首"由宿主 syncLocals 把队列里的本地路径刷一遍（见 musicdl_gui.syncLocals ✓）
 
     // 重新扫目录（下完新歌后不用重启 ✓）
+    //   ★ 2026-10-18：改成**边扫边显示** —— 这里只清列表 + 起扫，真正的分片上屏在 tick 里 ✓
+    //     好处：几千首时点「重扫」不会整段冻住，歌单开着就能看到一条条出现 ✓
     func rescan() {
         if p is Player => q {
             q.close()                    // 列表会变 ⇒ 下标可能失效，先停掉 ✓
+            q.scan_begin(dir)
+            lastIdx = -1
+            if popOpen { lb.set_items(list_items(q)); lb.clear_selection() }
+            if q.is_scanning() {
+                hostLbl?.set_text("正在扫描下载目录…")
+            } else {
+                hostLbl?.set_text("播放列表已刷新：找到 " + _str(q.count()) + " 首")
+            }
+        }
+        SDL3.markFrameRedraw()
+    }
+
+    // 同步重扫（**自检 / 老调用点**用 ✓）：调用返回时 list 已经齐了（与旧 rescan 同语义）
+    //   ⚠ 界面上的「重扫」按钮不要用它 ✗ —— 那会又把界面冻住（用上面的 rescan ✓）
+    func rescan_now() {
+        if p is Player => q {
+            q.close()
             q.scan(dir)
             lastIdx = -1
             if popOpen { lb.set_items(list_items(q)); lb.clear_selection() }

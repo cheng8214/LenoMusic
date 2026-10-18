@@ -93,6 +93,11 @@ export struct SearchPage {
     int searchPhase = 0                       // 0 = 阶段 A；1 = 阶段 B
     Array[Array[string]] searchRowsA = []     // 阶段 A 收集到的行（阶段 B 的输入 ✓）
     Array[Array[Array[string]]] searchParts = []  // 阶段 B 各线程的入参（join 失手时退回它 ⇒ 一首都不丢 ✓）
+    // ★ 2026-10-18：**边搜边显示** —— 阶段 A 的线程按音源起，谁先回就先 join 谁、先上屏 ✓
+    //   为什么要有：原先要等**所有**音源 + 逐首补直链全跑完才 `fill_table` ⇒ 界面上一直空着 ✗
+    //   （用户实测截图：状态栏已经"已搜到 100 首，正在逐首取无损直链"，表里却一个字都没有 ✓）
+    Array[bool] searchJoined = []             // 与 searchThreads 同序：这一条收过了吗 ✓
+    int shownA = -1                           // 上一次阶段 A 上屏的行数（没变就不重设表格 ✓）
     Channel? searchCh = null
     bool searching = false
     string searchErr = ""             // 失败原因（worker 报错时记下，别让"没搜到结果"盖掉真因 ✓）
@@ -376,8 +381,11 @@ export struct SearchPage {
         searchThreads = []
         searchRowsA = []
         searchParts = []
+        searchJoined = []
+        shownA = -1
         for srcs to s {
             searchThreads.add(threads.start(searchWorker, s, keyword, limit, searchCh))
+            searchJoined.add(false)
         }
     }
 
@@ -409,15 +417,57 @@ export struct SearchPage {
         return false
     }
 
+    // 阶段 A 的"边搜边显示"：谁跑完了就先 join 谁、把行并进 searchRowsA 并刷新表格 ✓
+    //   ⚠ 只收线程、**不切换阶段**：推进仍然要等"全停 + 通道排空"（见 poll_search ✓）
+    //   ⚠ 表格先显示的是**未补直链**的行（格式/大小可能空着 ✓）——阶段 B 补完会在
+    //     finish_search 里整体换一次（那时才按"有没有大小"过滤 ✓）
+    func harvest_a() {
+        if searchPhase != 0 { return }
+        bool changed = false
+        int i = 0
+        while i < searchThreads.len() {
+            if i < searchJoined.len() and searchJoined[i] {
+                i = i + 1
+                continue
+            }
+            Thread t = searchThreads[i]
+            if t.state() == "running" {
+                i = i + 1
+                continue
+            }
+            var got = t.join() as Array[Array[string]]
+            if i < searchJoined.len() { searchJoined[i] = true }
+            if got != null {
+                Array[Array[string]] one = got
+                for one to row { searchRowsA.add(row) }
+                changed = true
+            }
+            i = i + 1
+        }
+        if changed and searchRowsA.len() != shownA {
+            shownA = searchRowsA.len()
+            songs = searchRowsA              // ★ 先让表格有东西（不等直链/大小 ✓）
+            fill_table()
+            update_count()
+            stateLbl.set_text("已搜到 " + _str(songs.len()) + " 首，正在等其余音源…")
+            SDL3.markFrameRedraw()
+        }
+    }
+
     // 阶段切换 / 收尾：由 120ms 定时器在"线程都停了 + 通道排空"之后调 ✓
     func advance() {
+        if searchPhase == 0 {
+            harvest_a()                      // 兜底：把最后几个也收进来（此时都已经停了 ✓）
+            start_phase_b()                  // 0 行时它自己会 finish_search([]) ✓
+            return
+        }
         Array[Array[string]] rows = []
         int idx = 0
         for searchThreads to t {
             var got = t.join() as Array[Array[string]]
-            if got == null {
+            if got == null and idx < searchParts.len() {
                 // ★ 线程失手（极罕见）⇒ 退回**它那份入参**（未补直链、但仍是官方结果 ✓ 一首都不丢）
-                if searchPhase == 1 and idx < searchParts.len() { got = searchParts[idx] }
+                got = searchParts[idx]
             }
             if got != null {
                 Array[Array[string]] one = got
@@ -426,15 +476,10 @@ export struct SearchPage {
             idx = idx + 1
         }
         searchThreads = []
-        if searchPhase == 0 {
-            searchRowsA = rows
-            start_phase_b()
-        } else {
-            Array[Array[string]] kept = eng.keep_downloadable(rows)
-            // ★ 隐藏数 = 阶段 A 总数 − 最终保留数（付费/无直链的 ⇒ 不入表 ✓ 见 has_size）
-            searchHidden = rows.len() - kept.len()
-            finish_search(kept)
-        }
+        Array[Array[string]] kept = eng.keep_downloadable(rows)
+        // ★ 隐藏数 = 阶段 A 总数 − 最终保留数（付费/无直链的 ⇒ 不入表 ✓ 见 has_size）
+        searchHidden = rows.len() - kept.len()
+        finish_search(kept)
     }
 
     // 搜索收尾：行已经拿齐（线程都 join 过了）
@@ -509,6 +554,8 @@ export struct SearchPage {
             }
         }
         if not searching { return }
+        // ★ 2026-10-18：阶段 A 每个来源一回来就先上屏（**边搜边显示** ✓ 见 harvest_a）
+        if searchPhase == 0 { harvest_a() }
         // 线程还活着 ⇒ 继续等（worker 结束 + 通道排空后再推进，避免丢最后几条消息）
         if search_running() { return }
         if searchCh is Channel {

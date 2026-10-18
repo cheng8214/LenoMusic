@@ -633,11 +633,33 @@ export struct Player {
     string scanDir = ""              // 最近一次 `scan` 的目录（试听态"去输出目录找同名歌词"要用 ✓）
     bool lrcTried = false
 
+    // ---- 扫描状态（★ 2026-10-18：改成**边扫边显示** ✓）----
+    //   为什么要改：下载目录一大（几千首）时，原先 `scan()` 把 listdir + 插入排序一口气做完才返回
+    //   ⇒ 界面在那期间是**冻的**、扫完才整片出现 ✗（用户提议"边扫描边显示更好" ✓）
+    //   ⇒ 拆成 begin/step：`scan_begin` 只做 listdir + 扩展名过滤（很快），`scan_step` 每拍上屏一批 ✓
+    //   `scan()` 保留为**同步**封装（测试 / CLI / 老调用点语义不变 ✓）
+    bool scanBusy = false            // 还在分片上屏吗（界面据此显示"正在扫描…" ✓）
+    Array[string] scanPending = []   // 这一轮候选（已过滤扩展名 ✓）；`scanAt` 之前的都已上屏 ✓
+    int scanAt = 0
+
     // ==================== 列表（纯逻辑 ✓ 离线可测）====================
 
     // 扫一个目录里的音频文件（按文件名升序 ✓）；返回扫到几个
+    //   ★ 2026-10-18：拆成 begin/step 两段（**边扫边显示** ✓ 见上面字段说明）
+    //   · `scan_begin` = 只做 listdir + 扩展名过滤（很快；界面不会长时间冻住 ✓）
+    //   · `scan_step`  = 每拍上屏一批（由界面的 120ms tick 推动 ✓）
+    //   · `scan`       = 同步封装（begin + 一口气 step 完）⇒ 测试 / CLI 语义不变 ✓
     //   ⚠ `dirs.listdir` 给的是**名字**（不含路径 ✗）⇒ 自己 join ✓
     func scan(string dir): int {
+        scan_begin(dir)
+        while scanBusy { scan_step(1000000) }
+        return list.len()
+    }
+
+    // 开始扫描（清列表 + 把候选文件排进待上屏队列）；返回**候选总数**（可能为 0 ✓）
+    //   ⚠ `dirs.listdir` 仍然是一次调用拿到全部名字（语言侧没有流式目录 API ✓）——
+    //     但"过滤 + 排序 + 上屏"这几步拆开了 ⇒ 几千首时界面可以边出边看 ✓
+    func scan_begin(string dir): int {
         stop_all()                        // ★ 只停不销毁（同 set_queue：别把音频引擎也关了 ✗）
         // ★ 2026-10-09：`scan` 是"扫下载目录"这条**老口径**的入口 ⇒ 顺手把播放队列清掉，
         //   否则 has_queue() 仍为真 ⇒ 列表/取名字全走队列，而 list 被重扫了却没人用 ✗（界面会"看起来没刷新" ✓）
@@ -648,18 +670,51 @@ export struct Player {
         scanDir = dir                     // ★ 记下这次的目录（2026-10-08）：试听态取歌词要用 ✓ 见 lrc_path
         list = []
         index = -1
+        scanBusy = false
+        scanPending = []
+        scanAt = 0
         if not dirs.exists(dir) { return 0 }
         // ⚠ `dirs.listdir` 返回的**不是数组**（对它调 `.len()` 会报「类型 object 上不存在方法 'len'」✗）
         //   但**可以直接 for 迭代**拿到名字 ✓ ⇒ 这里只用迭代，不碰 `.len()` ✓
         var names = dirs.listdir(dir)
-        Array[string] hits = []
         for names to n {
             string nm = _str(n)
-            if is_audio(nm) { hits.add(dirs.join(dir, nm)) }
+            if is_audio(nm) { scanPending.add(dirs.join(dir, nm)) }
         }
-        list = sort_by_name(hits)
-        if list.len() > 0 { index = 0 }
-        return list.len()
+        if scanPending.len() > 0 { scanBusy = true }
+        return scanPending.len()
+    }
+
+    // 把还没上屏的再上 `budget` 条（**边扫边显示** ✓）；返回**还剩几条**（0 = 这一轮扫完了 ✓）
+    //   每插入一条都保持"按文件名升序"——界面看到的顺序**始终**与扫完的最终顺序一致 ✓
+    //   （先收完再排也行，但用户会看到"先堆一堆、最后一跳重排"✗）
+    func scan_step(int budget): int {
+        if not scanBusy { return 0 }
+        if budget < 1 { budget = 1 }
+        int end = scanAt + budget
+        if end > scanPending.len() { end = scanPending.len() }
+        while scanAt < end {
+            list = insert_sorted(list, scanPending[scanAt])
+            scanAt = scanAt + 1
+        }
+        int left = scanPending.len() - scanAt
+        if left <= 0 {
+            scanPending = []                  // 放掉引用（大目录时别白占内存 ✓）
+            scanAt = 0
+            scanBusy = false
+            if list.len() > 0 { index = 0 }
+        }
+        return left
+    }
+
+    // 还在扫吗（界面据此显示"正在扫描…" / 决定要不要接着 step ✓）
+    func is_scanning(): bool { return scanBusy }
+
+    // 已经上屏几首 / 这一轮总共有几首（进度文案用 ✓）
+    func scan_found(): int { return list.len() }
+    func scan_total(): int {
+        if not scanBusy { return list.len() }
+        return list.len() + (scanPending.len() - scanAt)
     }
 
     // 是不是音频：按扩展名（**大小写都认** ✓）
@@ -679,39 +734,28 @@ export struct Player {
         return [".mp3", ".MP3", ".flac", ".FLAC", ".wav", ".WAV", ".ogg", ".OGG", ".m4a", ".M4A"]
     }
 
-    // 按**文件名**（不含目录 ✓）排序 —— 插入排序：列表通常几十条，够用且无依赖 ✓
+    // 把一条路径按**文件名**插入到已排序数组里（升序、大小写不敏感 ✓）
+    //   ★ 2026-10-18：换掉原先"逐条线性插入 + 每次比较都 `to_codepoints` 两遍"的写法 ✗
+    //     那是 O(n²) 次**整串转换**（几千首时要等很久，正是"扫完才显示"的元凶之一 ✓）
+    //     ⇒ 现在：折一次小写当 key（`strings.to_lower`，C 侧一趟），再用**二分**找插入点 ✓
+    //     ⇒ 比较次数从 n² 降到 n·log n，比较本身也只是两次短字符串比字节 ✓
     //   ⚠ 比较必须**大小写不敏感**：直接 `a < b` 是字节序 ⇒ "C.MP3" 会排在 "a.flac" 之前 ✗
     //     （实测踩过 ✓）⇒ 折 ASCII 小写再比，与资源管理器一致 ✓
-    func sort_by_name(Array[string] paths): Array[string] {
-        Array[string] out = []
-        for paths to p {
-            int at = 0
-            string key = dirs.basename(_str(p))
-            while at < out.len() and name_less(dirs.basename(out[at]), key) { at = at + 1 }
-            out.insert(at, _str(p))
+    func insert_sorted(Array[string] arr, string path): Array[string] {
+        string key = fold_name(path)
+        int lo = 0
+        int hi = arr.len()
+        while lo < hi {
+            int mid = (lo + hi) / 2
+            if fold_name(arr[mid]) < key { lo = mid + 1 } else { hi = mid }
         }
-        return out
+        arr.insert(lo, path)
+        return arr
     }
 
-    // 文件名比较：ASCII 折小写后按码点比（非 ASCII 原样 ⇒ 与字节序一致 ✓）
-    func name_less(string a, string b): bool {
-        Array[int] ca = strings.to_codepoints(a)
-        Array[int] cb = strings.to_codepoints(b)
-        int n = ca.len()
-        if cb.len() < n { n = cb.len() }
-        int i = 0
-        while i < n {
-            int x = lower_cp(ca[i])
-            int y = lower_cp(cb[i])
-            if x != y { return x < y }
-            i = i + 1
-        }
-        return ca.len() < cb.len()
-    }
-
-    func lower_cp(int c): int {
-        if c >= 65 and c <= 90 { return c + 32 }      // 'A'..'Z' ⇒ 'a'..'z'
-        return c
+    // 排序键 = 文件名折小写（非 ASCII 原样 ⇒ 与字节序 / 资源管理器一致 ✓）
+    func fold_name(string path): string {
+        return strings.to_lower(dirs.basename(path))
     }
 
     // ==================== 播放队列（宿主喂表 ✓ 纯逻辑可离线测）====================

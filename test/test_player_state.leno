@@ -57,6 +57,27 @@ main() {
     check("current_name 给出文件名（不是全路径）", p.current_name() == "a.flac")
     check("count() 与 list 一致", p.count() == 3)
 
+    // ---- ①.5 ★ 边扫描边显示（2026-10-18）：begin/step 分批上屏，结果必须与同步 scan 一致 ----
+    //   为什么钉它：界面每 120ms step 一批 ⇒ 分批插入后的**顺序 / 总数 / 默认选中**
+    //   都必须和"一口气扫完"完全一样，否则歌单看着在跳、选中的还是错的那首 ✗
+    Player inc = new Player()
+    int cand = inc.scan_begin(dir)
+    check("增量扫描：候选 3 个、还没上屏、is_scanning 为真",
+          cand == 3 and inc.count() == 0 and inc.is_scanning())
+    int incLeft = inc.scan_step(1)
+    check("增量扫描：一批 1 条 ⇒ 已上屏 1、还剩 2",
+          inc.count() == 1 and incLeft == 2 and inc.is_scanning())
+    incLeft = inc.scan_step(1)
+    check("增量扫描：再来 1 条 ⇒ 已上屏 2、还剩 1", inc.count() == 2 and incLeft == 1)
+    incLeft = inc.scan_step(5)
+    check("增量扫描：预算多于剩余 ⇒ 扫完、剩 0、is_scanning 变假",
+          incLeft == 0 and (not inc.is_scanning()))
+    check("增量扫描：总数 / 默认选中 / 顺序与同步扫描一致",
+          inc.count() == 3 and inc.index == 0 and inc.scan_total() == 3
+          and dirs.basename(inc.list[0]) == "a.flac"
+          and dirs.basename(inc.list[1]) == "b.mp3"
+          and dirs.basename(inc.list[2]) == "C.MP3")
+
     // ---- ② 循环三态 ----
     p.loopMode = pl.LOOP_ALL
     p.index = 2

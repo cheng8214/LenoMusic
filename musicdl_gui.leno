@@ -1432,7 +1432,7 @@ struct MusicDlApp {
             if gPlayStep == 1 {
                 // ① 扫一遍下载目录，拿两首真音频（A = 当"本地那首"、B = 当"边下边播那首"）
                 if pbar is PlayerBar => b {
-                    b.rescan()
+                    b.rescan_now()                     // ★ 自检要"返回即齐" ⇒ 用同步版（界面「重扫」走异步 ✓）
                     if b.p is Player => q {
                         int need = 2                       // 离线版要 A/B 两个文件；联网版只用 A ✓
                         if gPlayMode == 2 { need = 1 }
