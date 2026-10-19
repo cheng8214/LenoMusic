@@ -43,6 +43,24 @@ func hasflag(Array[string] flags, string name): bool {
     return false
 }
 
+// 任务行的进度百分比（**纯逻辑** ⇒ 离线可测 ✓ 见 test/test_dl_window_open.leno）
+//   · 状态已含"完成" ⇒ **一定 100**（★ 2026-10-18：列表里的「大小」与实际文件长度可能不同，
+//     服务端又不给真实总长时，分母会偏大 ⇒ 出现过"状态完成、进度一半"✗ ⇒ 以完成态为准 ✓）
+//   · e <= 0 = 大小未知 ⇒ 0（拿 1 当分母会假装 100% ✗）
+//   · "只下歌词"没有分片进度 ⇒ 按条数：完成一条算 100 ✓
+export func pct_of(int g, int e, string st, bool lyriconly): int {
+    bool fin = strings.has(st, "完成") or strings.has(st, "歌词") or strings.has(st, "失败") or strings.has(st, "取消")
+    if lyriconly {
+        if fin { return 100 }
+        return 0
+    }
+    if strings.has(st, "完成") { return 100 }
+    if e <= 0 or g <= 0 { return 0 }
+    int p = g * 100 / e
+    if p > 100 { p = 100 }
+    return p
+}
+
 // 打开目录（资源管理器/文件管理器定位）。失败无处可报 ⇒ 返回 bool 让调用方提示
 // （主界面的右键菜单"打开下载目录"也用这一个实现 ⇒ 不两处漂移 ✓）
 // 在资源管理器里**定位**（选中）这个文件 ✓
@@ -210,8 +228,11 @@ export struct DlWindow {
         int totalExp = 0
         Array[Array[string]] rows = []
         for jobs to j {
+            // ★ 2026-10-18：**没有大小就记 0（未知）**，别再塞 1 ✗
+            //   原来塞 1 会让"大小未知"的行一下显示成 100%（got/1）—— 与"未知"语义完全相反 ✓
+            //   （未知行在 done 那一刻会拿真实字节数补上 ⇒ 见 applymsg ✓）
             int e = _int(j[eng.F_BYTES])
-            if e <= 0 { e = 1 }
+            if e < 0 { e = 0 }
             got.add(0)
             exp.add(e)
             status.add("等待中")
@@ -525,7 +546,14 @@ export struct DlWindow {
             }
         } else if kind == "done" {
             int gotb = _int(mv[2])
+            // ★★ 2026-10-18 修（用户实测："进度一半、状态却写已下载完毕"✗）：
+            //   **下完这一刻，真实字节数就是权威分母** ⇒ 把 exp 一起对齐 ✓
+            //   为什么必须：搜索列表里的「大小」来自**当初的结果行**，它可能与真正下的那个
+            //   CDN 文件长度不一样（不同档位/不同源很常见 ✓）；服务端又不给 Content-Range
+            //   （整包 200 / 断点 416）时 `progress` 拿不到真实总长 ⇒ exp 一直是列表那个数
+            //   ⇒ 行进度条停在 50% 之类，而状态已经"完成" ✗✗
             if idx >= 0 and idx < got.len() { got[idx] = gotb }
+            if gotb > 0 and idx >= 0 and idx < exp.len() { exp[idx] = gotb }
             setstatus(idx, "完成 " + strings.fmt_size(gotb))
             done = done + 1
             // 落盘路径优先取消息里的（权威 ✓）；消息没带就退回 start 时缓存的
@@ -892,23 +920,21 @@ export struct DlWindow {
         int i = 0
         while i < jobs.len() {
             int g = 0
-            int e = 1
+            int e = 0                          // 0 = 大小未知（未知就不参与总进度，免得把分母算小/算大 ✓）
             if i < got.len() { g = got[i] }
-            if i < exp.len() and exp[i] > 0 { e = exp[i] }
-            gotb = gotb + g
-            expb = expb + e
+            if i < exp.len() { e = exp[i] }
+            if e > 0 {                         // 只统计"知道分量"的任务（未知的在 done 时补上 ✓）
+                gotb = gotb + g
+                expb = expb + e
+            }
             bool finishedOne = false
             if i < status.len() and (strings.has(status[i], "完成") or strings.has(status[i], "歌词") or strings.has(status[i], "失败") or strings.has(status[i], "取消")) {
                 finishedOne = true
             }
             if finishedOne { ndone = ndone + 1 }
-            int pct = 0
-            if lyriconly {
-                if finishedOne { pct = 100 }
-            } else {
-                pct = g * 100 / e
-                if pct > 100 { pct = 100 }
-            }
+            string st = ""
+            if i < status.len() { st = status[i] }
+            int pct = pct_of(g, e, st, lyriconly)
             // 进度列是 progress 单元格：写**数值**就行（"37" 当百分数、"0.37" 当比例，都认 ✓
             //   解析规则见 sdl_progress.parseProgress —— 它把非数字（如"等待中"）当 0，不抛错 ✓）
             table.set_cell(i, 3, _str(pct))

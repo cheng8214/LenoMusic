@@ -80,6 +80,12 @@ export struct BangPage {
 
     // ===== 两条线程 + "逐首补"那一批线程的状态 =====
     Thread? menuThread = null        // 取榜单**菜单**（kuwo/qq 是内置常量、瞬时 ✓；另两个要发请求）
+    // ★ 2026-10-19 修（用户实测：榜单页反复切站点，内存一路涨 ✗）
+    //   根因：`load_menu` 原来直接 `menuThread = threads.start(...)` ⇒ 上一条还在跑时**句柄被覆盖**，
+    //   那条线程再也没人 join（线程有自己的 VM 堆 ⇒ 每切一次站点漏一坨 ✓）
+    //   ⇒ 同一时刻只允许一条菜单线程；期间的新请求记在 `menuWant`，等它收尾后再按**最新**站点重发 ✓
+    bool menuBusy = false            // 现在有一条菜单线程在跑吗
+    string menuFor = ""              // 这条线程拉的是哪个站点（回来时发现换站了就作废 ✓）
     Thread? songThread = null        // 取榜单**歌曲**
     Array[Thread] fillThreads = []
     Array[Array[Array[string]]] fillParts = []   // 各线程入参（join 失手时退回它 ⇒ 一行都不丢 ✓）
@@ -238,6 +244,11 @@ export struct BangPage {
         if src == curSrc and loadedFor >= 0 { return }   // 已有 ⇒ 不重复拉 ✓
         curSrc = src
         lbl.set_text("正在取" + eng.srcname(src) + "的榜单列表…")
+        // ★ 同一时刻只允许一条菜单线程（原因见字段处 ⚠）：在跑就先记下"要换站"，
+        //   由 poll_menu 在 join 之后按最新 `curSrc` 补发 ✓ —— 绝不覆盖句柄 ✗
+        if menuBusy { return }        // 在跑 ⇒ 只更新了 curSrc；它收尾时发现"站点变了"会自己补发 ✓
+        menuBusy = true
+        menuFor = src
         menuThread = threads.start(menuWorker, src)
     }
 
@@ -350,10 +361,18 @@ export struct BangPage {
         Thread? t = menuThread
         if t == null { return }
         if t.state() == "running" { return }
-        var got = t.join() as Array[Array[string]]
+        var got = t.join() as Array[Array[string]]     // ★ 每条都**必须** join（不 join = 漏线程 ✓）
         menuThread = null
+        menuBusy = false
+        bool stale = menuFor != curSrc                 // 这条拉的是旧站点 ⇒ 结果作废 ✓
+        menuFor = ""
         Array[Array[string]] menu = []
         if got != null { menu = got }
+        // 换过站点 ⇒ 按**最新** curSrc 重发（别把旧站的菜单塞进去 ✗；不 join 会漏线程 ✗）
+        if stale {
+            load_menu()
+            return
+        }
         menu_got(menu)
     }
 
