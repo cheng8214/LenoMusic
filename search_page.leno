@@ -284,7 +284,10 @@ export struct SearchPage {
     //   ⚠ `set_selected` **会触发 on_change**（sdl_combobox:177 ✓）⇒ 处理函数必须是幂等的 ✓
     func refresh_fmt_items() {
         Array[string] exts = []
-        for songs to s {
+        // ★ 选项要来自**全部候选**（base_rows），不是当前已过滤的 songs ——
+        //   否则选了 mp3 之后下拉里就只剩 mp3，想换 flac 都换不回去 ✗
+        Array[Array[string]] cand = base_rows()
+        for cand to s {
             string e = "未知"
             if s.len() > eng.F_EXT and s[eng.F_EXT] != "" { e = strings.to_lower(s[eng.F_EXT]) }
             bool has = false
@@ -337,12 +340,17 @@ export struct SearchPage {
             fmtPref = want
             notify_dirty()
         }
+        // 格式变了 ⇒ 表格/播放队列跟着只留这一种（与下载同一口径 ✓）
+        if not searching and base_rows().len() > 0 {
+            apply_visibility()
+        }
         if want == "" {
             stateLbl.set_text("格式：全部 —— 勾选的都会下")
         } else {
             int n = 0
-            for songs to s { if fmt_ok(s) { n = n + 1 } }
-            stateLbl.set_text("格式：只要 " + want + " —— 搜到的 " + _str(songs.len()) + " 首里有 " + _str(n) + " 首")
+            Array[Array[string]] all0 = base_rows()
+            for all0 to s { if fmt_ok(s) { n = n + 1 } }
+            stateLbl.set_text("格式：只要 " + want + " —— 搜到的 " + _str(all0.len()) + " 首里有 " + _str(n) + " 首")
         }
         // 批量按钮的提示也跟着走（用户不用去猜过滤还在不在 ✓）
         string what = if want == "" then "全部格式" else want
@@ -501,12 +509,27 @@ export struct SearchPage {
         finish_search(kept)
     }
 
-    // 按「显示未找到直链」重算展示行（表行与 songs 必须一一对应 ✓ 见文件头）
+    // 当前可见的“全部候选”（勾了显示隐藏 ⇒ allRows，否则只留能下的 ✓）
+    func base_rows(): Array[Array[string]] {
+        if showHidden and allRows.len() > 0 { return allRows }
+        return keptRows
+    }
+
+    // 按「显示未找到直链」+「格式」重算展示行（表行与 songs 必须一一对应 ✓ 见文件头）
+    //   ★ 2026-10-21 修（群友实测：选 mp3/flac 后“列表里的歌和点开播放的不一样”✗）：
+    //     原来格式只过滤**批量下载**，表格/播放队列仍是全部格式 ⇒ 两边看起来对不上 ✗
+    //     ⇒ 现在格式选择**同时过滤表格与播放**：看到的就是会播的，顺序自然一致 ✓
     func apply_visibility() {
-        if showHidden and allRows.len() > 0 {
-            songs = allRows
+        Array[Array[string]] base = base_rows()
+        string want = fmt_want()
+        if want == "" {
+            songs = base
         } else {
-            songs = keptRows
+            Array[Array[string]] keep = []
+            for base to r {
+                if fmt_ok(r) { keep.add(r) }
+            }
+            songs = keep
         }
         fill_table()
         update_count()
