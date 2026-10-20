@@ -45,6 +45,7 @@
 //   ② 唱片的转动靠 33ms 的 `animate()`（120ms 一拍太卡 ✗）；不播时立刻返回 ⇒ 不白转 ✓
 import dirs
 import maths
+import times
 import SDL3
 import "sdl_progress" as prgb          // 复用"画进任意矩形"的观感（与进度条控件同源 ✓）
 import "./player.leno" as pl
@@ -182,6 +183,11 @@ export struct PlayerBar {
     string imgDir = ""           // 图标目录（宿主给：`dirs.join(dirs.res_dir(), "images")` ✓）
     Player? p = null
     Label? hostLbl = null        // 主界面状态栏（"正在播 xxx" / 出错都写这里 ✓）
+    // ★ 2026-10-20：状态行**短时置顶** —— 本控件 tick 里会写"正在播…/正在扫描…"，
+    //   搜索页那边写的提示会被盖掉（用户实测"搜索时点播放没提示"✗）
+    //   ⇒ 提示交给本控件，在 tick **最后**落笔（此时本拍所有状态写入都已发生 ✓）
+    string flashMsg = ""
+    int flashUntil = 0
     // ★ 2026-10-11：宿主回调 —— 用户动了"要记住"的东西（音量 / 循环档）就喊一声，让宿主落盘 ✓
     //   （写法与 sdl_canvas.onClick 同款：声明不给初值、用前判 null ✓）
     pri func():void stateChanged
@@ -1084,6 +1090,23 @@ export struct PlayerBar {
             }
             if q.err != "" { hostLbl?.set_text(q.err) }
         }
+        // ★ 短时提示最后写（"正在播…"是本拍先写的 ⇒ 这里赢 ✓）；到点自动失效
+        if flashMsg != "" {
+            if _int(times.ms()) < flashUntil {
+                hostLbl?.set_text(flashMsg)
+                SDL3.markFrameRedraw()
+            } else {
+                flashMsg = ""
+            }
+        }
+    }
+
+    // 让主状态行显示一条**保证看得见**的提示（ms 毫秒内不被"正在播/扫描"覆盖 ✓）
+    func flash_host(string msg, int ms) {
+        flashMsg = msg
+        flashUntil = _int(times.ms()) + ms
+        hostLbl?.set_text(msg)
+        SDL3.markFrameRedraw()
     }
 
     // ==================== 每 33ms（主界面另挂一个定时器 ✓）：转唱片 + 推特效 ====================

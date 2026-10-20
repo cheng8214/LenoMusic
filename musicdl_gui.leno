@@ -422,12 +422,41 @@ struct MusicDlApp {
 
     // 从 `ctxId`（0 = 搜索表 / 1 = 榜单表）的第 row 行起播整张表
     func playFrom(int ctxId, int row) {
+        // ★ 2026-10-20 修（群友反馈："搜索时点播放没反应、也没提示"✗）：
+        //   搜索分两阶段（A 各源返回 → B 逐首补直链，见 search_page ✓）。A/B 期间表里已经有行，
+        //   但**还没过滤掉拿不到直链的** ⇒ 不能把"整张未过滤表"灌进播放队列（B 结束表会变，
+        //   队列与表就错位 ✗ 见上一版注释）。
+        //   ⇒ 现在**放开边下边播**，但只播**点中的这一首**（单曲队列）：
+        //     · 想听就立刻能听（引擎会现取直链；取不到就播失败并给错误 ✓）
+        //     · 队列里只有这一首 ⇒ 与"最终表"不存在顺序错位问题 ✓
+        //     · 搜索收尾后再双击 = 从最终表起播整表 ✓
+        if ctxId == 0 and search_busy() {
+            if page is SearchPage => sp {
+                Array[string] one = sp.row(row)          // 显示行 → 数据行 ✓
+                if one.len() > 0 {
+                    Array[Array[string]] only = []
+                    only.add(one)
+                    if flow is DlFlow => f { f.play_table(only, 0) }
+                    // 放在 play_table 之后：它会写"播放：…"，这里再补一句**搜索中的限制** ✓
+                    //   ⚠ 必须走播放条的 flash：状态行每拍会被"正在播…/已搜到…"改写 ✗
+                    string hint = "搜索还在补直链：先只播这首「" + eng.songlabel(one)
+                                  + "」（边下边播，没直链的会失败）；搜索完成后再双击可播整表"
+                    if pbar is PlayerBar => hb { hb.flash_host(hint, 5000) } else { stateLbl.set_text(hint) }
+                } else {
+                    if pbar is PlayerBar => hb2 { hb2.flash_host("这一行还没有数据，等搜索结果回来再点", 3000) }
+                }
+            }
+            return
+        }
         // 榜单页的行问它自己要（2026-10-11 搬走之后 ✓）；搜索表经它的只读口 ✓
         Array[Array[string]] rows = search_rows_all()
+        int srcRow = row                         // ★ 双击/右键给的是**显示行**（可能已排序）
         if ctxId == 1 {
-            if bang is BangPage => bp { rows = bp.rows() }
+            if bang is BangPage => bp { rows = bp.rows(); srcRow = bp.source_row(row) }
+        } else {
+            if page is SearchPage => sp { srcRow = sp.source_row(row) }
         }
-        if flow is DlFlow => f { f.play_table(rows, row) }
+        if flow is DlFlow => f { f.play_table(rows, srcRow) }
     }
 
     func onDownloadChecked() {

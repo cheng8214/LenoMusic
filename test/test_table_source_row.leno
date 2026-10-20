@@ -1,0 +1,52 @@
+// test_table_source_row.leno — 表格排序后的「显示行 → 数据行」映射（**无需窗口** ✓）
+//
+// 为什么值得有：Table 的 `sort_by` 只重排自己内部的 `_rows`，调用方的歌曲数组不会跟着动。
+//   应用层双击/右键/勾选都拿**显示行号**去取 `songs[row]` ⇒ 一旦点表头排序就"点 A 放 B"✗。
+//   框架补了 `source_row(display)`；本用例钉住它在升/降序、以及 `set_rows` 重放排序后都对 ✓
+// 跑：build\leno.exe test\test_table_source_row.leno
+import SDL3
+use SDL3.Table
+
+var fails = 0
+func check(string name, bool ok) {
+    if ok {
+        print($"[通过] {name}")
+    } else {
+        fails = fails + 1
+        print($"[失败] {name}")
+    }
+}
+
+main() {
+    print("=== 表格：显示行 → 数据行 ===")
+    Table t = SDL3.createTable({
+        headers: ["n", "v"],
+        rows: [["a", "10"], ["b", "30"], ["c", "20"]],
+        sortable: true
+    })
+    check("初始映射是恒等（0,1,2）",
+          t.source_row(0) == 0 and t.source_row(1) == 1 and t.source_row(2) == 2)
+
+    t.sort_by(1, false)                     // 按 v 升序：a(10) / c(20) / b(30)
+    check("升序：显示 0/1/2 -> 数据 0/2/1",
+          t.source_row(0) == 0 and t.source_row(1) == 2 and t.source_row(2) == 1)
+    check("升序：显示首行确实是 a", t.get_row(0)[0] == "a")
+
+    t.sort_by(1, true)                      // 降序：b(30) / c(20) / a(10)
+    check("降序：显示 0/1/2 -> 数据 1/2/0",
+          t.source_row(0) == 1 and t.source_row(1) == 2 and t.source_row(2) == 0)
+    check("降序：显示首行确实是 b", t.get_row(0)[0] == "b")
+
+    // 换一批数据：映射先重置，再按当前排序重放（set_rows 内部会再 sort_by ✓）
+    t.set_rows([["x", "5"], ["y", "40"], ["z", "25"]])
+    check("set_rows 后仍按当前排序（降序）：x 在末行",
+          t.get_row(0)[0] == "y" and t.source_row(0) == 1
+          and t.get_row(2)[0] == "x" and t.source_row(2) == 0)
+
+    print("")
+    if fails > 0 {
+        print($"共 {fails} 项失败")
+        _exit(1)
+    }
+    print("全部通过（排序 / 降序 / 换数据后，显示行都能换回正确数据行 ✓）")
+}

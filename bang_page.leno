@@ -124,9 +124,11 @@ export struct BangPage {
     // ---- 给宿主的只读口（`ctx_*` / `playFrom` / 下载流程 / 自检都从这里取 ✓ 别让宿主直摸字段 ✗）----
     func rows(): Array[Array[string]] { return songs }
     func row(int i): Array[string] {
-        if i < 0 or i >= songs.len() { return [] }
-        return songs[i]
+        int r = table.source_row(i)          // ★ 显示行 → 数据行（排序后也正确 ✓）
+        if r < 0 or r >= songs.len() { return [] }
+        return songs[r]
     }
+    func source_row(int display): int { return table.source_row(display) }
     func row_count(): int { return songs.len() }
     func table_ref(): Table { return table }
     func chosen_src(): string { return curSrc }
@@ -533,6 +535,7 @@ export struct BangPage {
             header_aligns: [1, 0, 0, 0, 1, 1, 2],
             check_col: 0,
             image_col: 1, image_size: 18, image_gap: 6, image_path: rowIcon,
+            // ★ 2026-10-20：排序保留，行号统一走 `source_row` 映射 ✓
             sortable: true, zebra: true, item_h: 26, header_h: 30, font_size: 14,
             multi_select: true,
             empty_text: "还没有榜单 —— 切到本页会自动加载所选站点的第1 个榜单"

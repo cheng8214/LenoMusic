@@ -88,6 +88,7 @@ export struct SearchPage {
     string fmtPref = ""
     bool fmtProg = false              // 正在程序化设 fmtBox（这段时间的 on_change 不算用户动作 ✓）
 
+
     // ===== 搜索线程状态（两阶段并行 ⇒ 线程是**一批**而不是一条 ✓）=====
     Array[Thread] searchThreads = []
     int searchPhase = 0                       // 0 = 阶段 A；1 = 阶段 B
@@ -139,10 +140,14 @@ export struct SearchPage {
 
     // ---- 给宿主的只读口（ctx_* / 下载判定 / 自检都从这儿取 ✓ 别让宿主直摸字段 ✗）----
     func rows(): Array[Array[string]] { return songs }
+    // ★ 2026-10-20：`i` 是**表格显示行**（可能已排序）⇒ 换成数据下标再取 ✓
     func row(int i): Array[string] {
-        if i < 0 or i >= songs.len() { return [] }
-        return songs[i]
+        int r = table.source_row(i)
+        if r < 0 or r >= songs.len() { return [] }
+        return songs[r]
     }
+    // 给宿主用：显示行 → 数据行（起播整表时要把起始行换回数据下标 ✓）
+    func source_row(int display): int { return table.source_row(display) }
     func row_count(): int { return songs.len() }
     func table_ref(): Table { return table }
     func status_label(): Label { return stateLbl }
@@ -162,8 +167,9 @@ export struct SearchPage {
         Array[Array[string]] out = []
         Array[int] checked = table.get_checked_rows()
         for checked to i {
-            if i >= 0 and i < songs.len() {
-                if fmt_ok(songs[i]) { out.add(songs[i]) }
+            int r = table.source_row(i)
+            if r >= 0 and r < songs.len() {
+                if fmt_ok(songs[r]) { out.add(songs[r]) }
             }
         }
         return out
@@ -175,8 +181,9 @@ export struct SearchPage {
         Array[Array[string]] out = []
         Array[int] sel = table.get_selected_rows()
         for sel to i {
-            if i >= 0 and i < songs.len() {
-                if fmt_ok(songs[i]) { out.add(songs[i]) }
+            int r = table.source_row(i)
+            if r >= 0 and r < songs.len() {
+                if fmt_ok(songs[r]) { out.add(songs[r]) }
             }
         }
         return out
@@ -186,7 +193,8 @@ export struct SearchPage {
         Array[Array[string]] out = []
         Array[int] sel = table.get_selected_rows()
         for sel to i {
-            if i >= 0 and i < songs.len() { out.add(songs[i]) }
+            int r = table.source_row(i)
+            if r >= 0 and r < songs.len() { out.add(songs[r]) }
         }
         return out
     }
@@ -570,9 +578,10 @@ export struct SearchPage {
         int bytes = 0
         int match = 0                       // 勾选里"符合当前格式"的条数（★ 才是真正会下的 ✓）
         for checked to i {
-            if i >= 0 and i < songs.len() {
-                bytes = bytes + _int(songs[i][eng.F_BYTES])
-                if fmt_ok(songs[i]) { match = match + 1 }
+            int r = table.source_row(i)          // ★ 显示行 → 数据行（排序后也正确 ✓）
+            if r >= 0 and r < songs.len() {
+                bytes = bytes + _int(songs[r][eng.F_BYTES])
+                if fmt_ok(songs[r]) { match = match + 1 }
             }
         }
         string extra = ""
@@ -736,6 +745,8 @@ export struct SearchPage {
             //   先前必须每次 set_rows 后重贴（`set_rows` 会清 rowImages ✗ 见 fill_table 的历史注释 ✓）
             //   ⇒ 现在一次给、永不掉 ✓
             image_path: rowIcon,
+            // ★ 2026-10-20：排序**保留** —— 表格已提供 `source_row(显示行) → 数据行` 映射，
+            //   播放/右键/勾选/下载全走这层，不会再"点 A 放 B" ✓（见 search_page 各访问器 ✓）
             sortable: true, zebra: true, item_h: 26, header_h: 30, font_size: 14,
             multi_select: true,
             empty_text: "还没有结果 —— 输入关键词后回车搜索"
