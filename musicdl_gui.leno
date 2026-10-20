@@ -93,8 +93,9 @@ func search_src_worker(string src, string keyword, int limit, any ch): Array[Arr
 }
 
 func probe_worker(Array[Array[string]] rows): Array[Array[string]] {
-    // ★ 2026-10-20：每片 25s 总预算 —— 第三方接口挂起时不能把整轮搜索拖成几分钟 ✗
-    return eng.probe_rows_budget(rows, 25000)
+    // ★ 2026-10-20：每片 15s 总预算 —— 第三方接口挂起时不能把整轮搜索拖成几十秒 ✗
+    //   （没探到的行默认隐藏，但搜索页有「显示未找到直链」可以看全部 ✓）
+    return eng.probe_rows_budget(rows, 15000)
 }
 
 // "逐首补体积"的并行度 —— 搜索阶段 B 用它，榜单侧用它补格式/大小（**同一套口径** ✓）。

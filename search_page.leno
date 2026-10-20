@@ -80,7 +80,12 @@ export struct SearchPage {
     Array[bool] srcAvail
 
     // ===== 数据 =====
-    Array[Array[string]] songs        // 搜索结果（歌曲行）
+    Array[Array[string]] songs        // 当前**展示**的行（= allRows 或 keptRows，见 showHidden ✓）
+    // ★ 2026-10-20：保留两份 —— 默认只显示“可下载”的；勾「显示未找到直链」时看全部 ✓
+    Array[Array[string]] allRows = []     // 本轮全部（含无直链 / 试听片段）
+    Array[Array[string]] keptRows = []    // 过滤后（能下的）
+    bool showHidden = false               // 用户是否勾了“显示未找到直链”
+    CheckBox showHiddenBox                // 上面那个勾选框（make_search_row 里建 ✓）
     // ★ 格式过滤的**用户选择**（"" = 全部格式）—— ⚠ 与 `fmtBox` 的当前值**不是一回事** ✗：
     //   每次搜索都会**程序化**重填下拉（`refresh_fmt_items`：选项 = 搜到的那些格式）⇒ 用户上次选的
     //   "flac" 只要这次没搜到 flac 就会掉回「全部格式」⇒ 直接存 `fmt_want()` 会**把偏好抹掉** ✗✗
@@ -392,6 +397,8 @@ export struct SearchPage {
         searchParts = []
         searchJoined = []
         shownA = -1
+        allRows = []
+        keptRows = []
         for srcs to s {
             searchThreads.add(threads.start(searchWorker, s, keyword, limit, searchCh))
             searchJoined.add(false)
@@ -487,9 +494,45 @@ export struct SearchPage {
         }
         searchThreads = []
         Array[Array[string]] kept = eng.keep_downloadable(rows)
-        // ★ 隐藏数 = 阶段 A 总数 − 最终保留数（付费/无直链的 ⇒ 不入表 ✓ 见 has_size）
+        // ★ 隐藏数 = 阶段 A 总数 − 最终保留数（付费/无直链/试听片段 ⇒ 默认不入表 ✓）
         searchHidden = rows.len() - kept.len()
+        allRows = rows                  // 全部留着：勾「显示未找到直链」时要用 ✓
+        keptRows = kept
         finish_search(kept)
+    }
+
+    // 按「显示未找到直链」重算展示行（表行与 songs 必须一一对应 ✓ 见文件头）
+    func apply_visibility() {
+        if showHidden and allRows.len() > 0 {
+            songs = allRows
+        } else {
+            songs = keptRows
+        }
+        fill_table()
+        update_count()
+        SDL3.markFrameRedraw()
+    }
+
+    // 宿主 / 自检用：程序化勾选「显示未找到直链」✓
+    func set_show_hidden(bool v) {
+        showHiddenBox.set_checked(v)
+        on_show_hidden(v)
+    }
+
+    // 勾选框：「显示未找到直链」—— 勾上后把没直链 / 只有试听片段的也列出来（下载多半失败 ✓）
+    func on_show_hidden(bool v) {
+        showHidden = v
+        if searching { return }                  // 搜索中先记下，收尾时 apply_visibility 生效 ✓
+        if allRows.len() == 0 and keptRows.len() == 0 { return }
+        apply_visibility()
+        int hid = allRows.len() - keptRows.len()
+        if v {
+            stateLbl.set_text("显示全部 " + _str(songs.len()) + " 首（其中 " + _str(hid)
+                              + " 首没拿到完整直链/只有试听片段，下载多半会失败）")
+        } else {
+            stateLbl.set_text("已隐藏 " + _str(hid) + " 首没拿到完整直链/只有试听片段的歌")
+        }
+        SDL3.markFrameRedraw()
     }
 
     // 搜索收尾：行已经拿齐（线程都 join 过了）
@@ -501,10 +544,10 @@ export struct SearchPage {
         if searchCh is Channel { searchCh.close() }
         searchCh = null
         searching = false
-        songs = rows
-        fill_table()
+        keptRows = rows
+        if allRows.len() == 0 { allRows = rows }
+        apply_visibility()
         refresh_fmt_items()        // ★ 下拉框选项 = 搜到的那些格式（全部/flac/mp3/aac… ✓）
-        update_count()
         btnSearch.set_enabled(true)
         busyBar.set_value(100.0)
         if rows.len() == 0 {
@@ -642,6 +685,13 @@ export struct SearchPage {
         fmtBox.on_change(func(int idx) { on_fmt_changed() })
         fmtBox.set_enabled(false)      // 还没搜 ⇒ 只有「全部格式」一项 ⇒ 先灰着（搜完由 refresh_fmt_items 打开 ✓）
         row1.add(fmtBox, {grow: 0, shrink: 0, basis: 120, align: 3})
+        // ★ 2026-10-20（用户要求）：能查看“被隐藏的、没找到直链”的歌 ✓
+        showHiddenBox = SDL3.createCheckBox({
+            text: "显示未找到直链", checked: false, font_size: 12,
+            tip: "勾上后把没拿到完整直链 / 只有试听片段的歌也列出来（下载多半会失败，仅供参考）"
+        })
+        showHiddenBox.on_change(func(bool v) { on_show_hidden(v) })
+        row1.add(showHiddenBox, {grow: 0, shrink: 0, align: 1})
         row1.add(SDL3.createLabel({text: "每源条数", font_size: 13}), {grow: 0, shrink: 0, align: 1})
         // ★ 条数记忆（2026-10-08 ✓）：初值取设置里的（读盘时已钳到 LIMIT_MIN..LIMIT_MAX ✓）；
         //   范围也直接引 dl_settings 的常量 ⇒ 控件与钳位**只有一处口径**（不会对不上 ✗）
