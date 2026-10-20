@@ -92,6 +92,7 @@ export struct SearchPage {
     // ===== 搜索线程状态（两阶段并行 ⇒ 线程是**一批**而不是一条 ✓）=====
     Array[Thread] searchThreads = []
     int searchPhase = 0                       // 0 = 阶段 A；1 = 阶段 B
+    int phaseBT0 = 0                          // 阶段 B 起始时刻（状态行报“已等 Ns”，用户知道没卡死 ✓）
     Array[Array[string]] searchRowsA = []     // 阶段 A 收集到的行（阶段 B 的输入 ✓）
     Array[Array[Array[string]]] searchParts = []  // 阶段 B 各线程的入参（join 失手时退回它 ⇒ 一首都不丢 ✓）
     // ★ 2026-10-18：**边搜边显示** —— 阶段 A 的线程按音源起，谁先回就先 join 谁、先上屏 ✓
@@ -409,6 +410,7 @@ export struct SearchPage {
         int k = eng.PROBE_THREADS
         if k > total { k = total }
         searchPhase = 1
+        phaseBT0 = _int(times.ms())
         searchThreads = []
         searchParts = eng.slice_rows(searchRowsA, k)   // 轮转切片（切法见 dl_engine.slice_rows ✓）
         stateLbl.set_text("已搜到 " + _str(total) + " 首，正在逐首取无损直链（" + _str(searchParts.len()) + " 路并行）…")
@@ -511,15 +513,15 @@ export struct SearchPage {
             if searchErr != "" {
                 stateLbl.set_text("搜索失败：" + searchErr)
             } else if searchHidden > 0 {
-                // ★ 搜到了、但全都没直链 ⇒ 必须说清，否则和"搜不到"长得一模一样 ✗
-                stateLbl.set_text("搜到 " + _str(searchHidden) + " 首，但都没拿到直链（付费/无版权）—— 已全部隐藏")
+                // ★ 搜到了、但全都没直链 / 只有试听片段 ⇒ 必须说清，否则和"搜不到"长得一模一样 ✗
+                stateLbl.set_text("搜到 " + _str(searchHidden) + " 首，但都没拿到完整直链（付费/无版权，或只有试听片段）—— 已全部隐藏")
             } else {
                 stateLbl.set_text("没搜到结果（接口可能被限流，或关键词无匹配）")
             }
         } else {
             // ★ 隐藏数一并报出（否则用户会以为"搜索结果怎么少了" ✓）
             string hid = ""
-            if searchHidden > 0 { hid = "；另 " + _str(searchHidden) + " 首没拿到直链（付费/无版权）已隐藏" }
+            if searchHidden > 0 { hid = "；另 " + _str(searchHidden) + " 首没拿到完整直链（付费/无版权，或只有试听片段）已隐藏" }
             stateLbl.set_text("搜索完成：命中 " + _str(rows.len()) + " 首（默认已全部勾选）" + hid)
         }
         // ★ 搜索自检收尾（`DSEARCH` ✓）：打印与"要不要接着跑/退出"都归**宿主**（那些是它的全局量 ✓）
@@ -565,7 +567,16 @@ export struct SearchPage {
         // ★ 2026-10-18：阶段 A 每个来源一回来就先上屏（**边搜边显示** ✓ 见 harvest_a）
         if searchPhase == 0 { harvest_a() }
         // 线程还活着 ⇒ 继续等（worker 结束 + 通道排空后再推进，避免丢最后几条消息）
-        if search_running() { return }
+        if search_running() {
+            // ★ 2026-10-20：阶段 B 报"已等 Ns" —— 第三方接口慢时用户能看出**还在动**，
+            //   而不是"卡死了"（每片另有 25s 预算，见 dl_engine.probe_rows_budget ✓）
+            if searchPhase == 1 {
+                int el = (_int(times.ms()) - phaseBT0) / 1000
+                stateLbl.set_text("已搜到 " + _str(searchRowsA.len()) + " 首，正在逐首取无损直链（"
+                                  + _str(searchThreads.len()) + " 路并行，已等 " + _str(el) + "s）…")
+            }
+            return
+        }
         if searchCh is Channel {
             if searchCh.len() > 0 { return }
         }

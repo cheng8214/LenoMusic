@@ -1,0 +1,41 @@
+// test_trial_clip.leno — 「只有试听片段」的识别（纯逻辑，无需网络 ✓）
+//
+// 背景：付费曲的第三方直链有时只给 30 秒试听片段，但它**有直链、也有体积**
+//   ⇒ 只按 has_size 过滤会把它当正常歌留下，下下来只有 30 秒 ✗
+// 判据：声明时长 vs 实际字节数的比值明显偏低（mp3 < 5.5KB/s、无损 < 20KB/s）
+// 跑：build\leno.exe test\test_trial_clip.leno
+import "../dl_engine.leno" as eng
+
+var fails = 0
+func check(string name, bool ok) {
+    if ok { print($"[通过] {name}") }
+    else { fails = fails + 1; print($"[失败] {name}") }
+}
+
+// [id, name, artist, album, duration, ext, sizetext, bytes, src, url]
+func row(string dur, string ext, string bytes): Array[string] {
+    //   第 6 段（大小文本）非空 = `rowhas_size` 的前提之一（另一条是 bytes > 0 ✓）
+    return ["1", "歌", "手", "专辑", dur, ext, "有大小", bytes, "kuwo", ""]
+}
+
+main() {
+    print("=== 试听片段识别 ===")
+    check("正常 mp3（240s / 4MB）不是试听", not eng.trial_clip(row("240", "mp3", "4000000")))
+    check("30 秒 mp3 片段（240s / 480KB）判为试听", eng.trial_clip(row("240", "mp3", "480000")))
+    check("30 秒高码率片段（300s / 1.2MB）判为试听", eng.trial_clip(row("300", "mp3", "1200000")))
+    check("真·短歌（40s / 500KB）不判（时长 < 60s）", not eng.trial_clip(row("40", "mp3", "500000")))
+    check("时长未知（0）不判（宁可不杀 ✓）", not eng.trial_clip(row("0", "mp3", "300000")))
+    check("正常 flac（240s / 30MB）不是试听", not eng.trial_clip(row("240", "flac", "30000000")))
+    check("flac 试听片段（240s / 1.9MB）判为试听", eng.trial_clip(row("240", "flac", "1900000")))
+
+    Array[Array[string]] rows = []
+    rows.add(row("240", "mp3", "4000000"))     // 正常
+    rows.add(row("240", "mp3", "480000"))      // 试听
+    rows.add(row("180", "flac", "20000000"))   // 正常
+    Array[Array[string]] kept = eng.keep_downloadable(rows)
+    check("keep_downloadable 只留下正常的 2 首", kept.len() == 2)
+
+    print("")
+    if fails > 0 { print($"共 {fails} 项失败"); _exit(1) }
+    print("全部通过（试听片段被识别，正常曲/短歌/未知时长不受影响 ✓）")
+}

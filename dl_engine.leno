@@ -12,6 +12,7 @@
 //   别名在import 那行才被绑定 ⇒ import 提到文件最前是硬要求，不是风格问题 ✓
 //   （同 player.leno 文件头那条约定。）
 import strings
+import times
 import dirs
 import files
 import "web_net" as net
@@ -395,14 +396,25 @@ export func search_source(string src, string keyword, int limit, any ch): Array[
 //   各源的口径由各自的 `proberow` 定（网易/QQ 每行都试、酷狗只试"三档都不可下"的行 ✓）
 //   酷我行是空过（第 8 项当 kuwo ⇒ 没有第三方通路，直接跳过 ⇒ 不发任何请求 ✓）
 export func probe_rows(Array[Array[string]] rows): Array[Array[string]] {
+    return probe_rows_budget(rows, 0)           // 0 = 不限时（CLI / 脚本用 ✓）
+}
+
+// 同上，但给这一批一个**总时间预算**（ms；<=0 = 不限）
+// ★★ 2026-10-20：GUI 的 8 路并行必须带预算 —— 用户实测"搜索几分钟还在补直链"✗
+//   第三方接口偶发挂起/限流时，每行都可能吃满超时；8 片并行的最坏耗时 = 行数 × 超时 ✗
+//   ⇒ 到点直接收手：**没探到的行保留官方结果**（有大小就留下，没有就在收尾被过滤 ✓），
+//     线程照常结束 ⇒ join 不会把界面拖死 ✓
+export func probe_rows_budget(Array[Array[string]] rows, int budget): Array[Array[string]] {
     if rows.len() == 0 { return rows }
     HttpClient client = net.createClient()
     if not client.isOk() { return rows }        // 建不出来 ⇒ 原样返回（保持官方结果 ✓）
-    client.setTimeout(20000)
+    client.setTimeout(10000)                    // ★ 超时别设 20s：一片十几行，一卡就是几分钟 ✗
     client.setSSLVerify(false, false)
+    int t0 = _int(times.ms())
     string cur = ""
     int i = 0
     while i < rows.len() {
+        if budget > 0 and _int(times.ms()) - t0 > budget { break }     // 预算用完 ⇒ 剩下的不探了
         Array[string] row = rows[i]
         string src = srcid(row)
         // 同一片里的行往往同源 ⇒ 只在**换源**时重置头表（重置是整表替换，不必每行都来一遍 ✓）
@@ -527,11 +539,32 @@ export func slice_rows(Array[Array[string]] rows, int k): Array[Array[Array[stri
     return parts
 }
 
+// ★ 2026-10-20：判"这一行拿到的是**试听片段**（常见 30 秒）而不是整首 ✓
+//   背景（群友实测）：付费曲的第三方直链有时是 30 秒试听片段，但它**有直链、也有体积**
+//   ⇒ 只按 `has_size` 过滤会把它当正常歌留下，下下来只有 30 秒 ✗
+//   判据：**声明时长** vs **实际字节数** 的比值明显偏低：
+//     · mp3/aac 等：< 5.5 KB/s（≈44kbps）—— 正常音乐最低也有 48~64kbps
+//     · flac/wav/ape 等无损：< 20 KB/s（≈160kbps）—— 无损不可能这么低
+//   ⚠ 时长 < 60s 的不判（真·短歌/间奏，试听片段一般是从长歌里截的 ✓）
+//   ⚠ 时长未知（0）不判（宁可不杀，也不误伤 ✓）
+export func trial_clip(Array[string] row): bool {
+    int d = _int(srow.rowduration(row))
+    int b = srow.rowbytes(row)
+    if d < 60 or b <= 0 { return false }
+    int minbps = 5500
+    string e = srow.rowext(row)
+    if e == "flac" or e == "wav" or e == "ape" {
+        minbps = 20000
+    }
+    return b < d * minbps
+}
+
 // 收尾：没有歌曲大小的行**不入表**（= 拿不到直链 ✓ 见 has_size 的注释）
+//   ★ 2026-10-20：只有**试听片段**的行同样不入表（见 trial_clip ✓）
 export func keep_downloadable(Array[Array[string]] rows): Array[Array[string]] {
     Array[Array[string]] out = []
     for rows to r {
-        if has_size(r) {
+        if has_size(r) and not trial_clip(r) {
             out.add(r)
         }
     }
