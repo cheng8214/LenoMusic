@@ -357,7 +357,7 @@ struct MusicDlApp {
                             "要删掉这一首的本地文件吗？",
                             dirs.basename(pth),
                             pth,
-                            "（只删音频，不动同名 .lrc 歌词；不进回收站，删了就没了）"
+                            "（会同时删掉同名 .lrc 歌词；不进回收站，删了就没了）"
                         ], "删除", "取消", true, func() {
                             string qq = pth
                             bool ok = true
@@ -367,8 +367,18 @@ struct MusicDlApp {
                                 ok = false
                             }
                             if ok {
+                                // ★ 2026-10-20：与「删除全部」同口径 —— 同名 .lrc 一起删 ✓
+                                int ldn = 0
+                                string lq = pl.strip_ext(qq) + ".lrc"
+                                try {
+                                    if files.exists(lq) { files.delete(lq); ldn = 1 }
+                                } catch e {
+                                    ldn = 0        // 歌词删不掉不影响音频已删 ✓
+                                }
                                 if pbar is PlayerBar => bb { bb.rescan() }   // 列表跟着刷新（删的是正在播的那首 ⇒ 它也会停 ✓）
-                                stateLbl.set_text("已删除：" + qq)
+                                string lx = ""
+                                if ldn > 0 { lx = "（含同名歌词）" }
+                                stateLbl.set_text("已删除：" + qq + lx)
                             } else {
                                 stateLbl.set_text("删除失败：" + qq + "（若正在播放它 -> 先切到别的歌再删）")
                             }
