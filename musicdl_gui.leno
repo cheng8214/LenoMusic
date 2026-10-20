@@ -58,6 +58,7 @@ import "./dl_settings.leno" as dlset        // 设置：读/写/钳位（纯逻�
 import "./dl_settings_win.leno" as dlswin    // "设置"弹窗（SDL3）—— 标题栏右侧 ⚙ 打开 ✓
 import "./dl_about_win.leno" as dlabout     // "关于"弹窗（SDL3）—— 标题栏右侧那个 ⓘ 打开 ✓
 import "./player_bar.leno" as pb             // 播放条（嵌在主界面里 ✓ 见它的文件头）
+import "./player.leno" as pl                 // 只为了 strip_ext（删歌时顺带删同名 .lrc ✓）
 import "./dl_history.leno" as hist           // 下载历史（`DDL` 自检要读它的访问器 ✓；窗口那边也用它 ✓）
 import "./bang_page.leno" as bangpg          // 榜单页（★ 2026-10-11 从本文件拧出 ⇒ 本文件只接线 ✓ 见它的文件头）
                                              //   ⚠ 别名别叫 `bang` ✗ —— 本文件有个**字段**就叫 bang（BangPage?）
@@ -339,22 +340,9 @@ struct MusicDlApp {
                     } else {
                         int cnt = delfs.len()
                         SDL3.msgBox("删除全部本地文件", [
-                            "会删掉列表里 " + _str(cnt) + " 个已下载的文件（不可撤销）。",
-                            "下载目录里**不在这个列表**的文件不受影响；历史记录也会保留。"
-                        ], "删除", "取消", true, func() {
-                            int dn = 0
-                            for delfs to f2 {
-                                try {
-                                    files.delete(_str(f2))
-                                    dn = dn + 1
-                                } catch e {
-                                    dn = dn + 0        // 删不掉（被占用等）⇒ 跳过，最后报个数 ✓
-                                }
-                            }
-                            if flow is DlFlow => f { f.sync_locals() }   // 删完刷"本地已有"（列表里那些回到"没下载" ✓）
-                            stateLbl.set_text("已删除 " + _str(dn) + " 个本地文件（列表与历史保留）")
-                            SDL3.markFrameRedraw()
-                        })
+                            "会删掉列表里 " + _str(cnt) + " 个已下载的文件**及其同名 .lrc 歌词**（不可撤销）。",
+                            "删完会**清空播放列表**；下载目录里不在这个列表的文件、历史记录都不受影响。"
+                        ], "删除", "取消", true, func() { delete_all_local() })
                     }
                 } eif pth != "" {
                     if act == "reveal" {
@@ -457,6 +445,52 @@ struct MusicDlApp {
             if page is SearchPage => sp { srcRow = sp.source_row(row) }
         }
         if flow is DlFlow => f { f.play_table(rows, srcRow) }
+    }
+
+    // ★ 2026-10-20：删除**播放列表里已下载的全部文件**（确认框之后的实际动作）
+    //   · 音频 + 同名 .lrc 一起删（用户要求 ✓）
+    //   · 删之前先停播 + 清列表：正在播的那首占着文件句柄 ⇒ 不释放就删不掉 ✗
+    //   · 删完列表保持空（用户要求 ✓）；下载目录里不在列表的文件、历史记录一律不碰 ✓
+    func delete_all_local() {
+        Array[string] delfs = []
+        if pbar is PlayerBar => b2 {
+            int q2 = 0
+            while q2 < b2.queue_count() {
+                string lp2 = b2.queue_local(q2)
+                if lp2 != "" and files.exists(lp2) { delfs.add(lp2) }
+                q2 = q2 + 1
+            }
+        }
+        if delfs.len() == 0 {
+            stateLbl.set_text("列表里没有已下载的文件")
+            SDL3.markFrameRedraw()
+            return
+        }
+        // 先释放句柄 + 清空列表（顺序很重要：清单已经收好 ✓）
+        if flow is DlFlow => f0 { f0.clear_queue_rows() }
+        if pbar is PlayerBar => b0 { b0.clear_playlist() }
+        int dn = 0
+        int ln = 0
+        for delfs to f2 {
+            string ap = _str(f2)
+            try {
+                files.delete(ap)
+                dn = dn + 1
+            } catch e {
+                dn = dn + 0            // 删不掉（被其它程序占用等）⇒ 跳过，最后报个数 ✓
+            }
+            // ★ 同名歌词一起删（"歌名 - 歌手.lrc" 与音频同基名 ✓）
+            string lp3 = pl.strip_ext(ap) + ".lrc"
+            try {
+                if files.exists(lp3) { files.delete(lp3); ln = ln + 1 }
+            } catch e {
+                ln = ln + 0            // 歌词删不掉就算了（不影响音频已删的事实 ✓）
+            }
+        }
+        string lr = ""
+        if ln > 0 { lr = "，歌词 " + _str(ln) + " 个" }
+        stateLbl.set_text("已删除音频 " + _str(dn) + " 个" + lr + "；播放列表已清空（历史保留）")
+        SDL3.markFrameRedraw()
     }
 
     func onDownloadChecked() {

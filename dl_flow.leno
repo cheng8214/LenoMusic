@@ -89,6 +89,9 @@ export struct DlFlow {
     // 当前播放队列的原始行（"歌词面板点立即下载歌词"按显示名在其中找 ✓ 判据同口径）
     func play_rows(): Array[Array[string]] { return playRows }
 
+    // 播放列表被宿主清空（如「删除全部本地文件…」删完）⇒ 这里那份原始行也别留着 ✓
+    func clear_queue_rows() { playRows = [] }
+
     // 重算"本地已有"并回灌播放器（下完一首 / 删了文件之后调 ✓）
     func sync_locals() {
         if playRows.len() == 0 { return }

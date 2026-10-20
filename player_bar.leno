@@ -697,17 +697,8 @@ export struct PlayerBar {
         // ★ 「清空列表」（2026-10-09）：只清**播放列表**，不动任何文件 —— 本文件就能做 ✓
         //   ⚠ 连 `list` 一起清掉：不然 `has_queue()` 会变假 ⇒ 立刻退回"扫目录"口径 ⇒ 列表马上又被填满 ✗
         if id == "clearall" {
-            if p is Player => q2 {
-                q2.set_queue([], [], [], dir)      // 内部会 stop_all（停播 + 清边下边播状态 ✓）
-                q2.list = []                       // 清掉"扫目录"那一份 ⇒ 空列表就真是空的 ✓
-            }
-            lastIdx = -1
-            if p is Player => q3 {
-                lb.set_items(list_items(q3))
-                lb.clear_selection()
-            }
+            clear_playlist()
             hostLbl?.set_text("播放列表已清空（文件没动；想重新载入下载目录就点「重扫」）")
-            SDL3.markFrameRedraw()
             return
         }
         // 其余（定位 / 删除这一首 / 删除全部 / 打开目录）要动文件系统、要弹系统框 ⇒ 交给宿主 ✓
@@ -1350,6 +1341,22 @@ export struct PlayerBar {
             return ok
         }
         return false
+    }
+
+    // 清空播放列表（**不动文件** ✓）：停播 + 清队列/扫目录那份 + 清歌单显示
+    //   ★ 2026-10-20：从「清空列表」右键里抽出来 —— 宿主「删除全部本地文件…」删完也要调它 ✓
+    func clear_playlist() {
+        if p is Player => q2 {
+            q2.close()                         // ★ 停播 + **销毁 Sound**（释放文件句柄 ⇒ 删歌才删得掉 ✓）
+            q2.set_queue([], [], [], dir)      // 清队列 + 边下边播状态（stop_all 幂等 ✓）
+            q2.list = []                       // 清掉"扫目录"那一份 ⇒ 空列表就真是空的 ✓
+        }
+        lastIdx = -1
+        if p is Player => q3 {
+            lb.set_items(list_items(q3))
+            lb.clear_selection()
+        }
+        SDL3.markFrameRedraw()
     }
 
     // 本地已有路径整批刷新（下完一首后由宿主调 ✓ 队列顺序不动 ✓）
