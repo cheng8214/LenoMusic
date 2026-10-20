@@ -102,6 +102,8 @@ export struct PlayerBar {
     Font lrcFontBig              // 当前句
     Font lrcFontMid              // 邻近句
     Font lrcFontSmall            // 更远的（只剩个影子 ✓）
+    // ★ 2026-10-21（用户要求）：边下边播提示画在**进度条下面**（不再占歌手那一行 ✓）
+    Font barHintFont
     Button btnLrc                // 「词」按钮（右组，列表左边 ✓）
 
     // ===== 状态 =====
@@ -230,6 +232,13 @@ export struct PlayerBar {
                     playing = q.playing
                 }
                 draw_seek(r, ox, oy, cw, ch, ratio, playing)
+                // ★ 2026-10-21：边下边播 / 缓冲中的提示画在**条子下面**（原来占歌手行 ✗）
+                if p is Player => qh {
+                    string h = stream_hint(qh)
+                    if h != "" and barHintFont.ok {
+                        r.drawText(barHintFont, h, ox + 2.0, oy + ch * 0.5 + 9.0, #6A7183FF)
+                    }
+                }
             })
             // 悬停 ⇒ 条子变粗（缓动在 animate 里做 ✓，这里只置标志 + 催一帧 ✓）
             seekBar.on_mouse_enter(func(float cx, float cy) {
@@ -429,6 +438,7 @@ export struct PlayerBar {
             lrcFontBig = SDL3.acquireFontAuto(17.0)
             lrcFontMid = SDL3.acquireFontAuto(14.0)
             lrcFontSmall = SDL3.acquireFontAuto(12.5)
+            barHintFont = SDL3.acquireFontAuto(10.0)      // 进度条下面的小字 ✓
             // 行高**实测一次**（垂直居中全靠它 ✓）：`measureString` 是多返回值 ⇒ 必须解构 ✗
             var[float, float](_m1, mh1) = lrcFontBig.measureString("汉Ag")
             var[float, float](_m2, mh2) = lrcFontMid.measureString("汉Ag")
@@ -1064,8 +1074,9 @@ export struct PlayerBar {
             songLbl.set_text(song_text(q))
             artistLbl.set_text(artist_text(q))
             timeLbl.set_text(fmt_time(q.position()) + " / " + fmt_time(q.duration()))
-            // 进度条是自绘的（读的是 player 的实时比例 ✓）⇒ 播着的时候得让它重画 ✓（不播就不刷 ✗）
-            if q.playing { SDL3.markFrameRedraw() }
+            // 进度条是自绘的（读的是 player 的实时比例 ✓）⇒ 播着/边下边播时得让它重画
+            //   （提示文字也在画布里 ✓ 不刷就一直是旧百分比 ✗）
+            if q.playing or q.is_streaming() { SDL3.markFrameRedraw() }
             volLbl.set_text(_str(_int(q.volume * 100.0)) + "%")   // ⚠ 只显示、不碰滑块值 ✓
             sync_icons(q)
 
@@ -1621,16 +1632,9 @@ func song_text(Player q): string {
     return pl.split_title(q.current_name())
 }
 
-//   ⚠ 本函数是**模块级**的（不在 struct 里 ✓）⇒ 只能靠参数拿 Player；原来那个 `dlPct` 参数
-//     随"试听"退役（2026-10-09）—— 边下边播的进度现从 `q.buf_ratio()` 现算 ✓
+//   ★ 2026-10-21：边下边播 / 缓冲中的提示**不再占歌手行**（用户要求）——
+//     改由 `stream_hint()` 返回、画在进度条下面（见 seekBar.on_draw ✓）
 func artist_text(Player q): string {
-    // ★ 边下边播（2026-10-09，移植自二创 LenoMusic-main ✓）：把"已经下了多少 / 在不在等缓冲"
-    //   如实说出来 —— 否则"播到一半停住"看着就是**卡死** ✗（用户实测反馈过这个观感 ✓）
-    if q.is_streaming() {
-        int pct = _int(q.buf_ratio() * 100.0)
-        if q.is_waiting() { return "缓冲中 " + _str(pct) + "%（够了自动接着播）" }
-        return "边下边播 " + _str(pct) + "%（下完就能随便拖）"
-    }
     if q.count() == 0 { return "下几首就有得听了（也可以双击表格里的一首）" }
     // ★ 2026-10-16：把**最近一次失败原因**显示出来 —— 字段 `err` 一直都有（打开失败 / 流建不起来 /
     //   "这首正在下载窗口里下着" 都会写它 ✓），但界面上从来没有显示它的地方 ✗✗
@@ -1640,6 +1644,16 @@ func artist_text(Player q): string {
     string a = pl.split_artist(q.current_name())
     if a == "" { return (if q.playing then "正在播放" else "已暂停") }
     return a
+}
+
+// 进度条下面的边下边播提示（"" = 没在流 ⇒ 不画 ✓）
+//   · 缓冲中等候：说明“够了自动接着播”（原来这条也在歌手行 ✗）
+//   · 正常流：已下百分比 + “下完就能随便拖”
+func stream_hint(Player q): string {
+    if not q.is_streaming() { return "" }
+    int pct = _int(q.buf_ratio() * 100.0)
+    if q.is_waiting() { return "缓冲中 " + _str(pct) + "%（够了自动接着播）" }
+    return "边下边播 " + _str(pct) + "%（下完就能随便拖）"
 }
 
 // 工厂：建条（自带扫目录 ✓；**不**替宿主加进布局 —— 加哪儿是宿主的事 ✓）
