@@ -1,9 +1,10 @@
 // test_settings.leno — 设置的**真文件读写**回归（纯逻辑、无 SDL3 ⇒ 无 GUI 可跑 ✓）
 //
-// 跑：cd D:\CLeno\Leno 后
-//   build\leno.exe leno_gui\应用\音乐下载器\test\test_settings.leno
+// 跑（仓库根目录）：<发行包>\leno.exe test\test_settings.leno
+//   （Linux/macOS：<发行包>/leno test/test_settings.leno）
 //
-// ⚠ 会真写配置文件（%APPDATA%\LenoMusicDl\settings.json）：**测完把原值写回去**，不留痕 ✓
+// ⚠ 会真写配置文件（用户配置目录：Windows `%APPDATA%` / Linux `$XDG_CONFIG_HOME` 下的
+//   `LenoMusicDl/settings.json`）：**测完把原值写回去**，不留痕 ✓
 //   （这也是"配置坏了不该让应用起不来"的另一面：读写必须真的经过文件系统才算测过 ✓）
 import "../dl_settings.leno" as cfg
 use cfg.DlSettings

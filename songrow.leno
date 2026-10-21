@@ -1,7 +1,8 @@
 // songrow.leno — **歌曲行的字段契约**：下标常量 + 具名存取（唯一事实来源 ✓）
 //
-// 为什么单独一个文件：行是 `Array[string]`（**跨线程只能传纯字符串数组** —— 语言硬约束，
-//   见 dl_engine.leno 文件头 ✓），所以"第几段是什么"这件事只能靠约定。
+// 为什么单独一个文件：行统一用 `Array[string]`（跨线程行协议是**设计选择**；语言自
+//   2026-10-12 起也支持 struct 深克隆跨线程 —— 见 dl_engine.leno 文件头 ✓），
+//   所以"第几段是什么"这件事只能靠约定。
 //   此前这个约定有**三份副本**：
 //     ① dl_engine.leno 头部（`export const int F_ID` … + 字段表注释 ✓）
 //     ② player.leno / dl_window.leno / musicdl_gui.leno 各自抄一份解释（"job[1] =歌名"…）

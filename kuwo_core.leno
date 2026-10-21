@@ -1,4 +1,4 @@
-﻿// kuwo_core.leno — 酷我音乐核心（搜索 / 取直链 / 下载）
+// kuwo_core.leno — 酷我音乐核心（搜索 / 取直链 / 下载）
 //
 //   ① 搜索：走**官方**接口 http://www.kuwo.cn/search/searchMusicBykeyWord
 //      （参数集：vipver/client/ft/cluster/strategy/
@@ -430,7 +430,8 @@ export func bangext(string formats): string {
 // 榜单响应 → SongInfo 列表（单条脏数据只丢那一条，与搜索同款 try 兜底 ✓）
 //   ⚠ 榜单**不带体积**（没有 MINFO 那样的字段）⇒ sizeText / sizeBytes 保持默认 0
 //     ⇒ 界面上「大小」列会是空的，这是正常的（下载时按 Range 头算真总量 ✓）
-//   ⇒ 这里出SongInfo（struct）而不是行数组：**struct 不能跨线程**（语言硬约束 ✓），
+//   ⇒ 这里出SongInfo（struct）而不是行数组：保持"引擎层统一 encode 成行"的行协议
+//     （设计选择；struct 自 2026-10-12 起也可跨线程深克隆 ✓），
 //     由 dl_engine.bang_rows 在**引擎层** encode 成Array[string] 行 ⇒ 与搜索路径同构 ✓
 export func parsebang(string body): Array[SongInfo] {
     Array[SongInfo] out = []

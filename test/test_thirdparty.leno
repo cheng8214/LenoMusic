@@ -7,7 +7,7 @@
 //
 // 金标来源：2026-10-08 逐条 curl 抓到的**真实响应**（只留用到的字段；
 //   URL 里的签名查询串按终端输出原样保留、尾部可能被截断 —— 解析只用到 `http` 前缀与后缀 ✓）
-// 跑：build\leno.exe leno_gui\应用\音乐下载器\test\test_thirdparty.leno
+// 跑：<发行包>\leno.exe test\test_thirdparty.leno（Linux/macOS：<发行包>/leno test/test_thirdparty.leno）
 import strings
 import "../thirdparty.leno" as tp
 import "../kuwo_core.leno" as kuwo

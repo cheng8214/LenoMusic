@@ -131,8 +131,8 @@ export func parse_word_span(string tag): [float, float, bool] {
 }
 
 // ==================== 越界安全取值 ====================
-// 为什么：一行数据是 `Array[string]`（**跨线程只能传纯字符串数组** —— 语言硬约束，
-//   见 dl_engine.leno 文件头 ✓），于是每次取字段都要先问长度：
+// 为什么：一行数据统一是 `Array[string]`（行协议是设计选择，见 dl_engine.leno 文件头 ✓），
+//   于是每次取字段都要先问长度：
 //       if row.len() <= F_SRC { return "" }  return row[F_SRC]
 //   这类检查散落在引擎 + GUI + 下载窗口各处（各写一遍、还各自解释一遍字段含义 ✗）。
 //   收口成at()/at_int() 后：**越界不可能、默认值一处定** ✓

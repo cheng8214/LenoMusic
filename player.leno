@@ -630,7 +630,6 @@ export struct Player {
     string lrcFor = ""               // 已经读的是**哪个歌词文件**（路径 ✓ 变了才重读 ✗ 见 ensure_lrc）
     int lrcMtime = -1                // 上次读的那份的**修改时间**（文件被覆盖/晚到时靠它发现 ✓）
     int lrcSize = -1                 // 以及**大小**（mtime 秒级粒度、同秒覆盖会漏 ✗ 靠它兜住 ✓）
-    string scanDir = ""              // 最近一次 `scan` 的目录（试听态"去输出目录找同名歌词"要用 ✓）
     bool lrcTried = false
 
     // ---- 扫描状态（★ 2026-10-18：改成**边扫边显示** ✓）----
@@ -667,7 +666,6 @@ export struct Player {
         qName = []
         qLocal = []
         qTag = []
-        scanDir = dir                     // ★ 记下这次的目录（2026-10-08）：试听态取歌词要用 ✓ 见 lrc_path
         list = []
         index = -1
         scanBusy = false
@@ -1034,7 +1032,7 @@ export struct Player {
     }
 
     // 拖进度：按比例 0..1（要时长 ⇒ 时长未知就返回 false ✓）
-    //   ⚠ 调用前先问 `can_seek()`（试听那个截断文件不让拖 ✗ 见它的注释 ✓）
+    //   ⚠ 调用前先问 `can_seek()`（没起播时不让拖 ✗ 见它的注释 ✓）
     func seek_ratio(float r): bool {
         float d = duration()
         if d <= 0.0 { return false }
@@ -1043,10 +1041,9 @@ export struct Player {
         return seek_seconds(d * r)
     }
 
-    // 能不能拖进度：**只有"完整文件"可以** ✓（2026-10-07）
-    //   · 试听播的是"前一段"的**截断文件** ✗ —— `duration()` 是文件头声明的**总时长**，比实际
-    //     可播的部分长 ⇒ 拖着拖就跳到并不存在的位置（要么静音、要么直接结束 ✗ 实测 ✓）
-    //   · 列表里的歌 = 已经下完的完整文件 ✓ ⇒ 可拖
+    // 能不能拖进度（2026-10-07 起；2026-10-09 放宽）：
+    //   · 边下边播**可以拖** —— 拖到未下区会自动等缓冲（见 seek_seconds ✓）
+    //   · 其余情况要求已经有声（`sound != null` 且在播某首）⇒ 才可拖
     func can_seek(): bool {
         // ★ 2026-10-09：边下边播**也可以拖**（拖到未下区会自动等缓冲 ✓ 见 seek_seconds）
         if streaming { return true }
@@ -1132,7 +1129,7 @@ export struct Player {
     //     ① `: void` + **裸 `return`** ⇒ 编译器嫌"期望 null、实际 any" ✗ ⇒ 用 if 包住整段、不裸 return ✓
     //     ② 给 `lrc.secs`（**字段的字段**）赋 `[]` ⇒ 推断不出元素类型 ✗（本地 `Lrc` 却没事 ✓）
     //        ⇒ 统一用 `lrc_from_text("")` 造空表（同一条路径，也正好是单测覆盖的那条 ✓）
-    //   ⚠ 缓存键换成**歌词文件路径**（不是"哪首"✓）：试听 → 本地文件的切换、以及"歌词比歌晚到"
+    //   ⚠ 缓存键换成**歌词文件路径**（不是"哪首"✓）：边下边播 → 本地文件的切换、以及"歌词比歌晚到"
     //     这两种情况，用"哪首"当键都判不出来 ✗
     func ensure_lrc() {
         string p = lrc_path()

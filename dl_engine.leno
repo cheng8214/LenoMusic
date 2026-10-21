@@ -1,10 +1,12 @@
 // dl_engine.leno — 音乐下载器的引擎层（无 UI / 无 print / 无 main）
 //
 // 分层理由（与 CLI 版 musicdl.leno 的关系：核心逻辑完全共用，只是入口不同）：
-//   ① **跨线程只能传纯字符串数组**（struct 实例不能跨线程 ✗，见 cleaner_master 的注释）
+//   ① 跨线程沿用**纯字符串数组行协议**（设计选择：便于裁剪与单测；语言自 2026-10-12 起
+//      已支持 struct 深克隆跨线程，见 docs/module_threads_api.md ✓）
 //      ⇒ 本模块对外一律用 `Array[string]` 行；SongInfo 只出现在 encode() 内部，不出模块；
-//   ② worker 必须是**具名全局函数**（闭包会被 GC ✗）⇒ search_entry / dl_entry 都是全局函数，
-//      参数只有字符串数组与 channel；进度一律经 channel 回传，UI 线程用定时器排空。
+//   ② worker 写成**具名全局函数**（风格选择；模块函数/闭包现在也能作入口 ✓）⇒
+//      search_entry / dl_entry 都是全局函数，参数只有字符串数组与 channel；
+//      进度一律经 channel 回传，UI 线程用定时器排空。
 //
 // ⚠ import 必须在**任何使用它的语句之前**（含 const 定义 ✓ 实测踩过）：
 //   下面的 `export const int F_ID = srow.F_ID` 写在 import 之前会报
@@ -69,7 +71,7 @@ export const int F_URL = srow.F_URL
 //   ["fatal",  "0",     "0",    "0",  原因]
 //   ["lyric",  任务序,  歌词字节, "0",  歌词路径]   ← 歌词已落盘（音频是否成功都会尝试）
 //
-// 任务标志（flags，纯字符串数组 ⇒ 可跨线程）：
+// 任务标志（flags，纯字符串数组行协议 ⇒ 天然可跨线程）：
 //   "lyric"     = 下音频的同时把同名 .lrc 也下下来
 //   "lyriconly" = **只下歌词**（跳过音频），供"我已经有音频了"的用法
 // 分片大小：1 MB。太小 ⇒ 请求过多；太大 ⇒ 进度条一跳一大格
@@ -305,8 +307,8 @@ func waitcmd(any cmd): string {
 //     它们正是靠阶段 B 补上直链才可下的 ⇒ 阶段 A 就过滤会把它们全丢掉 ✗
 //   ⚠ 行的数量与耗时都由第三方请求主导 ⇒ 阶段 B 按**行**切片并行（见 musicdl_gui 的 probe_worker ✓）
 //   ⚠ 每个线程**自己建客户端**：共用会互相覆盖头表（见 preparefor ✓）
-//   ⚠ 线程入口必须是**主脚本文件**的函数（语言硬约束，见 threads.c 的前置校验）
-//      ⇒ 本模块只提供"能被线程调用的纯函数"，起线程一律在 musicdl_gui.leno ✓
+//   ★ 线程入口：模块函数自 2026-10-12 起也能直接作入口 ✓；本模块仍只提供
+//     "能被线程调用的纯函数"，起线程放在 musicdl_gui.leno（组织方式选择）
 
 // 阶段 A：**一个音源**的官方搜索。进度消息：["search", src, 命中数, 0, ""] / ["serror", src, …]
 //   返回的**不过滤**（没体积的行交给阶段 B 补 ✓）
@@ -842,7 +844,7 @@ func savelyricsafe(Array[string] job, string lrcout, string src): int {
     return n
 }
 
-// flags 里有没有某项（纯字符串数组 ⇒ 跨线程安全 ✓）
+// flags 里有没有某项（纯字符串数组行协议 ⇒ 跨线程安全 ✓）
 func hasflag(Array[string] flags, string name): bool {
     for flags to f {
         if f == name { return true }
@@ -953,8 +955,8 @@ export func bang_menu(string src): Array[Array[string]] {
 
 // 取一个榜单的歌曲行（行结构与搜索行同构 ⇒ GUI 表格 / 下载窗口 / 下载 worker 全都能直接用 ✓）
 //   失败（建不出客户端 / 网络挂 / 解析空）⇒ 返回空数组，调用方按"没取到"处理 ✓
-//   ⚠ 本函数**不起线程**（语言硬约束：线程入口必须与调用方同文件 ✓）⇒ 由 GUI 在自己的 worker 里调 ✓
-//   ⚠ kuwo 分支出SongInfo（struct）⇒ 在这里 encode 成行（**struct 不能跨线程** ✓ 语言硬约束）
+//   ⚠ 本函数**不起线程**（组织方式：入口集中在 GUI 的 worker 里 ✓）⇒ 由 GUI 在自己的 worker 里调 ✓
+//   ⚠ kuwo 分支出SongInfo（struct）⇒ 在这里 encode 成行（行协议是设计选择；struct 现已可跨线程）
 export func bang_rows(string src, string bid, int limit): Array[Array[string]] {
     Array[Array[string]] rows = []
     if bid == "" { return rows }

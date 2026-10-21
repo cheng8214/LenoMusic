@@ -6,7 +6,7 @@
 //
 // 为什么要单独有它：这些规则是"能不能连续听"的核心，而它们**不需要音频**就能测 ✓
 //   （真正发声那条由 GUI 用例/手测兜 ✓）
-// 跑：build\leno.exe leno_gui\应用\音乐下载器\test\test_player_state.leno
+// 跑：<发行包>\leno.exe test\test_player_state.leno（Linux/macOS：<发行包>/leno test/test_player_state.leno）
 import "../player.leno" as pl
 import "../player_bar.leno" as pb        // 只测它的纯逻辑 playable_count（不建控件 ✓）
 import dirs
@@ -211,9 +211,9 @@ main() {
     files.delete(dirs.join(tdir, tname + ".mp3"))
     files.delete(dirs.join(tdir, tname + ".lrc"))
 
-    // ---- ⑪ 试听态的歌词（2026-10-08 用户实测踩到 ✓ 两条都要守）----
-    //   ① 试听不在播放列表里（`current()` == "" ✓）⇒ 歌词必须去**输出目录**找同名 .lrc ✓
-    //      先前直接返回 "" ⇒ 试听中点「词」永远是空的 ✗
+    // ---- ⑪ 队列里"还没下载完"的歌词（2026-10-08 用户实测踩到 ✓ 两条都要守）----
+    //   ① 还没下载的（边下边播中）⇒ 歌词必须去**输出目录**找同名 .lrc ✓
+    //      先前直接返回 "" ⇒ 边下边播中点「词」永远是空的 ✗
     //   ② 歌词常常**比歌晚到**（边下边播也是：音频边下边写、.lrc 后落盘 ✓）
     //      ⇒ 文件一出现就要能**补读** ✓（不换歌、不重启、不重开浮层 ✓）
     //   ★ 2026-10-09：改走**队列模式** —— 还没下载的那首按"输出目录 + 消毒基名 + .lrc"拼 ✓

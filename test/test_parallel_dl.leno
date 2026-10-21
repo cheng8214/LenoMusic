@@ -1,7 +1,7 @@
 // test_parallel_dl.leno — **无 GUI** 的多首歌并行下载测试（离线：本机 HTTP 服务端 ✓）
 //
-// 跑：cd D:\CLeno\Leno 后
-//   build\leno.exe leno_gui\应用\音乐下载器\test\test_parallel_dl.leno
+// 跑（仓库根目录）：<发行包>\leno.exe test\test_parallel_dl.leno
+//   （Linux/macOS：<发行包>/leno test/test_parallel_dl.leno）
 //
 // 为什么能离线测（2026-10-07 加了"多首歌并行"之后补的）：
 //   "并行"那一层的风险全在**机制**上 —— N 个线程、**共用一条**进度通道（按 idx 归位）、

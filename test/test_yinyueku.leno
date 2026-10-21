@@ -41,8 +41,7 @@ func checkn(string name, int got, int want) {
     }
 }
 
-// id 会被拿去做**试听临时文件名**（`leno_preview_<F_ID>.<ext>` ✓ 见 musicdl_gui.previewRow）
-//   ⇒ 里面一个 Windows 非法字符都不能有（否则试听静默失败 ✗）
+// id 是复合串（`source#id#sign#lyric_id`）⇒ 里面不能有 Windows 非法字符（否则落盘会失败 ✗）
 func has_illegal(string s): bool {
     Array[string] bad = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|", " "]
     for bad to c {

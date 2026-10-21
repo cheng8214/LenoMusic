@@ -30,7 +30,7 @@
 //       `set_on_ctx_menu`      —— 表格右击将要弹出（**同步**）⇒ 宿主 `menuCtx = 0; buildMenu(row)` ✓
 //       `set_on_ctx_select`    —— 右击菜单选中了某项 ⇒ 宿主 `menuCtx = 0; onMenu(row, id)` ✓
 //       `set_on_search_done`   —— 搜索收尾 ⇒ 宿主打印 DSEARCH 自检并决定退出（只有它有那些全局量 ✓）
-//       `set_workers`          —— **两个线程入口函数值**（见下面 ⚠⚠；模块里写不出合法的线程入口 ✗）
+//       `set_workers`          —— **两个线程入口函数值**（宿主统一持有，见下面 ★）
 //
 // 搜索是**两阶段并行**（2026-10-08 改 ✓，原先一条线程串完所有源 + 所有第三方请求 ≈ 20~25 s ✗）：
 //   阶段 A：**一个音源**一条线程（各源官方搜索互不相干），进度走 channel 回传；
@@ -44,9 +44,10 @@ import "./dl_engine.leno" as eng
 import "./dl_settings.leno" as dlset   // ⚠ 只借它的**常量与钳位口径**（LIMIT_MIN/MAX ✓）—— 本页不读盘 ✗
 use SDL3.(Table, Button, CheckBox, ComboBox, Edit, Label, HBox, VBox, ProgressBar, SpinBox)
 
-// ⚠⚠ 线程入口：本文件是**模块** ⇒ 它自己写的 worker 会被 `threads.start` 拦 ✗
-//   （判据是"入口函数的 module 必须为空" —— threads.c:130；子 VM 只继承调用方 VM 的 globals ✓）
-//   ⇒ 两个 worker 由**入口脚本**写好、当函数值经 `set_workers` 交进来 ✓（见 bang_page.leno 的同类说明 ✓）
+// ★ 线程入口（2026-10-12 TH2 起）：模块函数、闭包都能直接作 `threads.start` 入口 ✓
+//   （唯一要求：所属模块已初始化 ⇒ 出现在入口脚本的 import 链上）
+//   本页仍由宿主经 `set_workers` 传入 worker 函数值 —— **组织方式选择**，不是语言限制 ✓
+//   （见 bang_page.leno 的同类说明 ✓）
 
 export struct SearchPage {
     // ===== 本页给宿主读/设的几个入参（见文件头：set_* 必须在 make_* 之前 ✓）=====

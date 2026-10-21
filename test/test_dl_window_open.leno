@@ -7,7 +7,7 @@
 //
 // ★ 不需要窗口/字体：只 `new` 一个**空** DlWindow 玩它的状态机 ✓
 //   （`bringToFront` 只在 `dlg.ok` 时才动 SDL ⇒ 没建过窗口也不会崩 ✓）
-// 跑：build\leno.exe leno_gui\应用\音乐下载器\test\test_dl_window_open.leno
+// 跑：<发行包>\leno.exe test\test_dl_window_open.leno（Linux/macOS：<发行包>/leno test/test_dl_window_open.leno）
 import "../dl_window.leno" as dlw
 use dlw.DlWindow
 

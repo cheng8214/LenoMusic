@@ -8,11 +8,10 @@
 //      回灌给播放器（begin_stream / feed_buffer / finish_stream ✓）。
 //      （播放半边在 player.leno / player_bar.leno —— 本文件只喂它 ✓）
 //
-// ⚠⚠ 线程入口（2026-10-11 实测的语言硬约束；bang_page / search_page / musicdl_gui 文件头同款）：
-//   `threads.start(f, …)` 判的是 **f 所属 module 必须为空**（threads.c:130：子 VM 只继承调用方
-//   VM 的 globals 且把 current_module_frame 置 NULL）⇒ **本文件是模块，自己写不出合法入口** ✗
-//   ⇒ `dl_worker_shard` 留在**入口脚本**，宿主经 `set_dl_worker(...)` 把它当**函数值**交进来，
-//     本文件再 `threads.start(dlWorker, …)` ✓ —— 此时 f 仍是入口脚本的函数（module == NULL）✓
+// ★ 线程入口（2026-10-12 TH2 起；旧"module 必须为空"的硬约束已过期）：
+//   `threads.start(f, …)` 现在只要求 f 所属模块已初始化；模块函数、闭包都能作入口 ✓
+//   本文件仍由宿主经 `set_dl_worker(...)` 传入函数值、再 `threads.start(dlWorker, …)`：
+//   这是**组织方式选择**（入口集中在入口脚本），不是语言限制 ✓
 //
 // 宿主给（create_dl_flow + set_*）：
 //   · stateLbl / pbar / lyricBox / cfg —— 都是**引用**（`cfg.workers`、"同时下载歌词"勾选态
@@ -233,7 +232,7 @@ export struct DlFlow {
         streamCmd = threads.channel(64)
         Array[string] f = lyric_flags()
         f.add("lyric")                                     // 边听边把歌词也带上（与试听同一口径 ✓）
-        // ⚠⚠ dlWorker 是**宿主传进来的函数值**（入口脚本的函数 ✓）—— 本文件自己的函数进不了线程 ✗
+        // dlWorker 是宿主传进来的函数值（入口脚本的函数 ✓）；本文件自己的函数现在也能作入口 ✓
         streamThread = threads.start(dlWorker, [one], outdir(), streamCh, streamCmd, f, 0, 1)
         stateLbl.set_text("边下边播：" + tag + "（正在下载，边下边听）")
         SDL3.markFrameRedraw()
@@ -305,11 +304,11 @@ export struct DlFlow {
         poll_streams()
     }
 
-    // ⚠ 下载窗口的"开始"必须由**本模块**真正起线程：线程入口只能是入口脚本的具名全局函数
-    //   （语言硬约束 ✓ 见文件头 ⚠⚠），所以窗口只置 `wantStart`，这里在定时器里接手 ⇒ 谁起线程谁持有入口 ✓
+    // 下载窗口的"开始"由本模块在定时器里真正起线程：窗口只置 `wantStart`，
+    //   这里接手 ⇒ 谁起线程谁持有入口 ✓（组织方式，见文件头 ★）
     pri func dl_start_if_wanted() {
         if dl is DlWindow => w {
-            // ★ 右键「重试」（2026-10-08 ✓）：窗口只列**下标**，起线程仍由这里做（语言硬约束 ✓）
+            // ★ 右键「重试」（2026-10-08 ✓）：窗口只列**下标**，起线程仍由这里做（组织方式 ✓）
             //   技巧：单个下标也走 `dl_entry_shard(jobs, …, shard = i, nshards = jobs.len())` ——
             //     该 worker 只领 `下标 % nshards == shard` 那一份 ⇒ 正好只下第 i 首 ✓
             //     而且它发消息时带的是**全量下标** ✓ ⇒ 窗口那张任务表天然对位 ✓（引擎一行都不用改 ✓）

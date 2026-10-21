@@ -249,9 +249,9 @@ export struct PlayerBar {
                 seekHover = false
                 SDL3.markFrameRedraw()
             })
-            // ★ 点进度条 = **真去快进**（2026-10-07 ✅）—— 但**只有完整文件才允许** ✓：
-            //   · 试听放的是"前一段"的截断文件 ⇒ 拖了会跳到并不存在的位置 ✗ ⇒ 挡下来并说清原因 ✓
-            //   · 列表里的歌 = 已下完的完整文件 ⇒ 放行 ✓（闸门 = `Player.can_seek()` ✓）
+            // ★ 点进度条 = **真去快进**（2026-10-07 ✅；2026-10-09 起边下边播也能拖 ✓）：
+            //   · 边下边播拖到未下区 ⇒ 自动等缓冲（见 Player.seek_seconds ✓）
+            //   · 还没起播（没有声）⇒ 挡下来并说清原因 ✓（闸门 = `Player.can_seek()` ✓）
             //   ⚠ 涟漪照样冒（哪怕是挡下来的那次 ✓）—— "点了有反馈"比"点了没动静"好得多 ✓
             // ★★ 2026-10-11 修（用户口径）：**只有点在进度条那一条上才跳转**；
             //   画布是**整行高**（BAR_H=52）、条子只占中间 8~12px ⇒ 不判的话"条子上方/下方那一大片"
@@ -1014,7 +1014,7 @@ export struct PlayerBar {
     }
 
     // 点某一句 ⇒ 跳到那一句（y 是**画布内**坐标 ✓ 由 Canvas.on_click 给 ✓）
-    //   ⚠ 只有完整文件能跳（同进度条那道闸门 ✓）；试听态给一句说明 ✓
+    //   ⚠ 能不能跳由 `Player.can_seek()` 决定（边下边播也可拖）；不能跳时给一句说明 ✓
     func jump_lyric(float ly) {
         int n = 0
         if p is Player => q { n = q.lyric_count() }
@@ -1037,7 +1037,7 @@ export struct PlayerBar {
                         hostLbl?.set_text("跳到第 " + _str(idx + 1) + " 句（" + fmt_time(t) + "）")
                     }
                 } else {
-                    hostLbl?.set_text("整首下完才能点歌词跳（试听放的是前一段）")
+                    hostLbl?.set_text("先播一首，再点歌词跳")
                 }
             }
         }
@@ -1260,7 +1260,7 @@ export struct PlayerBar {
     // ★ 2026-10-09：`preview` 转发随"试听（拉前一段）"一起退役 ——
     //   现在右键/双击走 `set_queue`（从那一行起播整表），没下过的由宿主起单任务下载做边下边播 ✓
 
-    // 当前播放条上"是哪一首"的标签（试听名 / 曲名去扩展名 ✓）
+    // 当前播放条上"是哪一首"的标签（曲名去扩展名 ✓）
     //   宿主判"能不能给这首下歌词"要用：搜索结果的行能对上 ⇒ 才拿得到歌曲 ID ✓
     func cur_tag(): string {
         if p is Player => q {
@@ -1295,15 +1295,10 @@ export struct PlayerBar {
     }
 
     // 套初值：改音量 + **滑块显示**
-    //   ⚠⚠ 这里**不能**写成 `volSld.value = _float(v)` ✗✗（2026-10-11 实测，编译器原话）：
-    //      「字段 'volSld' 类型不匹配: 期望 'struct Slider'，实际 'float'」
-    //      —— 本语言**不支持**给"**本 struct 的 struct 型字段**"做嵌套赋值：它把 `volSld.value = x`
-    //      当成"给字段 volSld 赋 x" ⇒ 类型对不上 ✗（**不是** `value` 这个名字的问题 ✓ ——
-    //      `value` 当字段名/读/写都正常 ✓；换成别的名字一样报 ✓）
-    //      **局部变量 / 参数**没这个限制：`Inner c = inner; c.value = 3.0; inner = c` 能跑通 ✓
-    //      （控件这边没必要绕那一手 ⇒ 直接调它自己的 `set_value()` 更清楚 ✓）
-    //   ⚠ 另一个坑：**`--check` 不检查被 import 的模块里的函数体** ⇒ 这句当初"检查通过"、
-    //      真编译却报错 ✗（改完必须**真编译/真跑一次** ✓ 见 README 的约定 ✓）
+    //   ★ 2026-10-11 B16 已修：`volSld.value = _float(v)` 现在也能编译 ✓（原先会误报
+    //      「字段 'volSld' 类型不匹配: 期望 'struct Slider'，实际 'float'」）
+    //      —— 但控件仍**首选它自己的 `set_value()`**：语义清楚，且会顺手同步内部显示 ✓
+    //   ★ `--check` 自 3fbf486 起会检查被 import 模块的函数体 ✓（仍建议改完真编译/真跑一次）
     //   ⚠ `set_value()` 只在**值真的变了**时才回调 on_change（见 sdl_slider:92 ✓）
     //     ⇒ 宿主套初值请在 `set_on_state_change` **之前**调：万一回调了也不会置脏 ⇒ 不白写盘 ✓
     func set_volume_pct(int v) {

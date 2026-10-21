@@ -32,15 +32,11 @@ import "./songrow.leno" as srow          // 行字段的具名存取（歌名/�
 // ⚠ `Thread` **不在**这里（它是内建类型，不是 SDL3 导出的 ✓ 放进 use 列表会报"期望类型名"✗）
 use SDL3.(Table, ComboBox, Button, CheckBox, Label, HBox, VBox)
 
-// ==================== 线程入口：**由宿主传进来**（本文件写不出合法的 ✗）====================
-// ⚠⚠ 2026-10-11 实测（拆分时踩到，血泪 ✓）：`threads.start(f, …)` 要求 **f 所属 module 为空**
-//   （`threads.c:130`：子 VM 只继承调用方 VM 的 globals，且把自己的 current_module_frame 置 NULL
-//   ⇒ **模块函数**进不了函数体）。⇒ 本文件是模块 ⇒ 它自己写的 worker **一律被拦** ✗
-//   （原话："线程入口必须是**当前文件**的函数 ✗ 收到的是模块 'bangpg' 里的 …"）
-//   ★ 正确姿势：**宿主把 worker 当函数值交进来**（`create_bang_page(…, menuWorker, …)` ✓），
-//     模块里存成 `func(string):Array[Array[string]]` 字段再 `threads.start(workers.xxx, …)` ✓ ——
-//     此时 `f` 仍是**入口脚本**的函数（module == NULL）⇒ 合法 ✓，且它的 globals 正是调用方 VM 那份 ✓
-//     （2026-10-11 探针实测：模块里用它起线程、join 回了 42 ✓）
+// ==================== 线程入口：由宿主传入（组织方式，非语言限制）====================
+// ★ 2026-10-12 TH2 起：模块函数、闭包都能直接作 `threads.start` 入口 ✓
+//   （唯一要求：所属模块已初始化）—— 2026-10-11 那句"模块函数一律被拦"**已过期**。
+//   本文件仍收宿主的函数值：入口集中在入口脚本，便于统一看线程数量/参数与兜异常 ✓
+//   模块里存成 `func(string):Array[Array[string]]` 字段再 `threads.start(workers.xxx, …)` ✓
 // ⚠ 榜单菜单/歌曲都要走网络 ⇒ 必须放线程里（同步调会卡住 UI 1~2 秒 ✗）
 //   结果由主线程 `t.join() as Array[Array[string]]` 取（同搜索阶段 A/B 的做法 ✓）；
 //   引擎层已保证不抛异常（内部 try 兜住、失败给空列表 ✓）⇒ 宿主那三条 worker 里再兜一层 ✓
@@ -54,8 +50,8 @@ export struct BangPage {
     bool checkSize = false           // 自检：DBANGSIZE=1 ⇒ 补完打印耗时/补到几首/顺序有没有变 ✓
     bool checkOnly = false           // 自检：DBANGONLY=1 ⇒ 就在"补完那一刻"勾上（验"必须等补完才生效" ✓）
 
-    // ===== 线程入口（宿主给的**函数值** ✓ —— 本文件是模块，自己写的 worker 会被 threads.start 拦 ✗）=====
-    //   见文件头那段 ⚠⚠：判据是"入口函数的 module 必须为空" ⇒ 只有**入口脚本**的函数才合法 ✓
+    // ===== 线程入口（宿主给的**函数值**；组织方式选择 —— 模块函数本身也能作入口 ✓）=====
+    //   见文件头 ★：从 2026-10-12 TH2 起不再要求"入口 module 为空"
     //   （和下面那 5 个回调同一个套路：`pri` + setter，宿主在接线时一并装好 ✓）
     pri func(string):Array[Array[string]] menuWorker
     pri func(string, string, int):Array[Array[string]] songWorker

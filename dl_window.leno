@@ -5,12 +5,11 @@
 //   dl_window.leno    ← **本文件**：下载对话框（窗口 + 任务表 + 总进度 + 按钮 + 每 120ms 刷新）
 //   musicdl_gui.leno  ← 主界面：搜索、勾选、右键菜单；"要下哪些歌"由它判定后把数据交进来 ✓
 //
-// ⚠ 一处**必须留在主界面**的东西：`thr.start` 及其 worker 入口
-//   实测（musicdl_gui 里记着原话）：线程入口必须是**起线程那个文件**的具名全局函数 ——
-//   跨模块会当场抛「线程入口必须是当前文件的函数 ✗ 子线程不会加载别的模块的全局变量」
-//   ⇒ 本模块只把"用户点了开始"这层意图暴露成 `wantStart`；主界面在 120ms 定时器里
-//     真正起 N 个线程（**多首歌并行**），再把它们与各自的命令通道用 `attach()` 交回本窗口 ✓
-//     （谁起线程谁持有入口 ✓；命令必须**人人发一条** ⇒ 见 sendcmd ✓）
+// 线程启动位置：本模块只把"用户点了开始"这层意图暴露成 `wantStart`；主界面在 120ms 定时器里
+//   真正起 N 个线程（**多首歌并行**），再把它们与各自的命令通道用 `attach()` 交回本窗口 ✓
+//   （谁起线程谁持有入口 ✓；命令必须**人人发一条** ⇒ 见 sendcmd ✓）
+//   ★ 2026-10-12 TH2 起：模块函数也能直接作线程入口 ✓ —— 这里保持"主界面起线程"
+//     是组织方式（入口集中在入口脚本），不再是语言限制
 //
 // ⚠ 另一处不搬的：**"要下哪些歌"的判定**（勾选的行 / 选中行 / 只下歌词）属主界面业务策略
 //   ⇒ 留在 musicdl_gui.leno（cleaner_detail 的分工同款：本模块"给数据就画" ✓）
@@ -135,7 +134,7 @@ export struct DlWindow {
     bool paused = false
     bool finished = false
     bool cancelling = false
-    bool wantStart = false           // 置 true ⇒ 主界面负责 thr.start（语言硬约束，见文件头 ⚠）
+    bool wantStart = false           // 置 true ⇒ 主界面负责 thr.start（组织方式，见文件头 ★）
     int done = 0
     int fail = 0
     int lrc = 0                      // 本轮已拿到的歌词数
@@ -171,7 +170,7 @@ export struct DlWindow {
     Button closeBtn
 
     // ★ 右键「重试」要把**哪些下标**重下 —— 列在这里，由主界面起线程 ✓
-    //   （与 `wantStart` 同一条硬约束：`thr.start` 必须在起线程那个文件里 ✓ 见文件头 ⚠）
+    //   （与 `wantStart` 同一组织方式：起线程集中在主界面 ✓ 见文件头 ★）
     Array[int] retryList
 
     // ★ 「清空」遗留的线程（2026-10-09 ✓）：清空时若还在下载 ⇒ 先发取消，再把 worker 挪到这儿 ——
@@ -334,7 +333,7 @@ export struct DlWindow {
             fail = 0
             setRunningUi(true)          // 统一口径：开始 ⇒ 灰掉「开始」、亮起「暂停/取消」✓
             stat.set_text("开始下载…")
-            // ⚠ 这里**不起线程**：thr.start 与其 worker 入口必须同一个文件（见文件头 ⚠）
+            // 这里**不起线程**：入口集中在主界面（组织方式，见文件头 ★）
             //   ⇒ 只置意图，主界面在定时器里起线程、再把 Thread/Channel 用 attach() 交回来 ✓
             wantStart = true
             SDL3.markFrameRedraw()
@@ -395,7 +394,7 @@ export struct DlWindow {
         if dlg.ok { dlg.raise() }
     }
 
-    // 主界面起好线程/通道后交回本窗口（语言硬约束的接口，见文件头 ⚠）
+    // 主界面起好线程/通道后交回本窗口（入口由主界面持有，见文件头 ★）
     func attach(Array[Thread] ts, Channel msgch, Array[Channel] cmdchs) {
         threads = ts
         ch = msgch
@@ -582,7 +581,8 @@ export struct DlWindow {
     }
 
     // ==================== ★ 「历史」页签（2026-10-09）====================
-    //   · 记录存在 %APPDATA%\LenoMusicDl\history.json —— 纯逻辑在 dl_history.leno（可单测 ✓）
+    //   · 记录存在用户配置目录（Windows `%APPDATA%` / Linux `$XDG_CONFIG_HOME`）下的
+    //     `LenoMusicDl/history.json` —— 纯逻辑在 dl_history.leno（可单测 ✓）
     //   · 本页就三件事：表格 + 右键（复制 / 定位 / 删这一条）+ 工具行（刷新 / 清空 / 打开目录）
     //   · 表格行与 `histItems` **一一对应**（右键按行号取记录 ✓；过滤/排序一律不开 ✗ 免得错位）
 

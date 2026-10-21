@@ -1,7 +1,7 @@
 // test_titlebar_actions.leno — 标题栏"动作按钮"的**离线**回归（纯逻辑：解析 + 内置图标名判定 ✓）
 //
-// 跑：cd D:\CLeno\Leno 后
-//   build\leno.exe leno_gui\应用\音乐下载器\test\test_titlebar_actions.leno
+// 跑（仓库根目录）：<发行包>\leno.exe test\test_titlebar_actions.leno
+//   （Linux/macOS：<发行包>/leno test/test_titlebar_actions.leno）
 //
 // ⚠ 这里**不建窗口、不初始化 SDL**：只压两个纯函数（`parseTitleBarActions` / `is_builtin_icon`）——
 //   几何/命中/绘制必须真窗口，那部分靠应用里真点一遍看（--check 只保证语义 ✓）

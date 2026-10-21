@@ -2,7 +2,8 @@
 //
 // 与 CLI 版（musicdl.leno）共用同一套"引擎"：网络/取直链/落盘在 dl_engine.leno
 //   · dl_engine 复用 kuwo_core.leno（CLI 同款）+ kuwo_des.leno（官方接口 DES 加密）
-//   · 本文件只管界面与交互；跨线程的数据一律是**纯字符串数组**（见 dl_engine 头部约定）
+//   · 本文件只管界面与交互；跨线程的数据沿用**纯字符串数组行协议**（设计选择；
+//     语言自 2026-10-12 起已支持 struct 深克隆跨线程，行协议只是更便于裁剪与单测 ✓）
 //
 // 分层（2026-10-07 把下载窗口拧出 ⇒ 三个文件各管一层 ✓；★ 2026-10-11 再把两个**页面**拧出 ✓）
 //   dl_engine.leno    ← 纯逻辑：网络 / 取直链 / 落盘 / 行格式（不 import SDL3 ⇒ 可单测 ✓）
@@ -33,17 +34,18 @@
 //   下载：**多首歌并行** —— threads.start(dl_worker_shard, ..., shard, nshards) × N 个 worker
 //         （N = dl_engine.dl_workers(任务数)，各领一份 i % N == shard 的任务）+ 共用一个 channel
 //         回传逐片进度（消息带全量下标）+ **每个 worker 一条**命令通道做暂停/取消 ✓
-//   worker 必须是**入口脚本自己的具名全局函数**（理由见下方包装函数的注释），UI 线程只做
+//   worker 写成**入口脚本的具名全局函数**（风格选择），UI 线程只做
 //   "排空 channel + 刷控件" ✓
-//   ⚠ 两个页面拆成模块后这条约束**更硬**了（2026-10-11 实测）：`threads.start` 判的是
-//     "入口函数的 module 必须为空"（threads.c:130）⇒ **模块里写不出合法的线程入口** ✗
-//     ⇒ 四个 worker（搜索两条、榜单三条里的三条）都留在**本文件**，
-//       由 `set_workers(...)` 当**函数值**交给各自那个页 ✓（见下面 ⚠ 与两个页的文件头 ⚠⚠）
-//   ⚠ 下载窗口同理：**起线程的仍是本文件**（dl_worker_shard 也留在本文件），
-//     窗口只置一个 `wantStart` 意图、由本文件的定时器接手起线程（详见 dl_window.leno 文件头 ⚠）
+//   ★ 2026-10-12 TH2 起：模块函数、闭包都能直接作 `threads.start` 入口 ✓
+//     （唯一要求是所属模块**已初始化**，即出现在入口脚本的 import 链上）
+//     ⇒ 2026-10-11 拆分时"模块里写不出线程入口"的硬约束**已不成立**（旧注释已过期）
+//   · 本文件仍把四个 worker 留在入口脚本、由 `set_workers(...)` 当**函数值**交给各页：
+//     这是**刻意保持的组织方式**（入口集中、便于看线程数量与参数），不是语言限制 ✓
+//   · 下载窗口同理：窗口只置一个 `wantStart` 意图、由本文件的定时器接手起线程（详见 dl_window.leno 文件头）
 //
-// 运行：cd D:\CLeno\Leno 后
-//   build\leno.exe leno_gui\应用\音乐下载器\musicdl_gui.leno
+// 运行（在仓库根目录）：
+//   Windows：<发行包>\leno.exe musicdl_gui.leno
+//   Linux/macOS：<发行包>/leno musicdl_gui.leno
 import "SDL3" as SDL3
 import "sdl_filedialog" as fdlg
 import dirs
@@ -77,13 +79,11 @@ use dlf.DlFlow
 // 歌曲行的列下标（F_ID / F_NAME / …）已收敛到 dl_engine.leno 的 `export const` ⇒ 用 `eng.F_xxx` ✓
 // （原先本文件自己复制了一份；下载窗口再拆一个文件就会变成三份 ⇒ 单一事实来源 ✓）
 
-// ==================== 线程入口包装（必须写在**本文件**里！） ====================
-// ⚠ 实测踩坑：`threads.start(eng.search_entry, ...)` 会**当场**抛错
-//   "线程入口必须是当前文件的函数 ✗ 收到的是模块 'dl_engine' 里的 'search_entry'
-//    （子线程不会加载别的模块的全局变量 ⇒ 模块函数在子线程里跑不起来）"
-//   ⇒ 子线程入口必须是**本文件的具名全局函数**，在里面再调引擎层的模块函数
-//   （cleaner_master 的 scan_entry/delete_entry 就是这个套路 ✓）
-// 另外：入口**不能是闭包**（闭包会被 GC ✗）
+// ==================== 线程入口包装（统一写在本文件里 —— 组织方式） ====================
+// ★ 2026-10-12 TH2 起：模块函数、闭包都能直接作线程入口 ✓（前提是模块已初始化）
+//   2026-10-08 那会儿 `threads.start(eng.search_entry, ...)` 会抛
+//   "线程入口必须是当前文件的函数 ✗" —— **那条限制已经不在了** ✓
+//   下面这些包装函数**保留**：入口集中在入口脚本，便于统一看线程数量/参数并兜异常 ✓
 // ★ 2026-10-08 搜索拆成**两阶段并行**（原先一条线程串完所有源 + 所有第三方请求 ≈ 20~25 s ✗）：
 //   阶段 A：**一个音源**一条线程（各源官方搜索互不相干）
 //   阶段 B：**一片行**一条线程（第三方直链请求才是耗时大头：10 条 ≈ 7~11 s）
@@ -103,7 +103,7 @@ func probe_worker(Array[Array[string]] rows): Array[Array[string]] {
 //     两个页面都要它 ⇒ 再留一份在本文件就是两处定义、迟早写岔 ✗（实测数据随常量一起搬过去了 ✓）
 //   实测（4 源 × 10 条，40 行 / 约 23 行真去问接口）：串行 ~26 s → 5 路 ~9.0 s → **8 路 ~5.6 s**
 
-// ⚠ 下载窗口（dl_window.leno）的"开始"也走这个入口 —— 起线程的必须还是本文件 ✓
+// 下载窗口（dl_window.leno）的"开始"也走这个入口 —— 起线程由本文件定时器接手 ✓
 //   shard / nshards = 本 worker 领第几份 / 共几份（**多首歌并行**，切法见 dl_engine.dl_entry_shard ✓）
 func dl_worker_shard(Array[Array[string]] jobs, string outdir, any ch, any cmd, Array[string] flags, int shard, int nshards): Array[string] {
     return eng.dl_entry_shard(jobs, outdir, ch, cmd, flags, shard, nshards)
@@ -112,15 +112,12 @@ func dl_worker_shard(Array[Array[string]] jobs, string outdir, any ch, any cmd, 
 // ★ 2026-10-09：`preview_worker` 随"试听（拉前一段）"整套退役 —— 现在双击就是"播放整表 + 边下边播" ✓
 //   （那条下载走的是现成的 `dl_worker_shard`，不需要新 worker ✓ 见 startStreamFor）
 
-// ★ 2026-10-11（拆分时实测到的**语言硬约束**，值得记牢 ✓）：
-//   `threads.start(f, …)` 的判据是 **`f` 所属的 module 必须为空**（`threads.c:130` 那段——
-//   子 VM 只继承**调用方 VM** 的 globals，且把自己的 current_module_frame 置 NULL ⇒ 模块函数
-//   进不了函数体）。⇒ **任何被 import 的模块里都写不出合法的线程入口** ✗（不只是"当前文件"，
-//   而是"**入口脚本自己**"：榜单页拆成模块后，它自己的 worker 当场就被拦了 ✓ 实测过 ✓）。
-//   那模块要不要起线程？**要 —— 由宿主把 worker 当函数值传进去**：
-//     模块里收 `func(string):Array[Array[string]]` 这种字段，再 `threads.start(field, …)` ✓
-//     此时 `f` 仍是**入口脚本**的函数（module == NULL）⇒ 合法 ✓（探针实测 join 回了正确值 ✓）
-//   ⇒ 所以下面这三条**必须留在这里**（入口脚本 = 本文件），榜单页通过 create_bang_page 收走它们 ✓
+// ★ 线程入口的现状（2026-10-12 TH2 更正；2026-10-11 的旧结论已过期）：
+//   `threads.start(f, …)` 只要求 **f 所属模块已初始化**（根因是协程首帧漏设 `frame->module`）。
+//   模块函数、闭包都能直接作入口 ✓ —— 那句"入口函数的 module 必须为空 ⇒ 模块里写不出
+//   合法入口"**已不成立**。
+//   下面这三条仍留在本文件，是**组织方式**（入口集中、便于统一看参数与兜异常），不是硬约束：
+//   榜单页通过 create_bang_page 收走这些函数值 ✓
 func bang_menu_worker(string src): Array[Array[string]] {
     Array[Array[string]] menu = []
     try { menu = eng.bang_menu(src) } catch e { menu = [] }
@@ -176,7 +173,7 @@ struct MusicDlApp {
     //   开窗（复用/建目录/open_download）、起线程（wantStart/retry 的接手）、边下边播的下载半边
     //   都在它那儿 ✓；本文件只做：create + set_dl_worker/set_outdir_provider、
     //   每拍 tick_playback / tick_download、经只读口（dl_ref/is_downloading/play_rows/sync_locals）✓
-    //   ★ `dl_worker_shard` 仍留在**本文件**（线程入口语言硬约束 ✓ 见顶部 ⚠）—— 当值交给它 ✓
+    //   ★ `dl_worker_shard` 仍留在**本文件**（入口集中是组织方式 ✓ 见顶部 ★）—— 当值交给它 ✓
     DlFlow? flow = null
 
     // ===== 播放条（player.leno 管规则 + player_bar.leno 画界面 ✓）=====
@@ -284,7 +281,7 @@ struct MusicDlApp {
         selfcheck_click_tick()     // DPCLICK / DSEEK / DCTX / DDBL / 退出路径
         selfcheck_search_tick()    // DSEARCH（自动搜索）
         // ★ 歌词面板里点了"立即下载歌词" ⇒ 由**本文件**去下（要起线程 + 开下载窗口，只有这里能做 ✓）
-        //   ⚠ 拿得到歌曲 ID 的前提：当前这首**在搜索结果里**（试听时记下的那行 ✓ gPrevRow）
+        //   ⚠ 拿得到歌曲 ID 的前提：当前这首**在当前播放队列里**（队列项带整行 ✓）
         //     列表里的歌（磁盘文件名）没有 ID ✗ ⇒ 老实说清"去搜索结果里右键"✓ 不瞎猜 ✗
         if pbar is PlayerBar => pbLyr {
             if pbLyr.wantLyricFetch {
@@ -660,16 +657,6 @@ struct MusicDlApp {
         return []
     }
 
-    // ★ 双击某行 = **试听**（2026-10-09 改 ✓ 与右键「试听（同时后台下载整首）」**同一条入口** ✓）
-    //   为什么改：双击原先 = 「下载这一首」，但**下载**在界面上本就有两条更明确的路
-    //   （勾选后「下载勾选」/ 右键「下载这一首」✓），而"点了就想先听听"一直没快捷方式 ✗
-    //   ⇒ 把最顺手的双击给试听；想下载仍有右键与按钮 ✓（不是砍功能，是换更顺的分配 ✓）
-    //   ⚠ 与菜单同一取舍：**不套格式过滤**（点名单曲 ⇒ 拦了会像"点了没反应" ✗ 见 fmt 那一段 ✓）
-    //   ⚠ `ctxId`（0=搜索表 songs、1=榜单表 bangSongs）与 menuCtx 同口径，但**绝不写 menuCtx**
-    //     —— 那是右键菜单的字段，双击去动它会让"菜单落在哪张表"串味 ✗ ⇒ 这里只做分支 ✓
-    func previewRow(int ctxId, int row) {
-    }
-
     // 用这一行去别处搜：关键词 = "歌名 歌手"（歌手为空就只搜歌名 ✓）
     //   ⚠ 榜单接口**常缺 `singername`**（见各 core 的注释 ✓）⇒ 不能拼成 " - " 或空歌手时留个空格 ✗
     func searchkw(Array[string] row): string {
@@ -1001,7 +988,7 @@ struct MusicDlApp {
             spg0.set_limit(cfg.limit)                       // 每源条数（读盘时已钳到 LIMIT_MIN..MAX ✓）
             spg0.set_fmt_pref(cfg.fmt)                      // 格式偏好（下拉要等搜完才填 ⇒ 先记着 ✓）
             spg0.set_sources(cfg.sources, cfg.sourcesSet)    // 音源勾选记忆 ✓
-            // 两个线程入口：**必须**是本文件（入口脚本）的具名函数 ⇒ 当值交给它 ✓（见文件头 ⚠⚠）
+            // 两个线程入口：本文件统一持有（组织方式，非语言限制）⇒ 当值交给它 ✓
             spg0.set_workers(search_src_worker, probe_worker)
             // ---- 7 个回调（"要宿主出手"的那几件事 ✓ 见 search_page 文件头）----
             spg0.set_on_dirty(func() { mark_dirty() })
@@ -1115,8 +1102,8 @@ struct MusicDlApp {
                         bang = bangpg.create_bang_page(rowIcon, cfg.bangSrc, cfg.bangId, cfg.bangOnly,
                                                        gBangSizeCheck, gBangOnlyCheck)
                         if bang is BangPage => bpg {
-                            // ⚠ 这三个是**线程入口**：必须是本文件（入口脚本）的具名函数 ⇒ 当值交给它 ✓
-                            //   （模块自己写的 worker 会被 threads.start 拦 ✗ 见本文件顶部那段 ⚠）
+                            // 这三个是线程入口：由本文件统一持有（组织方式）⇒ 当值交给它 ✓
+                            //   （模块函数本身也能作入口，见本文件顶部 ★）
                             bpg.set_workers(bang_menu_worker, bang_worker, bang_fill_worker)
                             bpg.set_on_dirty(func() { mark_dirty() })
                             // 右击：宿主得先**认领"这次菜单落在哪张表"**，它的 ctx_* 访问器才落到榜单页 ✓
@@ -1148,8 +1135,8 @@ struct MusicDlApp {
                 //   ⚠ 得在 stateLbl（搜索页建 ✓）与 pbar 都就位**之后**建 —— 同 busyBar 那次的教训 ✓
                 DlFlow fl0 = dlf.create_dl_flow(stateLbl, pbar, lyricBox, cfg)
                 fl0.set_outdir_provider(func(): string { return outdir })   // 活口：用户改目录立刻生效 ✓
-                // ⚠ dl_worker_shard 是**线程入口** ⇒ 必须是本文件（入口脚本）的具名全局函数 ⇒ 当值交给它 ✓
-                //   （模块里写不出合法线程入口 ✗ 见本文件顶部那段 ⚠）
+                // dl_worker_shard 是线程入口，由本文件统一持有（组织方式）⇒ 当值交给它 ✓
+                //   （模块函数本身也能作入口，见本文件顶部 ★）
                 fl0.set_dl_worker(dl_worker_shard)
                 flow = fl0
 
@@ -1827,8 +1814,8 @@ struct MusicDlApp {
                 if dlShot == "" { SDL3.requestExit() }
             }
         }
-        // 双击=试听 自检（见 gDblTarget 注释 ✓）：注入两次左键（框架按 400ms/10px 阈值判双击 ✓）
-        //   ⚠ 为什么必须有：这条改动是**改语义**（下载 → 试听），而"双击到底还有没有反应"光看代码
+        // 双击=播放整表 自检（见 gDblTarget 注释 ✓）：注入两次左键（框架按 400ms/10px 阈值判双击 ✓）
+        //   ⚠ 为什么必须有：这条改动是**改语义**（下载 → 播放整表 + 边下边播），而"双击到底还有没有反应"光看代码
         //     看不出来（框架的 dbl 判定在 mouseDown 里做、还要过复选框列 / 表头 / 列重排那几道闸 ✓）
         if gDblStep > 0 {
             int dblSt = gDblStep
@@ -1975,13 +1962,13 @@ bool gBangSizeCheck = false
 //   （= 过滤确实在**补完之后**生效 ✓ —— 这就是用户要的时序：补之前套过滤只会得到空表 ✗）
 bool gBangOnlyCheck = false
 
-// 双击=试听 自检（`DDBL=1|2` ⇒ 等第 0 行出现后注入**真双击**，断言"起的是试听、没开下载窗口" ✓）
-//   为什么要它：2026-10-09 把双击从"下载这一首"改成"试听"（见 previewRow ✓）—— 这是**改语义**，
+// 双击=播放整表 自检（`DDBL=1|2` ⇒ 等第 0 行出现后注入**真双击**，断言"播放队列已入队、没开下载窗口" ✓）
+//   为什么要它：双击语义改过两次（"下载这一首" → "试听" → **播放整表 + 边下边播**，见 on_dbl_play）—— 这是**改语义**，
 //   而框架那边的 dbl 判定（400ms / 10px 阈值）在 `mouseDown` 里、还要过表头 / 列重排 / 复选框列
-//   那几道闸 ⇒ "双击还有没有反应、反应的是不是试听"光看代码看不出来 ✗
+//   那几道闸 ⇒ "双击还有没有反应、反应的是不是播放"光看代码看不出来 ✗
 //     `DSEARCH=<关键词> DDBL=1` ⇒ 搜索表第 0 行（等搜索结果回来 ✓）
 //     `DBANG=1 DDBL=2`         ⇒ 榜单表第 0 行（等榜单行回来 ✓）
-//   同惯例见 gCtxStep / gClickStep ✓；配 DSHOT 还能截到"试听中"的样子 ✓
+//   同惯例见 gCtxStep / gClickStep ✓；配 DSHOT 还能截到"播放中"的样子 ✓
 int gDblStep = 0
 int gDblTarget = 1
 int gDblWait = 0        // 等行回来的拍数（超时就报"没等到行"⇒ 不挂死 ✓）

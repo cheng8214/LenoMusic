@@ -3,7 +3,7 @@
 // 为什么必须有：这套加密是两轮 AES + 一轮 RSA，**错一步就静默走不通**（服务端只会回
 //   一个空结果或 "cheating"），没有金标就只能靠"搜不到"来倒推，成本极高。
 //   金标由 .NET AES-128-CBC + PowerShell BigInteger 独立算出（与 Leno 实现无关 ✓）。
-// 跑：build\leno.exe leno_gui\应用\音乐下载器\test\test_netease_crypto.leno
+// 跑：<发行包>\leno.exe test\test_netease_crypto.leno（Linux/macOS：<发行包>/leno test/test_netease_crypto.leno）
 import "../netease_crypto.leno" as wc
 
 // 金标（输入 json = {"a":1}）

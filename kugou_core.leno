@@ -308,7 +308,8 @@ const RANK_LIST_API = "https://mobilecdn.kugou.com/api/v3/rank/list"
 const RANK_SONG_API = "https://mobilecdn.kugou.com/api/v3/rank/song"
 
 // 榜单菜单：一行一项 [bid, 中文名]
-//   ⚠ 这里**自建 client**：菜单要在**子线程**里拉（线程入口必须是本文件函数 ⇒ 只能调模块函数 ✓）
+//   ⚠ 这里**自建 client**：菜单要在**子线程**里拉；HttpClient 持有原生句柄、不能跨线程共享
+//     ⇒ 每次线程内新建 ✓（线程入口本身现在可以在任意已初始化模块里 ✓）
 export func toplistmenu(): Array[Array[string]] {
     Array[Array[string]] out = []
     HttpClient client = net.createClient()

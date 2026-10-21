@@ -7,22 +7,23 @@
 > **现在它是独立仓库**：源码与提交历史都在这里，后续**开发、issue、PR 都在本仓库进行**，
 > 不再回同步主仓库（主仓库里那份不再维护）。
 
-> **只想直接用？** 到 [Releases](../../releases) 下载 `LenoMusic.exe` —— 单文件，
-> 图标 / 原生库 / 资源全内嵌，目标机器**不需要装 LenoLang**（也不需要装 SDL3），
-> 双击即用（首次运行会自动把依赖解包到用户缓存目录）。
+> **只想直接用？** 到 [Releases](../../releases) 下载 `LenoMusic.exe`（Windows x64）
+> 或 `LenoMusic-linux-x64`（Linux x64）—— 单文件，图标 / 原生库 / 资源全内嵌，
+> 目标机器**不需要装 LenoLang**（也不需要装 SDL3）；
+> 首次运行会自动把依赖解包到用户缓存目录。
 > 下面是"从源码跑"与"自己打包"的方式。
 
 ## 一、先看这段：运行需要 LenoLang 运行时
 
-本仓库**只有源码**，不含运行时。`leno.exe` / `leno_vm.exe` 与 `leno_module/`
-（LenoSDL3、LenoWeb、LenoMusic、LenoCrypto 等，含原生 DLL）都在 LenoLang 发行包里，
-这里不重复发布（那部分几十 MB）。
+本仓库**只有源码**，不含运行时。编译器 / VM（`leno`、`leno_vm`，Windows 下为 `.exe`）
+与 `leno_module/`（LenoSDL3、LenoWeb、LenoMusic、LenoCrypto 等，含原生 `.dll` / `.so`）
+都在 LenoLang 发行包里，这里不重复发布（那部分几十 MB）。
 
 1. 到 [LenoLang Releases](https://github.com/cheng8214/LenoLang/releases) 下载**最新**发行包
-   （⚠ 本版源码用的是 **2026-10-16 之后**的运行时口径：新切片 `take(起点, 长度)`、选项名
-   `pad_x / pad_y`、`jsons` 的 `\uXXXX` 解码 —— 用旧运行时**连编译都过不去**
-   （`player.leno` 会报「类型不匹配：期望 string，实际 any」✗）
-   ⇒ 拿不准就用**同一天**的发行包；或者干脆用 Releases 里那个单文件 exe ✓）
+   （⚠ 本版源码需要 **2026-10-21 之后**的运行时：用到 `Table.source_row`（LenoLang `bf926d7`）——
+   旧运行时会报「struct Table 没有方法 'source_row'」✗；另外还需 2026-10-16+ 的口径：
+   新切片 `take(起点, 长度)`、选项名 `pad_x / pad_y`、`jsons` 的 `\uXXXX` 解码
+   ⇒ 拿不准就用**同一天**的发行包；或者干脆用 Releases 里那个单文件产物 ✓）
    （⚠ 只是"跑**音乐库**音源"的话，最低要求是 **2026-10-09 之后** —— 那天的 `jsons` 才支持 `\uXXXX`，
    否则那个源的中文歌名整列为空 ✗）
 2. 把本目录放到任意位置（不必和发行包放在一起）
@@ -146,7 +147,8 @@
   + 暂停 / 继续 / 取消 + 多首并行；音频落盘时顺带下同名 `.lrc`
 - **下载窗口**（非模态；一个应用只开一个）：**两个页签** —— `下载`（任务表：歌名 / 格式 / 大小 /
   进度条 / 状态 + 总进度 + 开始/暂停/取消/**清空**/打开目录/关闭；右键 = 重试这一首 / 重试全部失败项 /
-  复制文件名 / 打开下载目录）与 `历史`（★ 2026-10-09 加：落在 `%APPDATA%\LenoMusicDl\history.json`，
+  复制文件名 / 打开下载目录）与 `历史`（★ 2026-10-09 加：落在用户配置目录的 `LenoMusicDl/history.json` ——
+  Windows 为 `%APPDATA%`，Linux/macOS 为 `$XDG_CONFIG_HOME`（没有就 `~/.config`），
   每首到**终态**（完成 / 失败 / 取消）时自动记一条 —— 歌名、格式、大小、状态、路径、完成时间；
   右键 = 复制文件名 / 在资源管理器里定位 / 删除这一条记录；工具行 = 刷新 / 清空历史 / 打开目录）✓
   - ★ 标题栏那个「下载」图标 + 工具栏「下载勾选」**都没勾选也开窗**（2026-10-09 / 2026-10-10 改，用户口径）：
@@ -238,7 +240,7 @@
 >    已在**语言侧**修好（`jsons.c`，含代理对；回归在 LenoLang 的 `assert/test_json.leno` 测试9），
 >    本源**不再自带**兜底（曾经那份 `unescapeu` 已删 ⇒ 同一件事只留一份 ✓）。
 >    ⚠ 所以**跑音乐库源需要 2026-10-09 之后**的 LenoLang 运行时
->    （整个源码现在的门槛更高，是 **2026-10-16 之后** ⇒ 见第一节 ✓）。
+>    （整个源码现在的门槛更高，是 **2026-10-21 之后** ⇒ 见第一节 ✓）。
 
 > **列表里"格式空白 + 大小 0" = 这首下不了**（付费/原唱）——三源统一这个口径：
 > 网易在搜索后靠一次批量请求判出来，酷狗直接读搜索响应里的 `pay_type*` / `*privilege` ✓
@@ -248,15 +250,15 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `musicdl_gui.leno` | **入口与装配**（★ 2026-10-11 拆分后约 1950 行）：窗口 / 左侧两个导航按钮 / `TabControl` + 标题栏动作 + 把各页接起来 + **四个 worker 与线程入口**（语言硬约束：`threads.start` 的入口只能是**入口脚本**的具名全局函数，模块里写不出来 ✗）+ 无头自检钩子（`selfcheck_*_tick`）|
+| `musicdl_gui.leno` | **入口与装配**（★ 2026-10-11 拆分后约 1950 行）：窗口 / 左侧两个导航按钮 / `TabControl` + 标题栏动作 + 把各页接起来 + **四个 worker 与线程入口**（入口统一留在入口脚本是**组织方式**；2026-10-12 起模块函数也能直接作线程入口 ✓）+ 无头自检钩子（`selfcheck_*_tick`）|
 | `search_page.leno` | **搜索页**整页（2026-10-11 拆出）：搜索行 / 音源勾选 / 操作行 / 结果表 / 状态行 + 两阶段并行搜索 + 格式过滤 + 已选统计（7 个回调由入口装 ✓）|
 | `bang_page.leno` | **榜单页**整页（2026-10-11 拆出）：站点 / 榜单下拉 + 榜单表 + 「格式/大小」逐首补齐 + 「只看有大小」+ 右键菜单 + 「搜索这首歌（跳到搜索页）」|
 | `dl_flow.leno` | **下载编排 + 边下边播的下载半边**（2026-10-11 拆出）：开窗（复用 / 建目录 / `open_download`）、接手 `wantStart` / `retryList` 起线程、`start_stream` / `poll_streams`、下载窗口每拍 `tick` |
 | `songrow.leno` | **歌曲行的字段契约**：10 个下标常量（`F_*`）+ 具名存取（`rowname` / `rowext` / `rowbytes` …）。全仓唯一事实来源 —— 引擎转发一份 `eng.F_*` 保兼容，GUI/下载窗口零改动 |
 | `parsing.leno` | **严格解析**工具（纯逻辑）：`parse_secs` / `parse_millis` / `parse_word_span` / `parse_uint` 一律用**多返回值**`(值, 是否成功)`，不用 -1 哨兵；外加越界安全取值 `at` / `at_int` / `tail_from` |
-| `dl_engine.leno` | **引擎层**（无 UI、无 print、无 main）：音源注册表 + 分片下载（进度 / 续传 / 暂停取消）+ 真正的下载主体 `dl_entry_shard` / `dl_entry`；对外一律传「纯字符串数组行」（struct 不能跨线程 ✗）。⚠ 线程入口本身必须留在**入口脚本**（`dl_worker_shard` 只是包一层 ✓ 语言硬约束），所以这里给的是"能进线程的纯函数"，不是线程入口 ✓ |
+| `dl_engine.leno` | **引擎层**（无 UI、无 print、无 main）：音源注册表 + 分片下载（进度 / 续传 / 暂停取消）+ 真正的下载主体 `dl_entry_shard` / `dl_entry`；对外一律传「纯字符串数组行」（行协议是**设计选择**；struct 自 2026-10-12 起支持跨线程深克隆 ✓）。线程入口由入口脚本统一持有（`dl_worker_shard` 只是包一层 ✓ 组织方式），所以这里给的是"能进线程的纯函数"，不是线程入口 ✓ |
 | `dl_window.leno` | 下载窗口（非模态、不重复打开）：**两个页签** —— `下载`（任务表 + 总进度 + 按钮 + 清空 + 120ms 刷新）/ `历史`（记录表 + 右键复制/定位/删记录 + 刷新/清空/打开目录）|
-| `dl_history.leno` | 下载历史**纯逻辑**（不 import SDL3 ⇒ 可单测 ✓）：`%APPDATA%\LenoMusicDl\history.json`、上限 500 条、坏文件一律回空表 |
+| `dl_history.leno` | 下载历史**纯逻辑**（不 import SDL3 ⇒ 可单测 ✓）：用户配置目录下的 `LenoMusicDl/history.json`（Windows `%APPDATA%` / Linux `$XDG_CONFIG_HOME`）、上限 500 条、坏文件一律回空表 |
 | `player.leno` | 播放器**纯逻辑**：队列（`qName` / `qLocal` / `qTag`，空队列退回"扫目录"老口径）/ 播放索引 / 循环三态 / 音量静音 / 歌词解析（标准 LRC + 逐字时间轴 + 纯文本回退）+ **边下边播状态机**（等缓冲 / 重建 Sound / `@` 改名交接 / `streamOpened`·`streamBuiltBytes` 两道守卫 / `err` 记最近失败原因）|
 | `player_bar.leno` | 播放条 UI（嵌在主界面表格下方、状态栏上方）：转盘 / 图标 / 歌词浮层 / 歌单浮层（每行图标 + 双击才播）；进度条**只有点在条上才跳转**（画布别处只给涟漪 ✓ 闸门见 `on_seek_bar`）；歌手行显示边下边播进度，**也会显示最近一次失败原因**（`Player.err` ✓）|
 | `dl_settings.leno` | 设置**纯逻辑**（读写配置 + 取值钳位；不 import SDL3 ⇒ 可单测 ✓）：并行数 / 默认带歌词 / 每源条数 / 音源勾选 + **音量 / 循环档 / 输出目录 / 格式过滤 / 榜单页 / 窗口尺寸**（全是"上次用过的" ✓ 见上面那一节）|
@@ -306,7 +308,7 @@ leno.exe musicdl.leno --help
 
 ## 五、跑测试
 
-15 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
+17 个脚本都能直接运行，**全部离线**、不需要音频设备（`test_parallel_dl` 用的是本机 HTTP 服务端）：
 
 ```bat
 <发行包>\leno.exe test\test_player_state.leno      :: 播放器规则：认哪些扩展名 / 下一首是谁 / 循环三态 / 失败要安全 / 队列 + 边下边播纯逻辑（含 `streamOpened`、`streamBuiltBytes` 两道守卫 ✓）
@@ -317,24 +319,32 @@ leno.exe musicdl.leno --help
 <发行包>\leno.exe test\test_parallel_dl.leno       :: 多首歌并行下载（离线服务端）
 <发行包>\leno.exe test\test_settings.leno          :: 设置的真文件读写与钳位
 <发行包>\leno.exe test\test_dl_window_open.leno    :: 下载窗口「不重复打开」的规则 + 任务表「清空」的 busy 判定与状态归零
-<发行包>\leno.exe test\test_history.leno          :: 下载历史真文件读写：新的在前 / 删一条 / 上限 500 / 坏文件回空表（真写%APPDATA%并还原 ✓）
+<发行包>\leno.exe test\test_history.leno          :: 下载历史真文件读写：新的在前 / 删一条 / 上限 500 / 坏文件回空表（真写用户配置目录并还原 ✓）
 <发行包>\leno.exe test\test_titlebar_actions.leno  :: 标题栏动作按钮：解析 + 内置图标名判定
 <发行包>\leno.exe test\test_netease_crypto.leno  :: 网易 weapi 加密金标回归（AES 两轮 + RSA，8 项断言 ✓）
 <发行包>\leno.exe test\test_kugou_cdn.leno       :: 酷狗 CDN 取链配方回归（key 算式 + URL 形态 + 大小写敏感，6 项断言 ✓）
 <发行包>\leno.exe test\test_kugou_search.leno    :: 酷狗 Res 母带档：三档 hash 建索引 + 升级判据 + 清旧直链（28 项断言 ✓）
 <发行包>\leno.exe test\test_thirdparty.leno      :: 第三方聚合接口：URL 配方 + 档位顺序 + 四类响应解析（25 项断言 ✓）
 <发行包>\leno.exe test\test_yinyueku.leno       :: 音乐库配方：复合 id 拼拆 / `\uXXXX` 还原 / 响应解析（55 项断言 ✓）
+<发行包>\leno.exe test\test_table_source_row.leno :: 表格排序映射：升/降序、换数据后 `source_row` 仍取到正确数据行
+<发行包>\leno.exe test\test_trial_clip.leno      :: 30 秒试听片段的识别（按声明时长 / 体积启发式，纯逻辑 ✓）
 ```
 
-## 六、打包成单文件 exe
+## 六、打包成单文件可执行程序
 
 `resource.toml` 已经写好（`onefile = true`、资源 `images/**`、图标 `app.ico`）：
 
 ```bat
+:: Windows
 <发行包>\leno.exe -p --onefile musicdl_gui.leno
+
+:: Linux/macOS
+<发行包>/leno -p --onefile musicdl_gui.leno
 ```
 
-产物在 `dist\` 下，只有一个 exe，原生 DLL 与资源都内嵌其中，首次运行解包到用户缓存目录。
+产物在 `dist\`（Linux 为 `dist/`）：Windows 只有一个 `.exe`；Linux 是 `dist/musicdl_gui`
+单文件（另附 `.png` + `.desktop` 桌面图标/入口）。原生库与资源都内嵌其中，
+首次运行解包到用户缓存目录。
 
 ## 七、约定
 
@@ -344,18 +354,13 @@ leno.exe musicdl.leno --help
 - **严格解析走 `parsing.leno`**：需要"认不出就失败"时用 `parse_secs` / `parse_uint`
   这类接口（多返回值 `(值, 是否成功)`），**不要拿 -1 当失败哨兵** —— `-1` 与合法负数
   永远分不开 ✗（`player.lrc_tag_secs` 就是这么被替掉的）
-- **跨线程只传 `Array[string]`**：struct / 多返回值都不能过 channel（收到的是 `any`，
-  静态检查会拒绝解构）⇒ 行协议与进度协议保持"纯字符串数组"是有原因的，不是偷懒 ✓
-- **别给"本 struct 的 struct 型字段"做嵌套赋值**（`volSld.value = x` / `inner.value = x` ✗）：
-  编译器会把它当成"给**字段本身**赋值"⇒ 报 `字段 'volSld' 类型不匹配: 期望 'struct Slider'，实际 'float'`
-  （⚠ 与字段名无关 —— `value`/`inner` 都是正常名字 ✗ 别怀疑命名 ✓）。
-  **局部变量 / 参数**上没这个限制 ⇒ 要么整份取出来改再放回去（`Inner c = inner; c.value = x; inner = c` ✓），
-  要么调用那个对象自己的方法（`volSld.set_value(v)` ✓）
-  （⚠ 这看着像编译器 bug：同写法经局部量/参数都正常 ✓ —— 已登记在 Leno 侧：
-  `docs/Leno报错提示改进计划.md` 的 B6 / 改进 5、`docs/语言陷阱速查.md` §三 ㉙ ✓）
-- ⚠ **`--check` 只真检查"入口文件"**：被 `import` 的模块里的**函数体**它一条都不报 ✗
-  （实测：坏模块放进 import 里，`--check` 打印"检查通过"，真编译才报错 ✓）
-  ⇒ **改完必须真编译 / 真跑一次**（本仓的 lint 与 `--check` 都只是"第一道筛子" ✓）
+- **跨线程沿用 `Array[string]` 行协议**：这是**设计选择**（便于裁剪与单测），不是语言限制。
+  struct 自 2026-10-12 起支持跨线程深克隆（`Channel[Pt]` 可直接收发 ✓）；
+  cstruct / `Ptr`（以及字段里装了它们的 struct）仍不能跨线程，编译期会拦住。
+- **本 struct 的 struct 型字段嵌套赋值**（`volSld.value = x`）2026-10-11 已修 ✓；
+  控件仍建议用自带的 setter（`volSld.set_value(v)` ✓，语义更清楚）。
+- ✅ `--check` 自 `3fbf486` 起会检查被 `import` 的模块体（不再只检查入口文件）。
+  ⇒ 改完仍建议**真编译 / 真跑一次**（`--check` 只做静态语义检查，不覆盖运行时行为）。
 - `downloads/` 是默认输出目录（音频 + 同名 `.lrc`），**已在 `.gitignore` 里**
   ⇒ 别把下下来的内容提交上来（体积大，而且那不该由这个仓库分发）
 - `.lenocache/`、`.lenocache_lsp/`、`*.lenb`、`dist/` 同样是产物，不入库

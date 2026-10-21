@@ -3,7 +3,7 @@
 // 为什么值得单独有它：酷狗取链不用签名，全靠 `key = md5(hash + "kgcloudv2")` 这一条**约定**。
 //   它错了不会报错，只会回 `status=2 / Hash not found` ⇒ 排查必须靠"对比配方"。
 //   金标由 node/PowerShell 的 md5 权威实现算出；URL 形态与上游 musicdl 的 kgcloudv2 那条一致 ✓
-// 跑：build\leno.exe leno_gui\应用\音乐下载器\test\test_kugou_cdn.leno
+// 跑：<发行包>\leno.exe test\test_kugou_cdn.leno（Linux/macOS：<发行包>/leno test/test_kugou_cdn.leno）
 import strings
 import "../kugou_core.leno" as kugou
 

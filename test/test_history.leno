@@ -1,6 +1,7 @@
 // test_history.leno — 下载历史的**真文件读写**回归（纯逻辑、无 SDL3 ⇒ 无 GUI 可跑 ✓）
 //
-// ⚠ 会真写 %APPDATA%\LenoMusicDl\history.json：**测完把原内容写回去**，不留痕 ✓
+// ⚠ 会真写用户配置目录下的 `LenoMusicDl/history.json`（Windows `%APPDATA%` /
+//   Linux `$XDG_CONFIG_HOME`）：**测完把原内容写回去**，不留痕 ✓
 //   （与 test_settings 同一套思路：读写必须真的过一遍文件系统才算测过 ✓）
 // 跑：build\leno.exe test\test_history.leno
 import jsons
