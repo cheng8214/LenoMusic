@@ -1,0 +1,14 @@
+# leno.toml — LenoMusic 的包配置
+#
+# 这里只声明**运行时模块的版本要求**（[requires]），不是可安装的 git 依赖：
+#   模块由 LenoLang 发行包的 leno_module/ 提供，编译器在 import 时校验版本。
+#   ⇒ 用旧运行时会直接报「模块包 'LenoSDL3' 版本 x 不满足项目要求」，而不是等到
+#     `Table.source_row` 这类调用点才报"没有方法" ✓
+
+[package]
+name = "LenoMusic"
+version = "0.1.9"
+
+[requires]
+# source_row(display) 自 LenoSDL3 0.1.1 起提供
+LenoSDL3 = ">=0.1.1"
