@@ -192,7 +192,7 @@ export struct BangPage {
         Array[Array[string]] rows = []
         for songs to s { rows.add(tablerow(s)) }
         table.set_rows(rows)
-        table.check_all()
+        table.uncheck_all()          // 默认不勾选（同搜索页 ✓ 要全下点「全选」）
     }
 
     // 按「只看有大小」把**展示行**重算一遍（表格行与 songs 一一对应 ✓ 见字段声明）

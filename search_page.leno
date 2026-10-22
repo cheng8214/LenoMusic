@@ -249,7 +249,9 @@ export struct SearchPage {
         Array[Array[string]] rows = []
         for songs to s { rows.add(table_row(s)) }
         table.set_rows(rows)
-        table.check_all()            // 默认全勾：搜到就能一键下
+        // ★ 2026-10-22（群友建议）：**默认不勾选** —— 多数人只挑两三首下，
+        //   默认全勾容易误下整张表；要全下点「全选」即可 ✓
+        table.uncheck_all()
         // 图标不用管：表格配了 `image_path`（默认图标 ✓）⇒ 每行都画它、**换数据也不会掉** ✓
         //   （早先得每次 set_rows 后逐行 set_row_image 重贴 ✗ —— `set_rows` 会清/截断 rowImages
         //     见 sdl_table 里 `imgDefault` 的注释 ✓；框架补了默认图标这条就把坑根治了 ✓）
@@ -589,7 +591,7 @@ export struct SearchPage {
             // ★ 隐藏数一并报出（否则用户会以为"搜索结果怎么少了" ✓）
             string hid = ""
             if searchHidden > 0 { hid = "；另 " + _str(searchHidden) + " 首没拿到完整直链（付费/无版权，或只有试听片段）已隐藏" }
-            stateLbl.set_text("搜索完成：命中 " + _str(rows.len()) + " 首（默认已全部勾选）" + hid)
+            stateLbl.set_text("搜索完成：命中 " + _str(rows.len()) + " 首（默认不勾选，挑几首再点「下载勾选」）" + hid)
         }
         // ★ 搜索自检收尾（`DSEARCH` ✓）：打印与"要不要接着跑/退出"都归**宿主**（那些是它的全局量 ✓）
         if searchDone != null { searchDone(rows.len(), searchHidden, _int(times.ms()) - searchT0) }
@@ -763,7 +765,7 @@ export struct SearchPage {
     func make_action_row(): HBox {
         var row3 = SDL3.createHBox({h: 32, pad_x: 0, pad_y: 0, spacing: 8})
         dlCheckedBtn = SDL3.createButton({w: 140, h: 30, text: "下载勾选", type: "success", font_size: 13})
-        dlCheckedBtn.set_tip("下载列表里勾选的歌曲（默认全勾）；一首都没勾也能点 —— 会打开（空的）下载窗口，可看「历史」")
+        dlCheckedBtn.set_tip("下载列表里勾选的歌曲（默认不勾选，挑几首再下）；一首都没勾也能点 —— 会打开（空的）下载窗口，可看「历史」")
         dlCheckedBtn.on_click(func() { if dlChecked != null { dlChecked() } })
         // ★ 2026-10-10（用户口径）：开局就**可点**（不必等搜索结果）—— 空任务照样把窗口开出来 ✓
         dlCheckedBtn.set_enabled(true)

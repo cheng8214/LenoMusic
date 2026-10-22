@@ -92,13 +92,33 @@ export struct DlFlow {
     func clear_queue_rows() { playRows = [] }
 
     // 重算"本地已有"并回灌播放器（下完一首 / 删了文件之后调 ✓）
+    //   ★ 手动下载目录优先；没有再看试听缓存（两者分开，见 stream_dir ✓）
     func sync_locals() {
         if playRows.len() == 0 { return }
-        Array[string] locals = eng.resolve_locals(playRows, outdir())
+        Array[string] locals = eng.resolve_locals2(playRows, outdir(), stream_dir())
         if pbar is PlayerBar => b { b.set_locals(locals) }
     }
 
     // ==================== 输出目录（先建再写：write 到不存在的目录会抛 ✗ 见实录 B2）====================
+    // ★ 2026-10-22：**试听（边下边播）单独一个子目录** —— 不再和手动下载混在一起 ✓
+    //   手动下载仍写 outdir；试听缓存写 `<outdir>/试听缓存/`（用户可在文件管理器里单独清理 ✓）
+    pri func stream_dir(): string {
+        return dirs.join(outdir(), "试听缓存")
+    }
+
+    pri func ensure_stream_dir(): bool {
+        string d = stream_dir()
+        if dirs.exists(d) { return true }
+        try {
+            dirs.mkdir_p(d)
+        } catch e {
+            stateLbl.set_text("无法创建试听缓存目录：" + d)
+            SDL3.markFrameRedraw()
+            return false
+        }
+        return true
+    }
+
     pri func ensure_dir(): bool {
         if dirs.exists(outdir()) { return true }
         try {
@@ -175,7 +195,8 @@ export struct DlFlow {
             names.add(eng.songlabel(r))
             tags.add(eng.base_of(r))
         }
-        Array[string] locals = eng.resolve_locals(rows, outdir())
+        // 手动目录优先，其次试听缓存（两处分开 ✓ 见 stream_dir）
+        Array[string] locals = eng.resolve_locals2(rows, outdir(), stream_dir())
         playRows = rows                                  // 起"边下边播"要用整行 ✓（见 start_stream）
         bool started = false
         if pbar is PlayerBar => b {
@@ -192,6 +213,7 @@ export struct DlFlow {
     // 宿主起"边下边播"用的**单任务**下载（顺序下这一首 ⇒ 文件一路变大 ✓ 见 streamCh 注释）
     pri func start_stream(int i) {
         if not ensure_dir() { return }
+        if not ensure_stream_dir() { return }       // 试听缓存目录（与手动下载分开 ✓）
         if i < 0 or i >= playRows.len() { return }
         Array[string] one = playRows[i]
         string tag = eng.songlabel(one)
@@ -233,7 +255,8 @@ export struct DlFlow {
         Array[string] f = lyric_flags()
         f.add("lyric")                                     // 边听边把歌词也带上（与试听同一口径 ✓）
         // dlWorker 是宿主传进来的函数值（入口脚本的函数 ✓）；本文件自己的函数现在也能作入口 ✓
-        streamThread = threads.start(dlWorker, [one], outdir(), streamCh, streamCmd, f, 0, 1)
+        // ★ 2026-10-22：试听文件写 `<outdir>/试听缓存/`，别再混进手动下载目录 ✗
+        streamThread = threads.start(dlWorker, [one], stream_dir(), streamCh, streamCmd, f, 0, 1)
         stateLbl.set_text("边下边播：" + tag + "（正在下载，边下边听）")
         SDL3.markFrameRedraw()
     }

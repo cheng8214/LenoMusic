@@ -926,6 +926,20 @@ export func resolve_locals(Array[Array[string]] rows, string outdir): Array[stri
     return out
 }
 
+// 手动下载目录 + 试听缓存目录：**先**认手动下好的，没有再认试听缓存里的 ✓
+//   ★ 2026-10-22（群友反馈）：试听自动下载的文件原来和手动下载混在同一个目录，
+//     列表里全是没主动下过的歌，看着很乱 ⇒ 试听文件改落 `<输出目录>/试听缓存/` ✓
+export func resolve_locals2(Array[Array[string]] rows, string manualDir, string cacheDir): Array[string] {
+    Array[string] a = resolve_locals(rows, manualDir)
+    Array[string] b = resolve_locals(rows, cacheDir)
+    int i = 0
+    while i < a.len() {
+        if a[i] == "" and i < b.len() { a[i] = b[i] }
+        i = i + 1
+    }
+    return a
+}
+
 export func errmsg(any e): string {
     string t = $"{e}"
     if t == "" { return "未知错误" }
