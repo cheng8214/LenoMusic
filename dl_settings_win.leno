@@ -7,8 +7,9 @@
 // 返回：true = 用户点了保存**且已写盘成功**（调用方据此重读配置、刷新界面 ✓）
 import "SDL3" as SDL3
 import strings
+import "sdl_filedialog" as fdlg
 import "./dl_settings.leno" as cfg
-use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, SpinBox, CheckBox, HBox, VBox, Scancode)
+use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, SpinBox, CheckBox, Edit, HBox, VBox, Scancode)
 use cfg.DlSettings
 
 struct SettingsDialog {
@@ -16,14 +17,16 @@ struct SettingsDialog {
     bool closing = false     // 模态该收了（事件回调据此返回 false ✓）
     SpinBox spin
     CheckBox lyr
+    Edit cacheEdit
     Label note
+    string defaultCache = "" // 缓存目录留空时跟随它（= <输出目录>\试听缓存 ✓）
 
     // ⚠ runModal = pushModal + win.run()，主循环已跑时 run() 立即返回 ⇒ 这里**不阻塞**，
     //   收尾动作必须写在按钮/事件回调里（cleaner_master 踩过："点确认什么也不发生" ✗）
     func build() {
         string title = "设置"
         int dw = 560
-        int dh = 252
+        int dh = 330
         int tbH = SDL3.DIALOG_TB_H
         var dlg = SDL3.createDialogWindow({title: title, w: dw, h: tbH + dh})
         TitleBar tb = SDL3.dialogTitleBar(dlg, title)
@@ -45,7 +48,22 @@ struct SettingsDialog {
         lyr = SDL3.createCheckBox({text: "默认同时保存歌词（.lrc）", checked: cur.lyric, font_size: 13})
         root.add(lyr, {grow: 0, shrink: 0, align: 1})
 
+        // ---- 试听（边下边播）缓存目录（★ 2026-10-22）----
+        root.add(SDL3.createLabel({text: "试听缓存目录（边下边播的文件放这里，和手动下载分开）", font_size: 13}),
+                 {grow: 0, shrink: 0, align: 0})
+        var rowCache = SDL3.createHBox({h: 32, pad_x: 0, pad_y: 0, spacing: 8})
+        string shown = if cur.cachedir != "" then cur.cachedir else defaultCache
+        cacheEdit = SDL3.createEdit({text: shown, w: 300, h: 28, font_size: 12,
+                                     tip: "留空 = 跟随输出目录下的 试听缓存；也可以选别的目录（如 D:\\LenoMusicCache）"})
+        rowCache.add(cacheEdit, {grow: 1, shrink: 1, align: 3})
+        Button pickBtn = SDL3.createButton({w: 76, h: 28, text: "选择…", type: "dark", font_size: 12})
+        Button defBtn = SDL3.createButton({w: 76, h: 28, text: "默认", type: "dark", font_size: 12})
+        rowCache.add(pickBtn, {grow: 0, shrink: 0, basis: 76, align: 3})
+        rowCache.add(defBtn, {grow: 0, shrink: 0, basis: 76, align: 3})
+        root.add(rowCache, {grow: 0, shrink: 0, align: 3})
+
         // ---- 说明（存哪儿 / 什么时候生效）----
+        root.add(SDL3.dialogLabel("默认缓存目录：" + defaultCache, 11), {grow: 0, shrink: 0, align: 0})
         root.add(SDL3.dialogLabel("配置文件：" + cfg.store_path(), 11), {grow: 0, shrink: 0, align: 0})
         note = SDL3.dialogLabel("线程数对**下一次**开始下载生效（正在下的那批不动）", 11)
         root.add(note, {grow: 1, shrink: 1, align: 0})
@@ -56,10 +74,26 @@ struct SettingsDialog {
         Button okBtn = SDL3.createButton({w: 90, h: 32, text: "保存", type: "primary", font_size: 13})
         root.add(SDL3.dialogButtonRow([resetBtn, cancelBtn, okBtn], 10), {grow: 0, shrink: 0, align: 3})
 
+        // 选择缓存目录 / 恢复默认（默认 = 跟随输出目录下的 试听缓存 ✓）
+        pickBtn.on_click(func() {
+            fdlg.showOpenFolderDialog(dlg, func(Array[string] paths, int filter) {
+                if paths != null and paths.len() > 0 {
+                    cacheEdit.set_text(paths[0])
+                    note.set_text("缓存目录已选：" + paths[0] + "（点「保存」才写盘）")
+                    SDL3.markFrameRedraw()
+                }
+            }, {default_location: cacheEdit.get_text()})
+        })
+        defBtn.on_click(func() {
+            cacheEdit.set_text(defaultCache)
+            note.set_text("已填回默认缓存目录（点「保存」才写盘）")
+            SDL3.markFrameRedraw()
+        })
         resetBtn.on_click(func() {
             DlSettings d = new DlSettings()
             spin.set_value(_float(d.workers))
             lyr.set_checked(d.lyric)
+            cacheEdit.set_text(defaultCache)
             note.set_text("已填回默认值（点「保存」才写盘）")
             SDL3.markFrameRedraw()
         })
@@ -72,6 +106,10 @@ struct SettingsDialog {
             DlSettings s = cfg.load()
             s.workers = cfg.clamp_workers(_int(spin.get_text()))
             s.lyric = lyr.is_checked()
+            // 缓存目录：等于默认值 ⇒ 存 ""（跟随输出目录；以后改输出目录缓存也跟着走 ✓）
+            string cd = cacheEdit.get_text().trim()
+            if cd == defaultCache { cd = "" }
+            s.cachedir = cd
             if cfg.save(s) {
                 finish(true)
             } else {
@@ -104,8 +142,9 @@ struct SettingsDialog {
 }
 
 // 打开"设置"窗口（模态）。返回 true = 用户点了保存且**已写盘成功** ✓
-export func show_settings_window(): bool {
+export func show_settings_window(string defaultCache): bool {
     SettingsDialog d = new SettingsDialog()
+    d.defaultCache = defaultCache
     d.build()
     return d.saved
 }

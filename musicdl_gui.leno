@@ -864,13 +864,19 @@ struct MusicDlApp {
         }, {default_location: outdir})
     }
 
+    // 当前生效的试听缓存目录（设置里指定了就用它；"" = 跟随输出目录/试听缓存 ✓）
+    func cache_dir_now(): string {
+        if cfg.cachedir != "" { return cfg.cachedir }
+        return dirs.join(outdir, "试听缓存")
+    }
+
     // ==================== 设置 ====================
 
     // 打开「⚙ 设置」（在搜索行最右侧）：真改了就把新值立刻接上，并回一句到状态栏 ✓
     //   · 线程数只影响**下一次**开始下载（正在下的那批照旧 ✓）—— 设置窗口里也写着这句
     //   · 纯逻辑（读/写/钳位）在 dl_settings.leno，画界面在 dl_settings_win.leno ✓
     func onSettings() {
-        if dlswin.show_settings_window() {
+        if dlswin.show_settings_window(cache_dir_now()) {
             cfg = dlset.load()
             // ★ 2026-10-08 修：设置里改了「默认同时保存歌词」⇒ **当场回灌**主窗口那个勾选框 ✓
             //   先前只在启动时套一次（见文件末尾 setupUI 之后那句 ✓）⇒ 用户在设置里取消勾选、
@@ -878,7 +884,8 @@ struct MusicDlApp {
             //   ⚠ `set_checked` 是纯赋值（不触发 on_change ✓ 见 sdl_checkbox）⇒ 不会反向写盘循环 ✓
             lyricBox.set_checked(cfg.lyric)
             string extra = if cfg.lyric then "，默认带歌词" else ""
-            stateLbl.set_text("设置已保存：并行 " + _str(cfg.workers) + " 线程" + extra)
+            stateLbl.set_text("设置已保存：并行 " + _str(cfg.workers) + " 线程" + extra
+                              + "；试听缓存：" + cache_dir_now())
             SDL3.markFrameRedraw()
         }
     }
@@ -1135,6 +1142,7 @@ struct MusicDlApp {
                 //   ⚠ 得在 stateLbl（搜索页建 ✓）与 pbar 都就位**之后**建 —— 同 busyBar 那次的教训 ✓
                 DlFlow fl0 = dlf.create_dl_flow(stateLbl, pbar, lyricBox, cfg)
                 fl0.set_outdir_provider(func(): string { return outdir })   // 活口：用户改目录立刻生效 ✓
+                fl0.set_cachedir_provider(func(): string { return cache_dir_now() })   // 试听缓存目录活口 ✓
                 // dl_worker_shard 是线程入口，由本文件统一持有（组织方式）⇒ 当值交给它 ✓
                 //   （模块函数本身也能作入口，见本文件顶部 ★）
                 fl0.set_dl_worker(dl_worker_shard)

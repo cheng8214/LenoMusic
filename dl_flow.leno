@@ -48,6 +48,7 @@ export struct DlFlow {
     CheckBox lyricBox                 // 「同时下载歌词」——只读它的勾选态 ✓ 不改它
     DlSettings cfg                    // 只读 `cfg.workers`（引用语义 ⇒ 改设置立刻生效 ✓）
     pri func():string outdirOf        // 输出目录活口（set_outdir_provider ✓）
+    pri func():string cacheDirOf     // 试听缓存目录活口（"" = 跟随 outdir/试听缓存 ✓）
     pri func(Array[Array[string]], string, any, any, Array[string], int, int): Array[string] dlWorker
 
     // ===== 下载窗口（本体在 dl_window.leno ✓；对外只经 dl_ref() ✓）=====
@@ -68,6 +69,7 @@ export struct DlFlow {
     // ==================== 接线 ====================
     func set_dl_worker(func(Array[Array[string]], string, any, any, Array[string], int, int): Array[string] f) { dlWorker = f }
     func set_outdir_provider(func():string f) { outdirOf = f }
+    func set_cachedir_provider(func():string f) { cacheDirOf = f }
     // ⚠ 调**函数类型字段**的返回值是 `any`（实测 ✓）⇒ 收窄成 string 再用
     pri func outdir(): string {
         var d = outdirOf()
@@ -103,6 +105,12 @@ export struct DlFlow {
     // ★ 2026-10-22：**试听（边下边播）单独一个子目录** —— 不再和手动下载混在一起 ✓
     //   手动下载仍写 outdir；试听缓存写 `<outdir>/试听缓存/`（用户可在文件管理器里单独清理 ✓）
     pri func stream_dir(): string {
+        // 设置里指定了缓存目录就用它；否则跟随输出目录下的 `试听缓存` ✓
+        if cacheDirOf != null {
+            var d = cacheDirOf()
+            string s = _str(d)
+            if s != "" { return s }
+        }
         return dirs.join(outdir(), "试听缓存")
     }
 

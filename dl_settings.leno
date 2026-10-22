@@ -63,6 +63,9 @@ export struct DlSettings {
     bool bangOnly = false   // 榜单页：「只看有大小」的勾选态 ✓
     int winW = 0            // 主窗口尺寸（0 = 没存过 ⇒ 用 WIN_W_DEF / WIN_H_DEF ✓）
     int winH = 0
+    // ★ 2026-10-22：试听（边下边播）缓存目录（"" = 跟随输出目录下的 `试听缓存` ✓）
+    //   为什么单独记：试听文件可能很多，用户想放到别的盘 / 定期单独清理 ✓
+    string cachedir = ""
 }
 
 // 音量 / 循环档的钳位（脏值一律回落合法区间 ✓ 与 workers / limit 一个口径 ✓）
@@ -189,6 +192,7 @@ export func load(): DlSettings {
         if m.has("bangOnly") { s.bangOnly = jsons.get_bool(m, "bangOnly", false) }
         if m.has("winW") { s.winW = clamp_win_w(jsons.get_int(m, "winW", 0)) }
         if m.has("winH") { s.winH = clamp_win_h(jsons.get_int(m, "winH", 0)) }
+        if m.has("cachedir") { s.cachedir = jsons.get_str(m, "cachedir", "") }
     }
     return s
 }
@@ -215,7 +219,8 @@ export func save(DlSettings s): bool {
                                         volume: clamp_volume(s.volume), loop: clamp_loop(s.loop),
                                         outdir: s.outdir, fmt: s.fmt,
                                         bangSrc: s.bangSrc, bangId: s.bangId, bangOnly: s.bangOnly,
-                                        winW: clamp_win_w(s.winW), winH: clamp_win_h(s.winH)})
+                                        winW: clamp_win_w(s.winW), winH: clamp_win_h(s.winH),
+                                        cachedir: s.cachedir})
     } catch e {
         return false
     }

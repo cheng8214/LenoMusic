@@ -143,6 +143,17 @@ main() {
     assert_eq(ed.bangId, "")
     assert_eq(ed.bangOnly, false)
 
+    // ---- 试听缓存目录（★ 2026-10-22）----
+    DlSettings cc = new DlSettings()
+    cc.cachedir = "D:/LenoMusicCache"
+    assert_eq(cfg.save(cc), true)
+    assert_eq(cfg.load().cachedir, "D:/LenoMusicCache")
+    // "" = 跟随输出目录/试听缓存（默认）✓
+    DlSettings cd0 = new DlSettings()
+    cd0.cachedir = ""
+    assert_eq(cfg.save(cd0), true)
+    assert_eq(cfg.load().cachedir, "")
+
     // 还原用户原来的设置（字段级 ✓；因为不补写 sources 键，默认行为也不会被改掉 ✓）
     cfg.save(keep)
     DlSettings fin = cfg.load()
