@@ -7,7 +7,7 @@
 
 [package]
 name = "LenoMusic"
-version = "0.1.9"
+version = "0.2.0"
 
 [requires]
 # source_row(display) 自 LenoSDL3 0.1.1 起提供
