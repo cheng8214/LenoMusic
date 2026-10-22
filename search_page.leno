@@ -87,6 +87,14 @@ export struct SearchPage {
     Array[Array[string]] keptRows = []    // 过滤后（能下的）
     bool showHidden = false               // 用户是否勾了“显示未找到直链”
     CheckBox showHiddenBox                // 上面那个勾选框（make_search_row 里建 ✓）
+    Button retryHiddenBtn                 // 「重试隐藏」按钮（re-probe 被过滤掉的那些 ✓）
+    // 隐藏原因分解（状态栏/重试完给用户一个交代 ✓）
+    int hiddenNoLink = 0                  // 没拿到直链
+    int hiddenTrial = 0                   // 只有试听片段
+    // 重试隐藏项的后台线程（与搜索的两阶段线程分开，互不干扰 ✓）
+    Array[Thread] retryThreads = []
+    Array[Array[Array[string]]] retryParts = []
+    bool retrying = false
     // ★ 格式过滤的**用户选择**（"" = 全部格式）—— ⚠ 与 `fmtBox` 的当前值**不是一回事** ✗：
     //   每次搜索都会**程序化**重填下拉（`refresh_fmt_items`：选项 = 搜到的那些格式）⇒ 用户上次选的
     //   "flac" 只要这次没搜到 flac 就会掉回「全部格式」⇒ 直接存 `fmt_want()` 会**把偏好抹掉** ✗✗
@@ -383,6 +391,10 @@ export struct SearchPage {
         searching = true
         searchErr = ""
         searchHidden = 0
+        hiddenNoLink = 0
+        hiddenTrial = 0
+        retrying = false
+        retryHiddenBtn.set_enabled(false)
         songs = []
         table.set_rows([])
         table.clear_selection()
@@ -410,6 +422,11 @@ export struct SearchPage {
         shownA = -1
         allRows = []
         keptRows = []
+        hiddenNoLink = 0
+        hiddenTrial = 0
+        retrying = false
+        retryThreads = []
+        retryParts = []
         for srcs to s {
             searchThreads.add(threads.start(searchWorker, s, keyword, limit, searchCh))
             searchJoined.add(false)
@@ -505,10 +522,9 @@ export struct SearchPage {
         }
         searchThreads = []
         Array[Array[string]] kept = eng.keep_downloadable(rows)
-        // ★ 隐藏数 = 阶段 A 总数 − 最终保留数（付费/无直链/试听片段 ⇒ 默认不入表 ✓）
-        searchHidden = rows.len() - kept.len()
-        allRows = rows                  // 全部留着：勾「显示未找到直链」时要用 ✓
+        allRows = rows                  // 全部留着：勾「显示未找到直链」/「重试隐藏」时要用 ✓
         keptRows = kept
+        recount_hidden()                // 隐藏数 + 原因（无直链 / 试听片段 ✓）
         finish_search(kept)
     }
 
@@ -536,6 +552,7 @@ export struct SearchPage {
         }
         fill_table()
         update_count()
+        refresh_retry_btn()
         SDL3.markFrameRedraw()
     }
 
@@ -561,6 +578,111 @@ export struct SearchPage {
         SDL3.markFrameRedraw()
     }
 
+    // 这一行现在能下吗（有格式+体积，且不是试听片段 ✓）
+    pri func row_playable(Array[string] row): bool {
+        return eng.has_size(row) and not eng.trial_clip(row)
+    }
+
+    // 当前被隐藏的那些行（勾了“显示未找到直链”时也在里面 ✓）
+    func hidden_rows(): Array[Array[string]] {
+        Array[Array[string]] out = []
+        for allRows to r {
+            if not row_playable(r) { out.add(r) }
+        }
+        return out
+    }
+
+    // 重算隐藏数与原因（无直链 / 试听片段）
+    func recount_hidden() {
+        int hn = 0
+        int ht = 0
+        for allRows to r {
+            if not eng.has_size(r) { hn = hn + 1 }
+            eif eng.trial_clip(r) { ht = ht + 1 }
+        }
+        hiddenNoLink = hn
+        hiddenTrial = ht
+        searchHidden = hn + ht
+    }
+
+    pri func refresh_retry_btn() {
+        retryHiddenBtn.set_enabled(not searching and not retrying and searchHidden > 0)
+    }
+
+    // 「重试隐藏」：把没直链 / 试听片段的行再探测一遍（12 路并行，后台跑 ✓）
+    func start_retry_hidden() {
+        if searching or retrying { return }
+        Array[Array[string]] hid = hidden_rows()
+        if hid.len() == 0 {
+            stateLbl.set_text("没有被隐藏的歌，不用重试")
+            SDL3.markFrameRedraw()
+            return
+        }
+        retrying = true
+        int k = eng.PROBE_THREADS
+        if k > hid.len() { k = hid.len() }
+        retryParts = eng.slice_rows(hid, k)
+        retryThreads = []
+        for retryParts to p {
+            retryThreads.add(threads.start(probeWorker, p))
+        }
+        stateLbl.set_text("正在重试 " + _str(hid.len()) + " 首被隐藏的歌（" + _str(k) + " 路并行）…")
+        refresh_retry_btn()
+        SDL3.markFrameRedraw()
+    }
+
+    // 每拍检查重试线程；全停了就合并结果、重算隐藏并刷新表格
+    func poll_retry() {
+        if not retrying { return }
+        for retryThreads to t {
+            if t.state() == "running" { return }
+        }
+        Array[Array[string]] gotAll = []
+        for retryThreads to t {
+            var g = t.join() as Array[Array[string]]
+            if g != null {
+                Array[Array[string]] one = g
+                for one to r { gotAll.add(r) }
+            }
+        }
+        retryThreads = []
+        retryParts = []
+        retrying = false
+        int fixed = 0
+        int i = 0
+        while i < gotAll.len() {
+            Array[string] rr = gotAll[i]
+            string key = eng.songlabel(rr) + "||" + eng.srcid(rr)
+            int j = 0
+            while j < allRows.len() {
+                if eng.songlabel(allRows[j]) + "||" + eng.srcid(allRows[j]) == key {
+                    bool before = row_playable(allRows[j])
+                    if rr.len() > eng.F_URL {
+                        allRows[j][eng.F_EXT] = rr[eng.F_EXT]
+                        allRows[j][eng.F_SIZETEXT] = rr[eng.F_SIZETEXT]
+                        allRows[j][eng.F_BYTES] = rr[eng.F_BYTES]
+                        allRows[j][eng.F_URL] = rr[eng.F_URL]
+                    }
+                    if not before and row_playable(allRows[j]) { fixed = fixed + 1 }
+                    j = allRows.len()        // 命中即收手
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        keptRows = eng.keep_downloadable(allRows)
+        recount_hidden()
+        apply_visibility()
+        string extra = ""
+        if searchHidden > 0 {
+            extra = "；仍有 " + _str(searchHidden) + " 首被隐藏（无直链 " + _str(hiddenNoLink)
+                    + " / 试听片段 " + _str(hiddenTrial) + "）"
+        }
+        stateLbl.set_text("重试完成：新增 " + _str(fixed) + " 首可下载" + extra)
+        refresh_retry_btn()
+        SDL3.markFrameRedraw()
+    }
+
     // 搜索收尾：行已经拿齐（线程都 join 过了）
     func finish_search(Array[Array[string]] rows) {
         searchThreads = []
@@ -583,14 +705,18 @@ export struct SearchPage {
                 stateLbl.set_text("搜索失败：" + searchErr)
             } else if searchHidden > 0 {
                 // ★ 搜到了、但全都没直链 / 只有试听片段 ⇒ 必须说清，否则和"搜不到"长得一模一样 ✗
-                stateLbl.set_text("搜到 " + _str(searchHidden) + " 首，但都没拿到完整直链（付费/无版权，或只有试听片段）—— 已全部隐藏")
+                stateLbl.set_text("搜到 " + _str(searchHidden) + " 首，但都没拿到完整直链（无直链 "
+                                  + _str(hiddenNoLink) + " / 试听片段 " + _str(hiddenTrial) + "）—— 已全部隐藏")
             } else {
                 stateLbl.set_text("没搜到结果（接口可能被限流，或关键词无匹配）")
             }
         } else {
             // ★ 隐藏数一并报出（否则用户会以为"搜索结果怎么少了" ✓）
             string hid = ""
-            if searchHidden > 0 { hid = "；另 " + _str(searchHidden) + " 首没拿到完整直链（付费/无版权，或只有试听片段）已隐藏" }
+            if searchHidden > 0 {
+                hid = "；另 " + _str(searchHidden) + " 首已隐藏（无直链 " + _str(hiddenNoLink)
+                      + " / 试听片段 " + _str(hiddenTrial) + "）"
+            }
             stateLbl.set_text("搜索完成：命中 " + _str(rows.len()) + " 首（默认不勾选，挑几首再点「下载勾选」）" + hid)
         }
         // ★ 搜索自检收尾（`DSEARCH` ✓）：打印与"要不要接着跑/退出"都归**宿主**（那些是它的全局量 ✓）
@@ -602,6 +728,7 @@ export struct SearchPage {
     func tick() {
         poll_search()
         pulse_busy()
+        poll_retry()
     }
 
     func pulse_busy() {
@@ -718,6 +845,12 @@ export struct SearchPage {
         })
         showHiddenBox.on_change(func(bool v) { on_show_hidden(v) })
         row1.add(showHiddenBox, {grow: 0, shrink: 0, align: 1})
+        // ★ 2026-10-22：被隐藏的歌再探一遍（第三方接口偶发失败时很有用 ✓）
+        retryHiddenBtn = SDL3.createButton({w: 84, h: 26, text: "重试隐藏", type: "dark", font_size: 12})
+        retryHiddenBtn.set_tip("把没直链 / 只有试听片段的歌再取一次直链")
+        retryHiddenBtn.on_click(func() { start_retry_hidden() })
+        retryHiddenBtn.set_enabled(false)
+        row1.add(retryHiddenBtn, {grow: 0, shrink: 0, basis: 84, align: 3})
         row1.add(SDL3.createLabel({text: "每源条数", font_size: 13}), {grow: 0, shrink: 0, align: 1})
         // ★ 条数记忆（2026-10-08 ✓）：初值取设置里的（读盘时已钳到 LIMIT_MIN..LIMIT_MAX ✓）；
         //   范围也直接引 dl_settings 的常量 ⇒ 控件与钳位**只有一处口径**（不会对不上 ✗）

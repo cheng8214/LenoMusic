@@ -7,10 +7,49 @@
 // 返回：true = 用户点了保存**且已写盘成功**（调用方据此重读配置、刷新界面 ✓）
 import "SDL3" as SDL3
 import strings
+import dirs
+import files
 import "sdl_filedialog" as fdlg
+import "./dl_window.leno" as dlw
 import "./dl_settings.leno" as cfg
 use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, SpinBox, CheckBox, Edit, HBox, VBox, Scancode)
 use cfg.DlSettings
+
+// 缓存目录里**直接**文件的总大小（不递归；试听缓存目前是平铺 ✓）
+func cache_size(string d): int {
+    int total = 0
+    if not dirs.exists(d) { return 0 }
+    Array[string] ls = dirs.listdir(d)
+    for ls to nm {
+        string p = dirs.join(d, _str(nm))
+        if dirs.is_dir(p) { continue }
+        try {
+            var st = dirs.stat(p)
+            if st.exists { total = total + _int(st.size) }
+        } catch e {
+            total = total + 0
+        }
+    }
+    return total
+}
+
+// 清空缓存目录里的**直接文件**（保留子目录；返回删掉的个数 ✓）
+func clear_cache(string d): int {
+    int n = 0
+    if not dirs.exists(d) { return 0 }
+    Array[string] ls = dirs.listdir(d)
+    for ls to nm {
+        string p = dirs.join(d, _str(nm))
+        if dirs.is_dir(p) { continue }
+        try {
+            files.delete(p)
+            n = n + 1
+        } catch e {
+            n = n + 0
+        }
+    }
+    return n
+}
 
 struct SettingsDialog {
     bool saved = false       // 点了保存且写盘成功
@@ -18,6 +57,7 @@ struct SettingsDialog {
     SpinBox spin
     CheckBox lyr
     Edit cacheEdit
+    Label cacheInfo
     Label note
     string defaultCache = "" // 缓存目录留空时跟随它（= <输出目录>\试听缓存 ✓）
 
@@ -57,10 +97,18 @@ struct SettingsDialog {
                                      tip: "留空 = 跟随输出目录下的 试听缓存；也可以选别的目录（如 D:\\LenoMusicCache）"})
         rowCache.add(cacheEdit, {grow: 1, shrink: 1, align: 3})
         Button pickBtn = SDL3.createButton({w: 76, h: 28, text: "选择…", type: "dark", font_size: 12})
-        Button defBtn = SDL3.createButton({w: 76, h: 28, text: "默认", type: "dark", font_size: 12})
+        Button defBtn = SDL3.createButton({w: 60, h: 28, text: "默认", type: "dark", font_size: 12})
+        Button openBtn = SDL3.createButton({w: 60, h: 28, text: "打开", type: "dark", font_size: 12})
+        Button clearBtn = SDL3.createButton({w: 60, h: 28, text: "清空", type: "dark", font_size: 12})
+        openBtn.set_tip("在文件管理器里打开当前缓存目录")
+        clearBtn.set_tip("删除缓存目录里的文件（不动手动下载目录）")
         rowCache.add(pickBtn, {grow: 0, shrink: 0, basis: 76, align: 3})
-        rowCache.add(defBtn, {grow: 0, shrink: 0, basis: 76, align: 3})
+        rowCache.add(defBtn, {grow: 0, shrink: 0, basis: 60, align: 3})
+        rowCache.add(openBtn, {grow: 0, shrink: 0, basis: 60, align: 3})
+        rowCache.add(clearBtn, {grow: 0, shrink: 0, basis: 60, align: 3})
         root.add(rowCache, {grow: 0, shrink: 0, align: 3})
+        cacheInfo = SDL3.dialogLabel("当前缓存占用：" + strings.fmt_size(cache_size(shown)), 11)
+        root.add(cacheInfo, {grow: 0, shrink: 0, align: 0})
 
         // ---- 说明（存哪儿 / 什么时候生效）----
         root.add(SDL3.dialogLabel("默认缓存目录：" + defaultCache, 11), {grow: 0, shrink: 0, align: 0})
@@ -86,8 +134,32 @@ struct SettingsDialog {
         })
         defBtn.on_click(func() {
             cacheEdit.set_text(defaultCache)
+            cacheInfo.set_text("当前缓存占用：" + strings.fmt_size(cache_size(defaultCache)))
             note.set_text("已填回默认缓存目录（点「保存」才写盘）")
             SDL3.markFrameRedraw()
+        })
+        openBtn.on_click(func() {
+            string d = cacheEdit.get_text().trim()
+            if d == "" { d = defaultCache }
+            if not dlw.openfolder(d) {
+                note.set_text("打开缓存目录失败（可能还不存在）：" + d)
+                SDL3.markFrameRedraw()
+            }
+        })
+        clearBtn.on_click(func() {
+            string d = cacheEdit.get_text().trim()
+            if d == "" { d = defaultCache }
+            int sz = cache_size(d)
+            SDL3.msgBox("清空试听缓存", [
+                "会删除缓存目录里的文件（含歌词），**不动手动下载目录**。",
+                d,
+                "当前占用：" + strings.fmt_size(sz)
+            ], "清空", "取消", true, func() {
+                int n = clear_cache(d)
+                cacheInfo.set_text("当前缓存占用：" + strings.fmt_size(cache_size(d)))
+                note.set_text("已清空 " + _str(n) + " 个缓存文件")
+                SDL3.markFrameRedraw()
+            })
         })
         resetBtn.on_click(func() {
             DlSettings d = new DlSettings()
