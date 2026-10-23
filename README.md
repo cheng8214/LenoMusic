@@ -374,5 +374,17 @@ leno.exe musicdl.leno --help
 
 ## 九、许可
 
-本仓库的代码源自 [LenoLang](https://github.com/cheng8214/LenoLang) 的 `leno_gui/应用/音乐下载器/`，
-切分后已**独立维护**（不再与主仓库同步），采用 MIT。
+本仓库（LenoMusic）采用 **Apache License 2.0**，全文见根目录 [`LICENSE`](LICENSE)。
+
+- 可自由使用、修改、分发（含商业用途），但须**保留版权与许可声明**、标明改动，
+  并在分发时附带一份 Apache-2.0 许可全文（第 4 条）；
+- 许可**不授予商标权**，也未对专利作额外限制之外的其他承诺（第 3、6 条）；
+- 软件按「AS IS」提供，不提供任何明示或暗示担保（第 7、8 条）。
+
+本仓库的代码源自 [LenoLang](https://github.com/cheng8214/LenoLang) 的 `leno_gui/应用/音乐下载器/`
+（切分后已**独立维护**，不再与主仓库同步）。上游 LenoLang 为 MIT 许可，其版权声明与许可条款
+（Copyright (c) 2025 LenoLang Team）在派生部分继续有效并予以保留；本仓库整体按 Apache-2.0 分发。
+
+> 运行时与模块（LenoLang 的 `leno` / `leno_vm`、`leno_module/` 下的 LenoSDL3 / LenoWeb /
+> LenoMusic / LenoCrypto 等）**不在本仓库**，它们各自遵循其原仓库的许可；本仓库的 Apache-2.0
+> 只覆盖这里的源代码。

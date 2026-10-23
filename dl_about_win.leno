@@ -73,7 +73,7 @@ struct AboutDialog {
                  {grow: 0, shrink: 0, basis: 44, align: 1})
         var htext = SDL3.createVBox({pad_x: 0, pad_y: 0, spacing: 2})
         htext.add(SDL3.createLabel({text: "Leno 音乐下载器", font_size: 18}), {grow: 0, shrink: 0, align: 0})
-        htext.add(SDL3.createLabel({text: "v" + APP_VERSION + " · MIT 许可 · 搜索 / 试听 / 下载 / 播放（GUI 与 CLI 共用同一套引擎）",
+        htext.add(SDL3.createLabel({text: "v" + APP_VERSION + " · Apache-2.0 许可 · 搜索 / 试听 / 下载 / 播放（GUI 与 CLI 共用同一套引擎）",
                                     font_size: 11, text_color: COLOR_DIM, wrap: true, wrap_w: innerW - 56.0}),
                   {grow: 0, shrink: 0, align: 0})
         head.add(htext, {grow: 1, shrink: 1, align: 1})
