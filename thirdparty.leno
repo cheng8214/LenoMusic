@@ -145,6 +145,7 @@ func payload(HttpClient client, string link, int size): Array[string] {
 //   ★ 少数实例不 302 而是**直接回 JSON**（`{"url":"…"}`）⇒ 也认（body 以 { 开头才解析 ✓）
 func redirecttarget(HttpClient client, string api): string {
     client.setFollowRedirect(false)
+    defer client.setFollowRedirect(true)   // ★ 2026-10-23：恢复跟随放 defer ⇒ 中途 return / 抛异常也恢复 ✓
     string link = ""
     try {
         Response r = client.get(api)
@@ -157,7 +158,6 @@ func redirecttarget(HttpClient client, string api): string {
     } catch e {
         link = ""
     }
-    client.setFollowRedirect(true)
     if not link.starts_with("http") { return "" }
     if link == api { return "" }        // 没真的跳转 ⇒ 服务端出错（别把接口地址当直链 ✗）
     return link

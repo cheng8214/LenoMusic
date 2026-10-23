@@ -17,6 +17,7 @@ import strings
 import times
 import dirs
 import files
+import "Sys" as Sys            // Sys.orDefault：失败/抛异常就返回默认值的通用写法（2026-10-23 ✓）
 import "web_net" as net
 import "./parsing.leno" as parsing
 import "./songrow.leno" as srow
@@ -253,9 +254,8 @@ func fsize(string path): int {
         return 0
     }
     if f == null { return 0 }
-    int n = f.len()
-    f.close()
-    return n
+    defer f.close()          // ★ 2026-10-23：len() 抛了也不漏句柄（defer 求值在返回前，LIFO ✓）
+    return f.len()
 }
 
 // "bytes 0-1048575/26012257" 里的总长；拿不到返回 -1
@@ -647,8 +647,8 @@ export func dl_one(HttpClient client, string link, string outpath, any ch, int j
             files.write(outpath, raw)
         } else {
             var f = files.open(outpath, "ab")
+            defer f.close()  // ★ 磁盘满 / 被杀时 write 抛出去也不漏句柄（defer 绑本块 ⇒ 每片都关 ✓）
             f.write(raw)
-            f.close()
         }
         got = fsize(outpath)
         int t = totalfromrange(r.getHeader("content-range"))
@@ -706,6 +706,7 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
         sendmsg(ch, ["fatal", "0", "0", "0", "网络客户端初始化失败"])
         return ["0", _str(mine), "0"]
     }
+    defer client.close()      // ★ 2026-10-23：中途 return / 异常也关（原来只在函数尾部关 ⇒ 早退就漏 ✓）
     client.setUserAgent(kuwo.useragent())
     // 请求头**每首歌解析前会按音源重置**（见 preparefor）⇒ 这里只做初值 ✓
     preparefor(client, "kuwo")
@@ -749,11 +750,7 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
         //   每日只给 3 首、配额在搜索时就用掉了 ⇒ 这里再取一次必然失败 ✗（见 F_URL 注释 ✓）
         string link = songurl(job)
         if link == "" {
-            try {
-                link = directurl(client, srcid(job), srow.rowid(job))
-            } catch e {
-                link = ""
-            }
+            link = Sys.orDefault(func() { return directurl(client, srcid(job), srow.rowid(job)) }, "")
         }
         if link == "" {
             fail = fail + 1
@@ -774,12 +771,7 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
             string outpath = outdir + _sep() + "@" + base + "." + realext
             if fsize(outpath) <= 0 and fsize(finalpath) > 0 { outpath = finalpath }
             sendmsg(ch, ["start", _str(i), "0", srow.rowbytes_text(job), outpath])
-            int got = -1
-            try {
-                got = dl_one(client, link, outpath, ch, i, cmd)
-            } catch e {
-                got = -1
-            }
+            int got = Sys.orDefault(func() { return dl_one(client, link, outpath, ch, i, cmd) }, -1)
             if got > 0 {
                 // ★ 下完 ⇒ 把 `@` 去掉（改名失败就**保留 `@` 名**并如实回传路径 ✓ 不硬来 ✗）
                 string realpath = outpath
@@ -813,7 +805,6 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
         }
         i = i + nshards              // 取模分片：下一首 = i + nshards ✓
     }
-    client.close()
     return [_str(ok), _str(fail), _str(lrcok)]
 }
 
