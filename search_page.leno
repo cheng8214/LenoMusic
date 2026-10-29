@@ -484,7 +484,7 @@ export struct SearchPage {
             if i < searchJoined.len() { searchJoined[i] = true }
             if got != null {
                 Array[Array[string]] one = got
-                for one to row { searchRowsA.add(row) }
+                for one to r { searchRowsA.add(r) }
                 changed = true
             }
             i = i + 1
@@ -516,7 +516,7 @@ export struct SearchPage {
             }
             if got != null {
                 Array[Array[string]] one = got
-                for one to row { rows.add(row) }
+                for one to r { rows.add(r) }
             }
             idx = idx + 1
         }

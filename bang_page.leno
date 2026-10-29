@@ -430,7 +430,7 @@ export struct BangPage {
             if got == null and idx < fillParts.len() { got = fillParts[idx] }   // 失手退回入参 ✓
             if got != null {
                 Array[Array[string]] one = got
-                for one to row { rows.add(row) }
+                for one to r { rows.add(r) }
             }
             idx = idx + 1
         }
