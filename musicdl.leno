@@ -174,6 +174,7 @@ main() {
     print("")
 
     HttpClient client = net.createClient()
+    defer client.close()   // 2026-10-31：任何出口都关（中途抛异常也不漏 ffi 回调槽位）
     client.setUserAgent(kuwo.useragent())
     client.setTimeout(20000)
     client.setSSLVerify(false, false)
@@ -182,7 +183,6 @@ main() {
     Array[SongInfo] songs = kuwo.search(client, keyword, limit)
     if songs.len() == 0 {
         print("没搜到结果（接口可能被限流或关键词无匹配）")
-        client.close()
         return
     }
     print("命中 " + songs.len() + " 首:")

@@ -315,6 +315,7 @@ func waitcmd(any cmd): string {
 export func search_source(string src, string keyword, int limit, any ch): Array[Array[string]] {
     Array[Array[string]] rows = []
     HttpClient client = net.createClient()
+    defer client.close()   // 2026-10-31：任何出口都关（中途抛异常也不漏 ffi 回调槽位）
     if not client.isOk() {
         sendmsg(ch, ["serror", src, "", "", "网络客户端初始化失败"])
         return rows
@@ -391,7 +392,6 @@ export func search_source(string src, string keyword, int limit, any ch): Array[
         }
         sendmsg(ch, ["search", src, _str(yrows.len()), "0", ""])
     }
-    client.close()
     return rows
 }
 
@@ -464,6 +464,7 @@ export func probe_rows_budget(Array[Array[string]] rows, int budget): Array[Arra
 export func fill_sizes(Array[Array[string]] rows): Array[Array[string]] {
     if rows.len() == 0 { return rows }
     HttpClient client = net.createClient()
+    defer client.close()   // 2026-10-31：任何出口都关（中途抛异常也不漏 ffi 回调槽位）
     if not client.isOk() { return rows }        // 建不出来 ⇒ 原样返回（保持现状 ✓）
     client.setTimeout(20000)
     client.setSSLVerify(false, false)
@@ -504,7 +505,6 @@ export func fill_sizes(Array[Array[string]] rows): Array[Array[string]] {
             row[srow.F_SIZETEXT] = srow.fmtsize(n)
         }
     }
-    client.close()
     return rows
 }
 
@@ -966,6 +966,7 @@ export func bang_rows(string src, string bid, int limit): Array[Array[string]] {
     Array[Array[string]] rows = []
     if bid == "" { return rows }
     HttpClient client = net.createClient()
+    defer client.close()   // 2026-10-31：任何出口都关（中途抛异常也不漏 ffi 回调槽位）
     if not client.isOk() { return rows }
     client.setTimeout(20000)
     client.setSSLVerify(false, false)
@@ -984,6 +985,5 @@ export func bang_rows(string src, string bid, int limit): Array[Array[string]] {
         try { songs = kuwo.bang(client, bid, limit) } catch e { songs = [] }
         for songs to s { rows.add(encode(s)) }
     }
-    client.close()
     return rows
 }

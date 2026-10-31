@@ -166,6 +166,7 @@ func stop_servers(int baseport, int n, Array[Thread] ts) {
 //   第 i 首的直链 = http://127.0.0.1:(baseport+i)/song_i（**每首一个独立服务端** ✓）
 func dl_worker(int shard, int nshards, int njobs, int baseport, string outdir, Channel prog, Channel cmd, Channel res) {
     var client = net.createClient()
+    defer client.close()   // 2026-10-31：任何出口都关（中途抛异常也不漏 ffi 回调槽位）
     if not client.isOk() {
         res.send(["-1", "0", "0"])
         return
@@ -189,7 +190,6 @@ func dl_worker(int shard, int nshards, int njobs, int baseport, string outdir, C
         }
         i = i + 1
     }
-    client.close()
     res.send([_str(done), _str(cancelled), "0"])
 }
 

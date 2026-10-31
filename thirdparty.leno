@@ -107,6 +107,7 @@ export func remotelen(HttpClient client, string url): int {
     //   ★ 这里必须是 HEAD：用 GET 的话，服务端一旦**忽略 Range** 就会把整个 flac 拉进内存 ✗✗
     //   ★ Range 是**整表替换**的写法 ⇒ 用一次性客户端，绝不污染调用方的头表 ✓
     HttpClient tmp = net.createClient()
+    defer tmp.close()   // 2026-10-31：任何出口都关（中途抛异常也不漏 ffi 回调槽位）
     if not tmp.isOk() { return 0 }
     tmp.setUserAgent(UA)
     tmp.setTimeout(20000)
@@ -122,7 +123,6 @@ export func remotelen(HttpClient client, string url): int {
     } catch e {
         n = 0
     }
-    tmp.close()
     if n < 0 { return 0 }
     return n
 }

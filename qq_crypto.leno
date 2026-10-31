@@ -231,6 +231,7 @@ export func registerqimei(): string {
     string hsign = crypto.md5(PROXY_APPID + PROXY_SIGN_SALT + _str(ts))
 
     HttpClient client = net.createClient()
+    defer client.close()   // 2026-10-31：任何出口都关（中途抛异常也不漏 ffi 回调槽位）
     if not client.isOk() { return "" }
     client.setSSLVerify(false, false)
     client.setTimeout(20000)
@@ -262,6 +263,5 @@ export func registerqimei(): string {
             }
         }
     }
-    client.close()
     return q
 }

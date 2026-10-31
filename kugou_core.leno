@@ -313,6 +313,7 @@ const RANK_SONG_API = "https://mobilecdn.kugou.com/api/v3/rank/song"
 export func toplistmenu(): Array[Array[string]] {
     Array[Array[string]] out = []
     HttpClient client = net.createClient()
+    defer client.close()   // 2026-10-31：任何出口都关（中途抛异常也不漏 ffi 回调槽位）
     if not client.isOk() { return out }
     client.setUserAgent(UA)
     client.setTimeout(8000)
@@ -353,7 +354,6 @@ export func toplistmenu(): Array[Array[string]] {
     } catch e {
         out = []   // 失败 ⇒ 空菜单（界面显示"暂无榜单" ✓）
     }
-    client.close()
     return out
 }
 
