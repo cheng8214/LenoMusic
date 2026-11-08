@@ -195,21 +195,16 @@ export func has_size(Array[string] row): bool {
 //   网易的 Referer 会与 QQ 的 y.qq.com Referer **叠成两个实现** ✗；而取音频分片用的
 //   `Range` 头本身也是整表替换 ⇒ 干脆"每次解析前重置一次"，谁都不污染谁 ✓
 export func preparefor(HttpClient client, string src) {
-    if src == "netease" {
-        client.setUserAgent(netease.useragent())
-        client.replaceHeaders(netease.headers())
-    } else if src == "kugou" {
-        client.setUserAgent(kugou.useragent())
-        client.replaceHeaders(kugou.headers())
-    } else if src == "qq" {
-        client.setUserAgent(qq.useragent())
-        client.replaceHeaders(qq.headers())
-    } else if src == "yinyueku" {
-        client.setUserAgent(yyk.useragent())
-        client.replaceHeaders(yyk.headers())
-    } else {
-        client.setUserAgent(kuwo.useragent())
-        client.replaceHeaders(kuwo.headers())
+    // ★ 2026-11-09：`if-else if` 链改用 `switch` —— 一眼看出是"按音源分派"；
+    //   以后加音源只需加一个 case，不会再往 if-else 链尾巴上接。
+    //   等价性：switch **自动 break**（实测），各 case 与原来的 else-if 一一对应，
+    //   `default` 就是原来的 `else` ✓
+    switch src {
+        case "netease" { client.setUserAgent(netease.useragent()); client.replaceHeaders(netease.headers()) }
+        case "kugou" { client.setUserAgent(kugou.useragent()); client.replaceHeaders(kugou.headers()) }
+        case "qq" { client.setUserAgent(qq.useragent()); client.replaceHeaders(qq.headers()) }
+        case "yinyueku" { client.setUserAgent(yyk.useragent()); client.replaceHeaders(yyk.headers()) }
+        default { client.setUserAgent(kuwo.useragent()); client.replaceHeaders(kuwo.headers()) }
     }
 }
 
