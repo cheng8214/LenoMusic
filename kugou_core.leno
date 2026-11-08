@@ -68,10 +68,11 @@ export func prepare(HttpClient client) {
 
 // ==================== 小工具 ====================
 
-func pad2(int v): string {
-    if v < 10 { return "0" + _str(v) }
-    return _str(v)
-}
+// ★ 2026-11-09：改用 `strings.pad_left`（标准库原语）—— 这段实现原本在四个文件里
+//   逐字相同（kugou_core / netease_core / songrow / LenoTrae trae_core），其中一份
+//   注释还写着"两处各一份，改动要一起改 ⚠"。现在统一到这里，改行为只改标准库 ✓
+//   顺带修一处边界：负数 `-5` 原来返回 `"0-5"`，现在原样返回 `"-5"` ✓
+func pad2(int v): string { return strings.pad_left(_str(v), 2, "0") }
 
 // 字节 → "13.66 MB"（与 netease_core.fmtsize 同口径；两处各一份，改动要一起改 ⚠）
 export func fmtsize(int bytes): string {
