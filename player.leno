@@ -272,18 +272,15 @@ func lrc_sort(Lrc out) {
     Array[int] ord = []
     int i = 0
     while i < n { ord.add(i); i = i + 1 }
-    i = 1
-    while i < n {                                        // 插入排序（稳定 ✓）
-        int cur = ord[i]
-        float t = out.secs[cur]
-        int j = i - 1
-        while j >= 0 and out.secs[ord[j]] > t {
-            ord[j + 1] = ord[j]
-            j = j - 1
-        }
-        ord[j + 1] = cur
-        i = i + 1
-    }
+    // ★ 2026-11-09：改用 `sort(比较器)` —— 原来是这段手写插入排序（10 行）。
+    //   语义完全一致：按 `secs` 升序、**相等保持原序**（sort 用稳定归并 ⇒ 同时间不会乱序 ✓）
+    ord.sort(func(int a, int b) {
+        float ta = out.secs[a]
+        float tb = out.secs[b]
+        if ta < tb { return -1 }
+        if ta > tb { return 1 }
+        return 0
+    })
     Array[float] ns = []
     Array[string] nt = []
     i = 0

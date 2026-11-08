@@ -305,12 +305,10 @@ export struct SearchPage {
             for exts to x { if x == e { has = true } }
             if not has { exts.add(e) }
         }
-        Array[string] sorted = []
-        for exts to e2 {
-            int at = 0
-            while at < sorted.len() and sorted[at] < e2 { at = at + 1 }
-            sorted.insert(at, e2)
-        }
+        // ★ 2026-11-09：改用 `sort()`（内置字典序升序）—— 原来是手写插入排序（5 行）。
+        //   结果相同（升序），而且不用再维护 `at` 游标。
+        Array[string] sorted = exts.copy()
+        sorted.sort()
         // 重搜后格式集合会变 ⇒ 尽量保住用户原来选的那项 ✓
         string keep = ""
         if fmtBox.get_selected() > 0 { keep = fmtBox.get_selected_text() }
