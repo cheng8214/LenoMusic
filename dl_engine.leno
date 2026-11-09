@@ -210,11 +210,16 @@ export func preparefor(HttpClient client, string src) {
 
 // 按音源取直链（空串 = 拿不到）。**唯一**的取直链入口 ⇒ 下载与试听走同一条路 ✓
 export func directurl(HttpClient client, string src, string songid): string {
-    if src == "netease" { return netease.getdirecturl(client, songid) }
-    if src == "kugou" { return kugou.getdirecturl(client, songid) }
-    if src == "qq" { return qq.getdirecturl(client, songid) }
-    if src == "yinyueku" { return yyk.getdirecturl(client, songid) }
-    return kuwo.getdirecturl(client, songid)
+    // ★ 2026-11-09：4 个 `if src == "..."` 平铺 + 兜底改成 `switch` —— 与同文件的
+    //   `preparefor`（按音源分派 HTTP 头）形态一致，加音源只需加一个 case。
+    //   等价性：每个分支本来就 `return`，`default` 就是原来最后那句兜底 ✓
+    switch src {
+        case "netease" { return netease.getdirecturl(client, songid) }
+        case "kugou" { return kugou.getdirecturl(client, songid) }
+        case "qq" { return qq.getdirecturl(client, songid) }
+        case "yinyueku" { return yyk.getdirecturl(client, songid) }
+        default { return kuwo.getdirecturl(client, songid) }
+    }
 }
 
 // SongInfo → 歌曲行（本模块内部使用：struct 不出模块 ✓）
