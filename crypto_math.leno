@@ -2,7 +2,7 @@
 //
 // ★ 2026-11-09：这 4 个函数原先在 `qq_crypto.leno` 与 `netease_crypto.leno` 里
 //   **各有一份、逐字相同**（评估文档 §4.5.4 点名的重复点：「`powmod/hex2int/int2hex` 两份」）。
-//   抽到这里，两边只 import 一次；`padleft` 则直接改用标准库 `strings.pad_left`
+//   抽到这里，两边只 import 一次；`padleft` 则直接改用标准库 `strings.pad_start`
 //   （那本来就是"左补零"的原语，和之前 `pad2` 是同一类重复）。
 //
 // ⚠ 关于精度：Leno 的 `int` 是**任意精度**（实测 2^1024 精确、1024 位模幂算得住），
@@ -24,7 +24,7 @@ export func hex2int(string hex): int {
     return acc
 }
 
-// 大整数 → 十六进制串（**不含前导 0**；位数不够的地方由 `strings.pad_left` 补）
+// 大整数 → 十六进制串（**不含前导 0**；位数不够的地方由 `strings.pad_start` 补）
 export func int2hex(int value): string {
     Array[int] raw = []
     int x = value

@@ -46,7 +46,7 @@ export const FALLBACK_Q36 = "6c9d3cd110abca9b16311cee10001e717614"
 // ★ 2026-11-09：本文件原来"照 netease_crypto 的写法"抄了一份 `powmod` / `hex2int` /
 //   `int2hex` / `padleft` ——「照某某的写法抄一份」这句注释本身就是重复的证据。
 //   现在前三个统一到 `crypto_math.leno`（与 netease_crypto 共用同一份实现），
-//   `padleft` 改用标准库 `strings.pad_left`。
+//   `padleft` 改用标准库 `strings.pad_start`。
 
 // ==================== 加密原语 ====================
 
@@ -68,7 +68,7 @@ func rsapkcs1(string msg): string {
     em.add(0)
     for m to b { em.add(b) }
     int v = cm.hex2int(crypto.bytes_to_hex(em))
-    return strings.pad_left(cm.int2hex(maths.pow_mod(v, PUB_EXP, cm.hex2int(MODULUS_HEX))), 256, "0")
+    return strings.pad_start(cm.int2hex(maths.pow_mod(v, PUB_EXP, cm.hex2int(MODULUS_HEX))), 256, "0")
 }
 
 // AES-128-CBC（Crypto 内部已 PKCS7 ✓），**IV 就是 key**（上游 `modes.CBC(key)` ✓）

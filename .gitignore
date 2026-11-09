@@ -10,3 +10,4 @@ downloads/
 .lenocache_lsp/
 # 打包输出（leno -p）—— 产物落在 <源码目录>/dist
 dist/
+.cm

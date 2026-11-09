@@ -37,7 +37,7 @@ const MODULUS_HEX = "e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b
 // ==================== 大整数工具 ====================
 // ★ 2026-11-09：`powmod` / `hex2int` / `int2hex` 已抽到 `crypto_math.leno` ——
 //   原先本文件与 `qq_crypto.leno` 各有一份、**逐字相同**（评估文档 §4.5.4 点名的重复）。
-//   `padleft` 也删了：它就是"左补零"，改用标准库 `strings.pad_left`（与 `pad2` 同类）。
+//   `padleft` 也删了：它就是"左补零"，改用标准库 `strings.pad_start`（与 `pad2` 同类）。
 //   注意 `int` 是**任意精度**，1024 位 RSA 模幂算得住（实测 2^1024 精确）。
 
 export func reverse(string s): string {
@@ -69,7 +69,7 @@ export func weapiparams(string json): string {
 export func rsaencrypt(string key): string {
     int m = cm.hex2int(crypto.bytes_to_hex(strings.to_bytes(reverse(key))))
     int c = maths.pow_mod(m, PUB_EXP, cm.hex2int(MODULUS_HEX))
-    return strings.pad_left(cm.int2hex(c), 256, "0")
+    return strings.pad_start(cm.int2hex(c), 256, "0")
 }
 
 // form 体里 base64 必须转义：'+' → %2B、'/' → %2F、'=' → %3D
