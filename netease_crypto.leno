@@ -22,6 +22,7 @@
 //   encSecKey  = 140045a002b91307e676d6ffa2aeb6db1ebf4fb93efbb4b5bcb4130cbbf58f0492d8beae356e0797f638618aff2b6874c4cc55ccc3c150c63d7acb1f3219533599ff220fe2c0c8d2e0fc04e3d8b0a1734028169acee3d66f14eb41453b746236c6ed368f7de91ab749474d540f5744497849353f7dc2c05d4461fdb9b5de86d2
 //   （以上由 test/test_netease_crypto.leno 逐字节校验 ✓）
 import strings
+import maths               // ★ 2026-11-09：pow_mod 改用标准库
 import Crypto as crypto
 import "crypto_math.leno" as cm      // ★ 2026-11-09：大整数工具（与 qq_crypto 共用一份）
 
@@ -67,7 +68,7 @@ export func weapiparams(string json): string {
 //   但写法按前者更贴近官方：hexlify(string[::-1]) ⇒ 我这边用 bytes_to_hex(to_bytes(reverse(s))) ✓）
 export func rsaencrypt(string key): string {
     int m = cm.hex2int(crypto.bytes_to_hex(strings.to_bytes(reverse(key))))
-    int c = cm.powmod(m, PUB_EXP, cm.hex2int(MODULUS_HEX))
+    int c = maths.pow_mod(m, PUB_EXP, cm.hex2int(MODULUS_HEX))
     return strings.pad_left(cm.int2hex(c), 256, "0")
 }
 

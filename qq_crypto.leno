@@ -15,6 +15,7 @@
 //   响应是**双重编码**的 JSON：外层 data 是字符串，再解析一次才有 q16 / q36 ✓
 //   ⇒ 注册失败就回落上游那个公开兜底值（能跑，但可能偶发空结果 ✓ 有日志可查）
 import strings
+import maths               // ★ 2026-11-09：pow_mod 改用标准库
 import jsons
 import rands
 import times
@@ -67,7 +68,7 @@ func rsapkcs1(string msg): string {
     em.add(0)
     for m to b { em.add(b) }
     int v = cm.hex2int(crypto.bytes_to_hex(em))
-    return strings.pad_left(cm.int2hex(cm.powmod(v, PUB_EXP, cm.hex2int(MODULUS_HEX))), 256, "0")
+    return strings.pad_left(cm.int2hex(maths.pow_mod(v, PUB_EXP, cm.hex2int(MODULUS_HEX))), 256, "0")
 }
 
 // AES-128-CBC（Crypto 内部已 PKCS7 ✓），**IV 就是 key**（上游 `modes.CBC(key)` ✓）
