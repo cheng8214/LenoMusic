@@ -23,6 +23,7 @@
 //   （以上由 test/test_netease_crypto.leno 逐字节校验 ✓）
 import strings
 import Crypto as crypto
+import "crypto_math.leno" as cm      // ★ 2026-11-09：大整数工具（与 qq_crypto 共用一份）
 
 const IV = "0102030405060708"
 const KEY_ONE = "0CoJUm6Qyw8W8jud"
@@ -33,49 +34,10 @@ const PUB_EXP = 65537
 const MODULUS_HEX = "e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7"
 
 // ==================== 大整数工具 ====================
-
-// 模幂：base^exp mod n（平方-乘法；任意精度 ⇒ 1024 位照样算 ✓）
-func powmod(int base, int exp, int n): int {
-    int result = 1
-    base = base % n
-    while exp > 0 {
-        if exp % 2 == 1 { result = (result * base) % n }
-        exp = exp >> 1
-        base = (base * base) % n
-    }
-    return result
-}
-
-// 十六进制串 → 大整数（借 Crypto.hex_to_bytes ⇒ 别手写字符解析）
-func hex2int(string hex): int {
-    Array[int] bytes = crypto.hex_to_bytes(hex)
-    int acc = 0
-    for bytes to b { acc = acc * 256 + b }
-    return acc
-}
-
-// 大整数 → 十六进制串（不含前导 0；位数不够由 padleft 补）
-func int2hex(int value): string {
-    Array[int] raw = []
-    int x = value
-    while x > 0 {
-        raw.add(x % 256)
-        x = x / 256
-    }
-    Array[int] rev = []
-    int i = raw.len() - 1
-    while i >= 0 {
-        rev.add(raw[i])
-        i = i - 1
-    }
-    return crypto.bytes_to_hex(rev)
-}
-
-func padleft(string s, int width): string {
-    string out = s
-    while out.len() < width { out = "0" + out }
-    return out
-}
+// ★ 2026-11-09：`powmod` / `hex2int` / `int2hex` 已抽到 `crypto_math.leno` ——
+//   原先本文件与 `qq_crypto.leno` 各有一份、**逐字相同**（评估文档 §4.5.4 点名的重复）。
+//   `padleft` 也删了：它就是"左补零"，改用标准库 `strings.pad_left`（与 `pad2` 同类）。
+//   注意 `int` 是**任意精度**，1024 位 RSA 模幂算得住（实测 2^1024 精确）。
 
 export func reverse(string s): string {
     string out = ""
@@ -104,9 +66,9 @@ export func weapiparams(string json): string {
 //   注意顺序：是「字符串反转 → 取字节 → 当大整数」，不是「取字节 → 反转字节」（两者结果相同，
 //   但写法按前者更贴近官方：hexlify(string[::-1]) ⇒ 我这边用 bytes_to_hex(to_bytes(reverse(s))) ✓）
 export func rsaencrypt(string key): string {
-    int m = hex2int(crypto.bytes_to_hex(strings.to_bytes(reverse(key))))
-    int c = powmod(m, PUB_EXP, hex2int(MODULUS_HEX))
-    return padleft(int2hex(c), 256)
+    int m = cm.hex2int(crypto.bytes_to_hex(strings.to_bytes(reverse(key))))
+    int c = cm.powmod(m, PUB_EXP, cm.hex2int(MODULUS_HEX))
+    return strings.pad_left(cm.int2hex(c), 256, "0")
 }
 
 // form 体里 base64 必须转义：'+' → %2B、'/' → %2F、'=' → %3D

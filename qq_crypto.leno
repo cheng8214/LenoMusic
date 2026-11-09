@@ -20,6 +20,7 @@ import rands
 import times
 import "Crypto" as crypto
 import "web_net" as net
+import "crypto_math.leno" as cm      // ★ 2026-11-09：大整数工具（与 netease_crypto 共用一份）
 
 use net.(Response, HttpClient)
 
@@ -40,47 +41,11 @@ const PUB_EXP = 65537
 // 上游在注册失败时用的兜底值（能用但不稳 ⇒ 只作最后手段 ✓）
 export const FALLBACK_Q36 = "6c9d3cd110abca9b16311cee10001e717614"
 
-// ==================== 大整数（照 netease_crypto 的写法 ✓）====================
-
-func powmod(int base, int exp, int n): int {
-    int result = 1
-    base = base % n
-    while exp > 0 {
-        if exp % 2 == 1 { result = (result * base) % n }
-        exp = exp >> 1
-        base = (base * base) % n
-    }
-    return result
-}
-
-func hex2int(string hex): int {
-    Array[int] bytes = crypto.hex_to_bytes(hex)
-    int acc = 0
-    for bytes to b { acc = acc * 256 + b }
-    return acc
-}
-
-func int2hex(int value): string {
-    Array[int] raw = []
-    int x = value
-    while x > 0 {
-        raw.add(x % 256)
-        x = x / 256
-    }
-    Array[int] rev = []
-    int i = raw.len() - 1
-    while i >= 0 {
-        rev.add(raw[i])
-        i = i - 1
-    }
-    return crypto.bytes_to_hex(rev)
-}
-
-func padleft(string s, int width): string {
-    string out = s
-    while out.len() < width { out = "0" + out }
-    return out
-}
+// ==================== 大整数 ====================
+// ★ 2026-11-09：本文件原来"照 netease_crypto 的写法"抄了一份 `powmod` / `hex2int` /
+//   `int2hex` / `padleft` ——「照某某的写法抄一份」这句注释本身就是重复的证据。
+//   现在前三个统一到 `crypto_math.leno`（与 netease_crypto 共用同一份实现），
+//   `padleft` 改用标准库 `strings.pad_left`。
 
 // ==================== 加密原语 ====================
 
@@ -101,8 +66,8 @@ func rsapkcs1(string msg): string {
     }
     em.add(0)
     for m to b { em.add(b) }
-    int v = hex2int(crypto.bytes_to_hex(em))
-    return padleft(int2hex(powmod(v, PUB_EXP, hex2int(MODULUS_HEX))), 256)
+    int v = cm.hex2int(crypto.bytes_to_hex(em))
+    return strings.pad_left(cm.int2hex(cm.powmod(v, PUB_EXP, cm.hex2int(MODULUS_HEX))), 256, "0")
 }
 
 // AES-128-CBC（Crypto 内部已 PKCS7 ✓），**IV 就是 key**（上游 `modes.CBC(key)` ✓）
