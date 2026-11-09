@@ -31,6 +31,7 @@ import dirs
 import files
 import threads
 import "./dl_engine.leno" as eng
+import "./songrow.leno" as srow     // ★ 2026-11-09 P1：下载任务用 srow.SongRow
 import "./dl_window.leno" as dlw
 import "./player_bar.leno" as pb
 import "./dl_settings.leno" as dlset
@@ -169,7 +170,7 @@ export struct DlFlow {
 
     // ==================== 开窗入口 ====================
     //   "要下哪些歌"由宿主判定好再进来（勾选 / 选中行 / 格式过滤的提示都在宿主 ✓）
-    func start_download(Array[Array[string]] jobs) {
+    func start_download(Array[srow.SongRow] jobs) {
         if reuse_dl_if_open() { return }       // ★ 一个应用只留一个下载窗口 ✓（非模态 ⇒ 必须自己管）
         // ★ 2026-10-09 改（用户口径）：**空任务也开窗** —— 原先这里 `jobs.len() == 0` 直接 return，
         //   于是标题栏那个下载图标只能弹一句"还没有要下载的歌" ✗（想先看看窗口 / 看看「历史」都进不去）
@@ -183,7 +184,7 @@ export struct DlFlow {
     }
 
     // 只下歌词（右键菜单 / 已有音频时用）；空任务的提示由宿主先说 ✓
-    func open_lyric_only(Array[Array[string]] jobs) {
+    func open_lyric_only(Array[srow.SongRow] jobs) {
         if reuse_dl_if_open() { return }       // 同上：右键"只下这一首的歌词"也不会开出第二个框 ✓
         if not ensure_dir() { return }
         dl = dlw.open_download(jobs, ["lyriconly"], outdir(), stateLbl, cfg.workers)   // 同上：上限来自设置 ✓

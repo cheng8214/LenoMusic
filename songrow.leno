@@ -33,6 +33,53 @@ export const int F_SRC = 8
 // 直链：搜索时第三方已经取回来的直链，空串 ⇒ 调用方现取（见 dl_engine.songurl ✓）
 export const int F_URL = 9
 
+// ==================== 结构化形态（★ 2026-11-09，P1 记录类型）====================
+// 上面的**行是 wire 形态**，保持不变：搜索侧、音源模块、跨线程握手仍产出 `Array[string]`
+// （跨线程行协议是既有设计，改它会把 5 个音源模块 + 3 个界面全卷进来）。
+//
+// 但**下载子系统内部**改用这个 struct：
+//   · 字段有名字 ⇒ `job.name` 而不是 `job[srow.F_NAME]`
+//   · 字节数是 int ⇒ 不用 `_at_int(row, F_BYTES, 0)`
+//   · 不再需要 `if row.len() <= F_ARTIST` 这类长度防御（字段是编译期保证的）
+//
+// 转换只发生在**一个边界**上：`musicdl_gui` 挑完歌、进下载窗口之前做一次
+// `rows.map(srow.from_row)`。之后 `dl_flow` / `dl_window` / `dl_engine` 全程用 SongRow。
+struct SongRow {
+    string id = ""
+    string name = ""
+    string artist = ""
+    string album = ""
+    string duration = ""
+    string ext = ""
+    string sizetext = ""
+    int bytes = 0
+    // 音源标记："" ⇒ 调 `dl_engine.srcid` 时回落 kuwo（与行的向后兼容口径一致 ✓）
+    string src = ""
+    string url = ""
+}
+
+// 行 → struct（越界字段给默认值，与 accessor 口径完全一致 ⇒ 老行照样能转）
+export func from_row(Array[string] row): SongRow {
+    SongRow r = new SongRow()
+    r.id = rowid(row)
+    r.name = rowname(row)
+    r.artist = rowartist(row)
+    r.album = rowalbum(row)
+    r.duration = rowduration(row)
+    r.ext = rowext(row)
+    r.sizetext = rowsizetext(row)
+    r.bytes = rowbytes(row)
+    r.src = rowsrc(row)
+    r.url = rowurl(row)
+    return r
+}
+
+// struct → 行（回给仍吃行的界面 / 歌词模块用）
+export func to_row(SongRow r): Array[string] {
+    return [r.id, r.name, r.artist, r.album, r.duration, r.ext,
+            r.sizetext, _str(r.bytes), r.src, r.url]
+}
+
 // 行里"有没有这一段"（判断老行 / 新行 ⇒ 决定要不要补默认值 ✓）
 export func has_field(Array[string] row, int field): bool {
     return field >= 0 and field < row.len()

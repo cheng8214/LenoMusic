@@ -9,6 +9,7 @@
 //   （`bringToFront` 只在 `dlg.ok` 时才动 SDL ⇒ 没建过窗口也不会崩 ✓）
 // 跑：<发行包>\leno.exe test\test_dl_window_open.leno（Linux/macOS：<发行包>/leno test/test_dl_window_open.leno）
 import "../dl_window.leno" as dlw
+import "../songrow.leno" as srow       // ★ 2026-11-09 P1：DlWindow.jobs 现在是 Array[srow.SongRow]
 use dlw.DlWindow
 
 var fails = 0
@@ -53,7 +54,9 @@ main() {
     //   ⚠ 正在下载的那一支会 `sendcmd("cancel")` 并把线程挪进 `orphan` —— 这里线程/通道都是空数组
     //      ⇒ 顺带证明"没建窗口、没起线程时调它也不崩" ✓（纯逻辑那部分真的纯 ✓）
     DlWindow c = new DlWindow()
-    c.jobs = [["歌 A", "mp3", "3 MB", "3000000"], ["歌 B", "mp3", "4 MB", "4000000"]]
+    // 行布局：[id, 歌名, 歌手, 专辑, 时长, 格式, 大小文本, 字节数, 音源, 直链]
+    c.jobs = [srow.from_row(["idA", "歌 A", "歌手A", "", "", "mp3", "3 MB", "3000000"]),
+              srow.from_row(["idB", "歌 B", "歌手B", "", "", "mp3", "4 MB", "4000000"])]
     c.status = ["下载中…", "完成 3.2 MB"]
     c.got = [100, 3000000]
     c.exp = [3000000, 4000000]
@@ -74,13 +77,13 @@ main() {
 
     // 空闲（还没点开始 / 或上一轮已跑完）⇒ busy=false ⇒ 提示语走"已完成那批"的分支 ✓
     DlWindow c2 = new DlWindow()
-    c2.jobs = [["歌 A", "mp3", "3 MB", "3000000"]]
+    c2.jobs = [srow.from_row(["idA", "歌 A", "歌手A", "", "", "mp3", "3 MB", "3000000"])]
     c2.status = ["完成 3.2 MB"]
     check("没在跑 -> busy=false（不该吓唬用户说有下载在跑）", not c2.clearstate())
     check("没在跑也能清掉已完成的行", c2.jobs.len() == 0)
 
     DlWindow c3 = new DlWindow()
-    c3.jobs = [["歌 A", "mp3", "3 MB", "3000000"]]
+    c3.jobs = [srow.from_row(["idA", "歌 A", "歌手A", "", "", "mp3", "3 MB", "3000000"])]
     c3.status = ["失败：超时"]
     c3.started = true
     c3.finished = true

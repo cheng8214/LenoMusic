@@ -105,7 +105,7 @@ func probe_worker(Array[Array[string]] rows): Array[Array[string]] {
 
 // 下载窗口（dl_window.leno）的"开始"也走这个入口 —— 起线程由本文件定时器接手 ✓
 //   shard / nshards = 本 worker 领第几份 / 共几份（**多首歌并行**，切法见 dl_engine.dl_entry_shard ✓）
-func dl_worker_shard(Array[Array[string]] jobs, string outdir, any ch, any cmd, Array[string] flags, int shard, int nshards): Array[string] {
+func dl_worker_shard(Array[srow.SongRow] jobs, string outdir, any ch, any cmd, Array[string] flags, int shard, int nshards): Array[string] {
     return eng.dl_entry_shard(jobs, outdir, ch, cmd, flags, shard, nshards)
 }
 
@@ -502,6 +502,11 @@ struct MusicDlApp {
         SDL3.markFrameRedraw()
     }
 
+    // 行 → 下载任务：**唯一的转换边界**（从这里往后全程 srow.SongRow，见 songrow 文件头）
+    func to_jobs(Array[Array[string]] rows): Array[srow.SongRow] {
+        return rows.map(func(Array[string] r) { return srow.from_row(r) })
+    }
+
     func onDownloadChecked() {
         Array[Array[string]] jobs = search_picked_all()      // = 搜索页里"勾选且过格式过滤"的那些 ✓
         // 全被格式过滤掉了 ⇒ 说清原因（否则只会冒出"先勾选…"，看着像按钮坏了 ✗）
@@ -512,7 +517,7 @@ struct MusicDlApp {
             SDL3.markFrameRedraw()
             return
         }
-        if flow is DlFlow => f { f.start_download(jobs) }   // 开窗/复用/建目录/带词与否都在 dl_flow ✓
+        if flow is DlFlow => f { f.start_download(to_jobs(jobs)) }   // 开窗/复用/建目录/带词与否都在 dl_flow ✓
     }
 
     // 标题栏「下载」图标（2026-10-07）：**"打开下载窗口"的入口** ✓
@@ -523,7 +528,7 @@ struct MusicDlApp {
     //     空任务由窗口自己表达（见 dl_flow.start_download 与 dl_window.build 的注释 ✓）
     //     ★ 2026-10-10：工具栏「下载勾选」**也**改成了随时可点（同一口径 ✓ 见 updateCount）
     func onDownloadAction() {
-        if flow is DlFlow => f { f.start_download(search_picked_all()) }
+        if flow is DlFlow => f { f.start_download(to_jobs(search_picked_all())) }
     }
 
     func onDownloadSelected() {
@@ -535,7 +540,7 @@ struct MusicDlApp {
             SDL3.markFrameRedraw()
             return
         }
-        if flow is DlFlow => f { f.start_download(jobs) }   // 同上 ✓
+        if flow is DlFlow => f { f.start_download(to_jobs(jobs)) }   // 同上 ✓
     }
 
     // 只下歌词（右键菜单 / 已有音频时用）
@@ -546,7 +551,7 @@ struct MusicDlApp {
             return
         }
         // 复用检查/建目录/开窗都在 dl_flow.open_lyric_only ✓（右键"只下这一首的歌词"也不会开出第二个框 ✓）
-        if flow is DlFlow => f { f.open_lyric_only(jobs) }
+        if flow is DlFlow => f { f.open_lyric_only(to_jobs(jobs)) }
     }
 
     func onLyricSelected() {

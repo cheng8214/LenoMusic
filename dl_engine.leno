@@ -681,7 +681,15 @@ export func dl_one(HttpClient client, string link, string outpath, any ch, int j
 //   · 暂停/取消得**每个 worker 一条 cmd 通道**（一条被某个 worker 取走，别的就永远收不到 ✗）
 //   · 每个 worker 自带 HttpClient（net 的客户端不是线程安全的 ✓）；解析走 jsons（无模块全局 ✓）、
 //     DES 表是只读查找表 ✓ ⇒ 并行不踩共享状态（LenoWeb 有"8 线程并发 HTTP"的现成回归 ✓）
-export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any cmd, Array[string] flags, int shard, int nshards): Array[string] {
+// 下载任务 = `srow.SongRow`（★ 2026-11-09 P1）：转换只发生在 musicdl_gui 那个边界上，
+// 这里之后全程用字段名，不再 `job[F_NAME]` / `if job.len() <= F_ARTIST`。
+// 音源标记的空串回落逻辑收在一个小函数里（原来散在 srcid 的每个调用点）。
+func job_src(srow.SongRow r): string {
+    if r.src == "" { return "kuwo" }        // 老行没有第 8 项 ⇒ 当 kuwo（向后兼容）
+    return r.src
+}
+
+export func dl_entry_shard(Array[srow.SongRow] jobs, string outdir, any ch, any cmd, Array[string] flags, int shard, int nshards): Array[string] {
     if nshards < 1 { nshards = 1 }
     if shard < 0 { shard = 0 }
     int ok = 0
@@ -718,16 +726,16 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
             sendmsg(ch, ["cancelled", _str(i), "0", "0", ""])
             break
         }
-        Array[string] job = jobs[i]
+        srow.SongRow job = jobs[i]
         // 音频与歌词共用同一个基名：<歌名> - <歌手>（歌词固定 .lrc，与音频扩展名无关 ✓）
         //   ⚠ 保持原口径：歌手为空也照样留" - "（与player 拆文件名的口径一致，见 player 头注✓）
-        string base = kuwo.sanitizefilename(srow.rowname(job) + " - " + srow.rowartist(job))
+        string base = kuwo.sanitizefilename(job.name + " - " + job.artist)
         string lrcout = outdir + _sep() + base + ".lrc"
 
         if lyriconly {
             // 只下歌词：跳过取直链与音频，直接抓 .lrc
             sendmsg(ch, ["start", _str(i), "0", "0", lrcout])
-            int lb = savelyricsafe(job, lrcout, srcid(job))
+            int lb = savelyricsafe(job, lrcout, job_src(job))
             if lb > 0 {
                 ok = ok + 1
                 lrcok = lrcok + 1
@@ -745,12 +753,12 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
         sendmsg(ch, ["resolve", _str(i), "0", "0", ""])
         // ★ 每首歌按**自己的音源**重置 UA 与头表：上一首取分片时写进去的 Range 头/别家 Referer
         //   不会污染这一首（Range 头是整表替换的写法 ⇒ 必须重置 ✓ 见 preparefor 注释）
-        preparefor(client, srcid(job))
+        preparefor(client, job_src(job))
         // ★ 搜索时第三方**已经把直链取回来了**（下标 9）⇒ 优先用它：网易那条通路对游客
         //   每日只给 3 首、配额在搜索时就用掉了 ⇒ 这里再取一次必然失败 ✗（见 F_URL 注释 ✓）
-        string link = songurl(job)
+        string link = job.url
         if link == "" {
-            link = Sys.orDefault(func() { return directurl(client, srcid(job), srow.rowid(job)) }, "")
+            link = Sys.orDefault(func() { return directurl(client, job_src(job), job.id) }, "")
         }
         if link == "" {
             fail = fail + 1
@@ -758,7 +766,7 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
         } else {
             // 落盘名用**直链后缀**校正过的扩展名（比列表里宣传的档位可信，见 kuwo_core 注释）
             string realext = kuwo.extfromurl(link)
-            if realext == "" { realext = srow.rowext(job) }
+            if realext == "" { realext = job.ext }
             if realext == "" { realext = "flac" }
             string finalpath = outdir + _sep() + base + "." + realext
             // ★ 2026-10-09（对齐二创 LenoMusic-main 的想法）：**没下完的先带 `@` 前缀**，下完才改名 ✓
@@ -770,7 +778,7 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
             //   ⚠ 老文件兼容：只有**最终名**存在（旧版本下的）⇒ 仍按它续传（不把老下载判成"没下过" ✓）
             string outpath = outdir + _sep() + "@" + base + "." + realext
             if fsize(outpath) <= 0 and fsize(finalpath) > 0 { outpath = finalpath }
-            sendmsg(ch, ["start", _str(i), "0", srow.rowbytes_text(job), outpath])
+            sendmsg(ch, ["start", _str(i), "0", _str(job.bytes), outpath])
             int got = Sys.orDefault(func() { return dl_one(client, link, outpath, ch, i, cmd) }, -1)
             if got > 0 {
                 // ★ 下完 ⇒ 把 `@` 去掉（改名失败就**保留 `@` 名**并如实回传路径 ✓ 不硬来 ✗）
@@ -785,7 +793,7 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
                     }
                 }
                 ok = ok + 1
-                sendmsg(ch, ["done", _str(i), _str(got), srow.rowbytes_text(job), realpath])
+                sendmsg(ch, ["done", _str(i), _str(got), _str(job.bytes), realpath])
             } else if got == -2 {
                 // 被取消：不算失败（半截文件留着，下次重下会自动从断点续传 ✓）
                 sendmsg(ch, ["cancelled", _str(i), "0", "0", ""])
@@ -797,7 +805,7 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
         }
         // 歌词与音频成败**无关**：直链失效时歌词往往还拿得到，用户反而更需要它 ✓
         if wantlyric {
-            int lb = savelyricsafe(job, lrcout, srcid(job))
+            int lb = savelyricsafe(job, lrcout, job_src(job))
             if lb > 0 {
                 lrcok = lrcok + 1
                 sendmsg(ch, ["lyric", _str(i), _str(lb), "0", lrcout])
@@ -809,25 +817,26 @@ export func dl_entry_shard(Array[Array[string]] jobs, string outdir, any ch, any
 }
 
 // 单 worker 版 = 1 份的第 0 份 ⇒ **CLI 版（musicdl.leno）与单任务原样不动** ✓
-export func dl_entry(Array[Array[string]] jobs, string outdir, any ch, any cmd, Array[string] flags): Array[string] {
+export func dl_entry(Array[srow.SongRow] jobs, string outdir, any ch, any cmd, Array[string] flags): Array[string] {
     return dl_entry_shard(jobs, outdir, ch, cmd, flags, 0, 1)
 }
 
 // 歌词抓取包一层 try：worker 线程**绝不能进 error 态**（否则 join 抛异常、UI 侧收尾逻辑全乱）
 // src 分发：**酷狗要整行**（命中歌词需要歌名与时长），另两个源只要 id ✓
-func savelyricsafe(Array[string] job, string lrcout, string src): int {
+func savelyricsafe(srow.SongRow job, string lrcout, string src): int {
     int n = 0
     try {
         if src == "kugou" {
-            n = kugoulyric.savelyric_by(job, lrcout)
+            // 酷狗歌词要**整行**（命中歌词需要歌名与时长）⇒ 只在这一处转回行形态
+            n = kugoulyric.savelyric_by(srow.to_row(job), lrcout)
         } else if src == "netease" {
-            n = netlyric.savelyric(job[0], lrcout)
+            n = netlyric.savelyric(job.id, lrcout)
         } else if src == "qq" {
-            n = qqlyric.savelyric(job[0], lrcout)
+            n = qqlyric.savelyric(job.id, lrcout)
         } else if src == "yinyueku" {
-            n = yyklyric.savelyric(job[0], lrcout)
+            n = yyklyric.savelyric(job.id, lrcout)
         } else {
-            n = lyric.savelyric(job[0], lrcout)
+            n = lyric.savelyric(job.id, lrcout)
         }
     } catch e {
         n = 0
@@ -855,6 +864,8 @@ func hasflag(Array[string] flags, string name): bool {
 //   ⚠ 为什么不"按搜索行的格式列拼一个确切文件名" ✗：落盘的扩展名由**服务端给的格式**定
 //     （`realext` ✓ 见 dl_entry_shard 里那段），跟搜索行里的"格式"列**不一定一致** ⇒ 拼名字会漏 ✗
 //   ⇒ 按"<歌名> - <歌手>.*"扫目录前缀匹配 ✓（顺手排掉 .lrc ✓ 那是歌词不是音频 ✓）
+// ⚠ 签名保持**行**：调用方是界面（`musicdl_gui` 的"在资源管理器里定位"），
+//   它拿的是搜索结果行，不属于下载任务路径 ⇒ 不跟着 SongRow 改。
 export func find_local(Array[string] job, string outdir): string {
     if job.len() <= F_ARTIST { return "" }
     if not dirs.exists(outdir) { return "" }

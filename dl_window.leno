@@ -31,7 +31,13 @@ import strings
 import threads as thr
 import times
 import "./dl_engine.leno" as eng
+import "./songrow.leno" as srow          // ★ 2026-11-09 P1：下载任务改用 srow.SongRow
 import "./dl_history.leno" as hist       // 下载历史（纯逻辑模块 ✓ 见它的文件头）
+
+// SongRow 的显示名（与 `eng.songlabel` 同一口径：`歌名 - 歌手`）。
+//   为什么不在 eng 里改成 SongRow 版本：`songlabel` 还有 12 个**搜索侧**调用点，
+//   那边拿的还是行；这里只是本地小工具，不新增跨模块 API。
+func lbl(srow.SongRow r): string { return r.name + " - " + r.artist }
 use SDL3.(Event, Renderer, Window, TitleBar, Label, Button, Table, ProgressBar, VBox, HBox, TabControl, Scancode)
 
 // flags 里有没有某项（与主界面、引擎层的同名私有函数各管各的，不跨模块 ✓）
@@ -121,7 +127,7 @@ export func openfolder(string path): bool {
 
 export struct DlWindow {
     // ---- 本轮任务（打开时由主界面给定；之后只读）----
-    Array[Array[string]] jobs
+    Array[srow.SongRow] jobs
     Array[string] flags
     string outdir = ""
     bool lyriconly = false
@@ -230,7 +236,7 @@ export struct DlWindow {
             // ★ 2026-10-18：**没有大小就记 0（未知）**，别再塞 1 ✗
             //   原来塞 1 会让"大小未知"的行一下显示成 100%（got/1）—— 与"未知"语义完全相反 ✓
             //   （未知行在 done 那一刻会拿真实字节数补上 ⇒ 见 applymsg ✓）
-            int e = _int(j[eng.F_BYTES])
+            int e = j.bytes
             if e < 0 { e = 0 }
             got.add(0)
             exp.add(e)
@@ -239,7 +245,7 @@ export struct DlWindow {
             totalExp = totalExp + e
             // "只下歌词"模式：格式/大小那两列没有意义 ⇒ 显示 "-"（歌词约几十 KB，不值得标）
             // 进度列写**数值**（progress 单元格把该列文本当数值 ⇒ 别写"37%"以外的花活也行 ✓）
-            rows.add([eng.songlabel(j), if lyriconly then "-" else j[eng.F_EXT], if lyriconly then "-" else j[eng.F_SIZETEXT], "0", "等待中"])
+            rows.add([lbl(j), if lyriconly then "-" else j.ext, if lyriconly then "-" else j.sizetext, "0", "等待中"])
         }
 
         table = SDL3.createTable({
@@ -524,7 +530,7 @@ export struct DlWindow {
             // 落盘路径（消息第 5 段 ✓ 见 dl_engine 的 start/done 两条）先缓存起来 ⇒ 失败也能记下它 ✓
             if idx >= 0 and idx < paths.len() { paths[idx] = _str(mv[4]) }
             if idx >= 0 and idx < jobs.len() {
-                info.set_text("正在下载：" + eng.songlabel(jobs[idx]))
+                info.set_text("正在下载：" + lbl(jobs[idx]))
             }
         } else if kind == "progress" {
             if idx >= 0 and idx < got.len() {
@@ -654,12 +660,12 @@ export struct DlWindow {
     //     换来"历史页永远是最新的"（省掉一套脏标记 ✓）
     func notehistory(int idx, string statusText, string path, int bytes) {
         if idx < 0 or idx >= jobs.len() { return }
-        string label = eng.songlabel(jobs[idx])
+        string label = lbl(jobs[idx])
         string ext = ""
         if lyriconly {
             ext = "lrc"
-        } else if jobs[idx].len() > eng.F_EXT {
-            ext = jobs[idx][eng.F_EXT]
+        } else {
+            ext = jobs[idx].ext
         }
         string size = "-"
         if bytes > 0 { size = strings.fmt_size(bytes) }
@@ -770,9 +776,9 @@ export struct DlWindow {
     func onMenu(int row, string id) {
         if id == "copyrow" {
             if row < 0 or row >= jobs.len() { return }
-            string nm = eng.songlabel(jobs[row])
-            if not lyriconly and jobs[row].len() > eng.F_EXT and jobs[row][eng.F_EXT] != "" {
-                nm = nm + "." + jobs[row][eng.F_EXT]      // 落盘时就是这个名（见 dl_engine 的命名 ✓）
+            string nm = lbl(jobs[row])
+            if not lyriconly and jobs[row].ext != "" {
+                nm = nm + "." + jobs[row].ext      // 落盘时就是这个名（见 dl_engine 的命名 ✓）
             }
             SDL3.setClipboardText(nm)
             stat.set_text("已复制文件名：" + nm)
@@ -956,7 +962,7 @@ export struct DlWindow {
 //   jobs / flags 由主界面判定好再传进来（本模块不碰"选哪些歌"的策略 ✓）
 //   hostLbl     = 主界面状态栏：下载结束时回写一句（窗口关掉后结果仍看得见 ✓）
 //   maxworkers  = 并行线程数上限（来自**设置**，见 dl_settings.leno ✓）
-export func open_download(Array[Array[string]] jobs, Array[string] flags, string outdir, Label hostLbl, int maxworkers): DlWindow {
+export func open_download(Array[srow.SongRow] jobs, Array[string] flags, string outdir, Label hostLbl, int maxworkers): DlWindow {
     DlWindow w = new DlWindow()
     w.jobs = jobs
     w.flags = flags
