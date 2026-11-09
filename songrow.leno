@@ -59,19 +59,20 @@ struct SongRow {
 }
 
 // 行 → struct（越界字段给默认值，与 accessor 口径完全一致 ⇒ 老行照样能转）
+//   ★ 2026-11-09：改用**命名参数构造** `new S(f = v, ...)` —— 一条表达式，
+//     不需要"先 new 再逐字段赋值"的临时变量。没列出的字段照样取默认值。
 export func from_row(Array[string] row): SongRow {
-    SongRow r = new SongRow()
-    r.id = rowid(row)
-    r.name = rowname(row)
-    r.artist = rowartist(row)
-    r.album = rowalbum(row)
-    r.duration = rowduration(row)
-    r.ext = rowext(row)
-    r.sizetext = rowsizetext(row)
-    r.bytes = rowbytes(row)
-    r.src = rowsrc(row)
-    r.url = rowurl(row)
-    return r
+    return new SongRow(
+        id = rowid(row),
+        name = rowname(row),
+        artist = rowartist(row),
+        album = rowalbum(row),
+        duration = rowduration(row),
+        ext = rowext(row),
+        sizetext = rowsizetext(row),
+        bytes = rowbytes(row),
+        src = rowsrc(row),
+        url = rowurl(row))
 }
 
 // struct → 行（回给仍吃行的界面 / 歌词模块用）
