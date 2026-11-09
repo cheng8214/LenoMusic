@@ -13,7 +13,7 @@
 //      见 yinyueku_core 头部 ②
 import jsons
 import files
-import "web_net" as net
+import "WebNet" as net
 import "./yinyueku_core.leno" as yyk
 import "./netease_lyric.leno" as netlyric   // 复用"按时间戳并译文"（同一形态 ⇒ 不再抄一份 ✓）
 

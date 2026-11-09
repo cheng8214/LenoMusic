@@ -30,7 +30,7 @@
 //   直接 GET 会把整个 flac 拉进内存 ✗ ⇒ 临时关掉跟随、读完立刻恢复（见 redirecttarget ✓）
 import jsons
 import strings
-import "web_net" as net
+import "WebNet" as net
 import "./kuwo_core.leno" as kuwo     // 复用 extfromurl（直链后缀 → 扩展名；一处定义 ✓）
 
 use net.(Response, HttpClient)

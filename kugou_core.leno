@@ -37,7 +37,7 @@
 import jsons
 import strings
 import "Crypto" as crypto
-import "web_net" as net
+import "WebNet" as net
 import "./songrow.leno" as srow
 import "./thirdparty.leno" as thirdparty
 

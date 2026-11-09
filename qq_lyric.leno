@@ -10,7 +10,7 @@
 import strings
 import jsons
 import files
-import "web_net" as net
+import "WebNet" as net
 
 use net.(Response, HttpClient)
 

@@ -27,7 +27,7 @@
 // 约定：不 print、无 main ⇒ CLI 与 GUI 共用
 import strings
 import files
-import "web_net" as net
+import "WebNet" as net
 import "web_gzip" as gzip
 import "web_charset" as charsets
 

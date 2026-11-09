@@ -34,7 +34,7 @@
 //      ⚠ 因此本源要求 **2026-10-09 之后**的 LenoLang 运行时（旧运行时上歌名/歌手会是空 ✗）
 import strings
 import jsons
-import "web_net" as net
+import "WebNet" as net
 import "./songrow.leno" as srow
 import "./thirdparty.leno" as thirdparty   // 复用它的"HEAD / Range 探直链真实体积"（remotelen ✓）
 

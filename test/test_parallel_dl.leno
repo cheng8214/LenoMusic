@@ -28,7 +28,7 @@ import strings
 import dirs
 import files
 import times
-import "web_net" as net
+import "WebNet" as net
 import "../dl_engine.leno" as eng
 import "../dl_settings.leno" as cfg
 

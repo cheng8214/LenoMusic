@@ -32,7 +32,7 @@ import strings
 import jsons
 import rands
 import times
-import "web_net" as net
+import "WebNet" as net
 import "./qq_crypto.leno" as qc
 import "./songrow.leno" as srow
 import "./thirdparty.leno" as thirdparty

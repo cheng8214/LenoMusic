@@ -14,7 +14,7 @@
 import jsons
 import strings
 import files
-import "web_net" as net
+import "WebNet" as net
 import "./netease_crypto.leno" as wc
 
 use net.(HttpClient)

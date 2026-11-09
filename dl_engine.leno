@@ -18,7 +18,7 @@ import times
 import dirs
 import files
 import "Sys" as Sys            // Sys.orDefault：失败/抛异常就返回默认值的通用写法（2026-10-23 ✓）
-import "web_net" as net
+import "WebNet" as net
 import "./parsing.leno" as parsing
 import "./songrow.leno" as srow
 import "./kuwo_core.leno" as kuwo

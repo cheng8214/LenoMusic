@@ -11,7 +11,7 @@ import jsons
 import strings
 import files
 import dirs
-import "web_net" as net
+import "WebNet" as net
 import "kuwo_des.leno" as kuwo_des
 
 use net.(Response, HttpClient)

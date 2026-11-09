@@ -20,7 +20,7 @@ import jsons
 import rands
 import times
 import "Crypto" as crypto
-import "web_net" as net
+import "WebNet" as net
 import "crypto_math.leno" as cm      // ★ 2026-11-09：大整数工具（与 netease_crypto 共用一份）
 
 use net.(Response, HttpClient)

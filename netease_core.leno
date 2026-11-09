@@ -29,7 +29,7 @@
 //      成功就把 ext/体积/直链一起写进行里（第 10 项 = 直链，见 dl_engine.F_URL ✓）
 import jsons
 import strings
-import "web_net" as net
+import "WebNet" as net
 import "./netease_crypto.leno" as wc
 import "./songrow.leno" as srow
 import "./thirdparty.leno" as thirdparty

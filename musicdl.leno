@@ -12,7 +12,7 @@
 // 当前只打通酷我（kuwo_core.leno + kuwo_lyric.leno）；网易等源按同样结构再加一个 core 文件即可
 import strings
 import dirs
-import "web_net" as net
+import "WebNet" as net
 import "kuwo_core.leno" as kuwo
 import "kuwo_lyric.leno" as lyric
 import "CLI" as cli          // 2026-10-17：手写参数解析换成 LenoCLI
