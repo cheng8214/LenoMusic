@@ -72,18 +72,8 @@ export func prepare(HttpClient client) {
 
 // ==================== 小工具 ====================
 
-func jsonescape(string s): string {
-    string out = ""
-    int i = 0
-    while i < s.len() {
-        string c = s[i]
-        if c == "\"" { out = out + "\\\"" }
-        else if c == "\\" { out = out + "\\\\" }
-        else { out = out + c }
-        i = i + 1
-    }
-    return out
-}
+// ★ 2026-11-09：删掉本文件的 `jsonescape`（三份复制之一，不转义换行/制表符）。
+//   调用点改用标准库 `jsons.encode(s)`。详见 netease_core 的同名说明。
 
 // 上游 randomsearchid（纯装饰，服务端不校验 ✓）；用 var 是因为要超过 int32 ✓
 func searchid(): string {
@@ -152,7 +142,8 @@ export func songmidof(string songid): string {
 // 真发一次搜索；失败或空结果 ⇒ 空数组
 func searchonce(HttpClient client, string keyword, int limit): Array[Array[string]] {
     Array[Array[string]] rows = []
-    string payload = "{\"searchid\":\"" + searchid() + "\",\"query\":\"" + jsonescape(keyword) + "\",\"search_type\":0,\"num_per_page\":" + _str(limit) + ",\"page_num\":1,\"highlight\":1,\"grp\":1}"
+    // ★ 2026-11-09：`query` 改用 `jsons.encode`（原先的手写 `jsonescape` 不转义换行/制表符）
+    string payload = "{\"searchid\":\"" + searchid() + "\",\"query\":" + jsons.encode(keyword) + ",\"search_type\":0,\"num_per_page\":" + _str(limit) + ",\"page_num\":1,\"highlight\":1,\"grp\":1}"
     string body = "{\"comm\":" + comm("11") + ",\"" + MOD_SEARCH + "." + METH_SEARCH + "\":{\"module\":\"" + MOD_SEARCH + "\",\"method\":\"" + METH_SEARCH + "\",\"param\":" + payload + "}}"
     Response resp = client.post(API, body)
     if not resp.ok() { return rows }

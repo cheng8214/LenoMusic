@@ -113,19 +113,8 @@ func aesb64(string text, string key): string {
 
 // ==================== 设备指纹 JSON ====================
 
-// JSON 字符串值转义（关键词/路径里带引号时不至于把 payload 拼坏）
-func jsonescape(string s): string {
-    string out = ""
-    int i = 0
-    while i < s.len() {
-        string c = s[i]
-        if c == "\"" { out = out + "\\\"" }
-        else if c == "\\" { out = out + "\\\\" }
-        else { out = out + c }
-        i = i + 1
-    }
-    return out
-}
+// ★ 2026-11-09：删掉本文件的 `jsonescape`（三份复制之一，不转义换行/制表符）。
+//   调用点改用标准库 `jsons.encode(s)`。详见 netease_core 的同名说明。
 
 // 15 位 IMEI（末位是校验位，算法照上游；纯粹为了"像真机" ✓）
 func randomimei(): string {
@@ -202,7 +191,7 @@ func payloadjson(): string {
     out = out + "\"packageId\":\"com.tencent.qqmusic\","
     out = out + "\"deviceType\":\"Phone\","
     out = out + "\"sdkName\":\"\","
-    out = out + "\"reserved\":\"" + jsonescape(reserved) + "\""
+    out = out + "\"reserved\":" + jsons.encode(reserved)
     out = out + "}"
     return out
 }
@@ -245,7 +234,8 @@ export func registerqimei(): string {
         "timestamp: " + _str(ts),
         "Content-Type: application/json"
     ])
-    string body = "{\"app\":0,\"os\":1,\"qimeiParams\":{\"key\":\"" + key + "\",\"params\":\"" + params + "\",\"time\":\"" + _str(ts) + "\",\"nonce\":\"" + nonce + "\",\"sign\":\"" + sign + "\",\"extra\":\"" + jsonescape(extra) + "\"}}"
+    // ★ 2026-11-09：`extra` 改用 `jsons.encode`（原手写 `jsonescape` 不转义换行/制表符）
+    string body = "{\"app\":0,\"os\":1,\"qimeiParams\":{\"key\":\"" + key + "\",\"params\":\"" + params + "\",\"time\":\"" + _str(ts) + "\",\"nonce\":\"" + nonce + "\",\"sign\":\"" + sign + "\",\"extra\":" + jsons.encode(extra) + "}}"
     Response resp = client.post(PROXY, body)
     string q = ""
     if resp.ok() {
