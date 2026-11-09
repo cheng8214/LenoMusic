@@ -8,10 +8,15 @@
 //       _int("abc") / _int("12.9") / _int(" 42 ") / _int("0x1F") ⇒ **抛异常**
 //   ⇒ 它是"**强转**"而不是"**解析**"：语义是"我保证这串是整数，认不出就是你写错了"，
 //     于是无法用它做"数据脏了就不认"的判定—— 想判又不想抛异常，只能自己先看一遍形状 ✓
-//   同样的道理，这里把"判定"收成一处，并让接口用**多返回值**表达成功与否：
-//       var[float, bool](t, ok) = parse_secs(tag)     // 取值 + 成功判定一行搞定 ✓
+//   同样的道理，这里把"判定"收成一处，用**标准 Result** 表达成功与否：
+//       Result[float] t = parse_secs(tag)
+//       if t.isErr() { ... }  else { var secs = t.val }
 //   而不是拿 -1 当哨兵（-1 既是合法值又是失败信号 ⇒ 调用处永远要写两遍判断、
 //   而且"解析失败"和"真的 -1"永远分不开 ✗ —— 本仓踩过 ✓）。
+//
+// ★ 2026-11-10（P2）：原来这里是自造的"多返回值" `[int, bool]` / `[float, float, bool]`
+//   （全仓第 5 套错误形态）。标准库已经有 `import "Result"`，这里改成 `Result[T]`：
+//   失败 = `ErrCode.PARSE` + 一句可读 msg，成功 = `val`（多值就用 struct 包一层）。
 //
 //   ⚠ 也别指望 `as int` 能顶替它（★ 2026-10-09 实测，我先后误判过两次 ✗✗）：
 //     `as` 是 **any → T 的运行时转换**，不是"解析"：
@@ -30,6 +35,8 @@
 // ⚠ 这里的判定口径必须与原来的实现**逐位一致**（重构不改行为 ✓
 //   金标回归见 test/test_lrc_parse.leno）。
 import strings
+import "Result" as res
+use res.(Result, Option)
 
 // ==================== 数字 ====================
 
@@ -46,7 +53,7 @@ export func digits_only(string s): bool {
 }
 
 // 严格解析非负整数 ⇒ (值, 是否成功)
-//   不要 -1 哨兵的理由见文件头 ✓；`var[int,bool](n, ok) = parse_uint(s)`
+//   不要 -1 哨兵的理由见文件头 ✓；`Result[int] n = parse_uint(s)`（失败 ⇒ `n.isErr()`）
 //
 //   ⚠ 为什么不直接用现成的 `_int_or`（2026-10-09 实测对比，它**不是**够用）：
 //        _int_or("abc", -1)   = -1   ✓ 失败给默认（这点正是我们要的）
@@ -56,9 +63,11 @@ export func digits_only(string s): bool {
 //            而 `_int("99999999999999999999")` 给的是**精确值**（Leno 的 int 是任意精度 ✓）
 //            ⇒ 与"int 任意精度"这个前提不一致 ⇒ 这里仍走 digits_only + `_int` ✓
 //   ⇒ 一句话：**先判形状（要严格/要非负），再强转（要任意精度）** ✓
-export func parse_uint(string s): [int, bool] {
-    if not digits_only(s) { return 0, false }
-    return _int(s), true
+export func parse_uint(string s): Result[int] {
+    if not digits_only(s) {
+        return res.err[int](res.ErrCode.PARSE, "不是非负整数：" + s)
+    }
+    return res.ok(_int(s))
 }
 
 // 严格解析"时间标签"⇒ (秒, 是否认得)
@@ -67,19 +76,21 @@ export func parse_uint(string s): [int, bool] {
 //         由 parse_millis / parse_word_span 单独处理 ⇒ 两件事不混在一个判定里 ✓）
 //   ⚠ 不做 trim；尾巴多一个字符就不认 ⇒ `[ti:歌名]` 这类元信息标签会被判失败 ✓
 //     （歌词解析靠这条把元信息整行跳过）
-export func parse_secs(string tag): [float, bool] {
+export func parse_secs(string tag): Result[float] {
     Array[int] c = strings.to_codepoints(tag)
     int mm = 0
     int i = 0
     int d = 0
     while i < c.len() and c[i] >= 48 and c[i] <= 57 { mm = mm * 10 + (c[i] - 48); i = i + 1; d = d + 1 }
-    if d == 0 { return 0.0, false }
-    if i >= c.len() or c[i] != 58 { return 0.0, false }              // ':'
+    if d == 0 { return res.err[float](res.ErrCode.PARSE, "不是时间标签：" + tag) }
+    if i >= c.len() or c[i] != 58 {                     // ':'
+        return res.err[float](res.ErrCode.PARSE, "不是 mm:ss 形状：" + tag)
+    }
     i = i + 1
     int ss = 0
     d = 0
     while i < c.len() and c[i] >= 48 and c[i] <= 57 { ss = ss * 10 + (c[i] - 48); i = i + 1; d = d + 1 }
-    if d == 0 { return 0.0, false }
+    if d == 0 { return res.err[float](res.ErrCode.PARSE, "秒位没有数字：" + tag) }
     float frac = 0.0
     if i < c.len() and c[i] == 46 {                                 // '.'
         i = i + 1
@@ -91,33 +102,44 @@ export func parse_secs(string tag): [float, bool] {
         while t < n { sc = sc * 10.0; t = t + 1 }
         if n > 0 { frac = _float(cs) / sc }
     }
-    if i != c.len() { return 0.0, false }                // 尾巴上还有别的字符 ⇒ 不认 ✓
-    return _float(mm * 60 + ss) + frac, true
+    if i != c.len() {                                   // 尾巴上还有别的字符 ⇒ 不认 ✓
+        return res.err[float](res.ErrCode.PARSE, "时间标签尾部有多余字符：" + tag)
+    }
+    return res.ok(_float(mm * 60 + ss) + frac)
 }
 
-// 纯毫秒数（酷我 `lrcx` 的逐字起点就是这个形状 ✓）⇒ (秒, 是否认得)
-export func parse_millis(string s): [float, bool] {
-    var[int, bool](n, ok) = parse_uint(s)
-    if not ok { return 0.0, false }
-    return _float(n) / 1000.0, true
+// 纯毫秒数（酷我 `lrcx` 的逐字起点就是这个形状 ✓）⇒ Result[秒]
+export func parse_millis(string s): Result[float] {
+    Result[int] n = parse_uint(s)
+    if n.isErr() { return res.err[float](res.ErrCode.PARSE, "不是毫秒数：" + s) }
+    return res.ok(_float(n.val) / 1000.0)
 }
 
-// 逐字标签 `<起点,时长>` 的内层（"1234,567" / "00:12.34,0.5"）⇒ (起点秒, 时长秒, 起点是否认得)
+// 逐字标签 `<起点,时长>` 的内层（"1234,567" / "00:12.34,0.5"）⇒ Result[WordSpan{start, dur}]
 //   · 起点认 "mm:ss.xx" 与纯毫秒两种形状 ✓
 //   · **时长一律按毫秒理解**（"0,500" ⇒ 0.5s ✓）—— 起点写成 mm:ss.xx 时，
 //     时长大概率也是"小数秒"而不是毫秒，这里沿用既有口径：按毫秒读，
 //     带小数点 ⇒ 认不出 ⇒ 时长 0（渲染侧退回"唱到下一个字的起点" ✓ 金标钉住）
-//   · 起点认不出 ⇒ ok=false（调用方据此整段退回线性 ✓）
-export func parse_word_span(string tag): [float, float, bool] {
-    if tag == null or tag == "" { return -1.0, 0.0, false }
+//   · 起点认不出 ⇒ isErr()（调用方据此整段退回线性 ✓）
+//   · 两个值一起给 ⇒ 用 struct 包（Result 只带一个 val）
+export struct WordSpan {
+    float start = 0.0
+    float dur = 0.0
+}
+
+export func parse_word_span(string tag): Result[WordSpan] {
+    if tag == null or tag == "" {
+        return res.err[WordSpan](res.ErrCode.PARSE, "空的逐字标签")
+    }
     Array[string] parts = tag.split(",")
-    if parts.len() == 0 { return -1.0, 0.0, false }
+    if parts.len() == 0 {
+        return res.err[WordSpan](res.ErrCode.PARSE, "逐字标签里没有逗号：" + tag)
+    }
     string a = parts[0].trim()
-    var[float, bool](t, ok1) = parse_secs(a)
-    if not ok1 {
-        var[float, bool](ms, ok2) = parse_millis(a)
-        if not ok2 { return -1.0, 0.0, false }
-        t = ms
+    Result[float] t = parse_secs(a)
+    if t.isErr() { t = parse_millis(a) }
+    if t.isErr() {
+        return res.err[WordSpan](res.ErrCode.PARSE, "逐字起点认不出：" + a)
     }
     float d = 0.0
     if parts.len() >= 2 {
@@ -127,7 +149,10 @@ export func parse_word_span(string tag): [float, float, bool] {
         int m = _int_or(parts[1].trim(), -1)
         if m >= 0 { d = _float(m) / 1000.0 }
     }
-    return t, d, true
+    WordSpan w = new WordSpan()
+    w.start = t.val
+    w.dur = d
+    return res.ok(w)
 }
 
 // ==================== 越界安全取值 ====================

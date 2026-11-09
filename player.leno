@@ -6,6 +6,11 @@ import strings
 import "Music" as audio
 import "./parsing.leno" as parsing
 use audio.Sound
+// ★ 2026-11-10：解析改成标准 Result 口径（parsing.leno 的四个解析函数）
+//   ⚠ 别名不能叫 `res`：本文件后面有个局部变量 `res`，会遮蔽模块别名（编译器会警告）
+import "Result" as rstd
+use rstd.Result
+use parsing.WordSpan
 
 // ==================== 显示用：从文件名拆"歌名 / 歌手"（纯逻辑 ✓ 能离线单测）====================
 // 依据：下载落盘的名字是 `sanitizefilename(job[1] + " - " + job[2])`
@@ -193,11 +198,11 @@ func lrc_add_line(string line, Lrc out) {
         int j = i + 1
         while j < cps.len() and cps[j] != 93 { j = j + 1 }   // ']'
         if j >= cps.len() { return }                     // 不闭合 ⇒ 这行不要 ✓
-        // 时间标签 ⇒ (秒, 是否认得)——"认不出"就是元信息行 ⇒ 整行跳过 ✓
-        //   ⚠ 解构出ok 比原来的"t < 0.0"更直白：失败时给的是 0.0，不是靠哨兵值区分 ✓
-        var[float, bool](t, tok) = parsing.parse_secs(cp_slice(cps, i + 1, j - i - 1))
-        if not tok { return }
-        ts.add(t)
+        // 时间标签 ⇒ Result[秒]——"认不出"就是元信息行 ⇒ 整行跳过 ✓
+        //   （★ 2026-11-10：原来是自造的多返回值 `[float, bool]`，已收到标准 Result）
+        Result[float] t = parsing.parse_secs(cp_slice(cps, i + 1, j - i - 1))
+        if t.isErr() { return }
+        ts.add(t.val)
         i = j + 1
     }
     if ts.len() == 0 { return }                          // 没有任何时间标签 ⇒ 跳过（纯文本行 ✓）
@@ -221,11 +226,11 @@ func lrc_add_line(string line, Lrc out) {
                 if seen == 0 and tag.split(",").len() > 0 and tag.split(",")[0].trim() == "0" {
                     zeroLead = true
                 }
-                // 逐字标签 ⇒ (起点秒, 时长秒, 起点是否认得) ✓ 三返回值
-                var[float, float, bool](w, wd, wok) = parsing.parse_word_span(tag)
-                if wok {
-                    lastW = w
-                    lastWEnd = w + wd                    // 时长缺失(0) ⇒ end == start ⇒ 渲染侧退回"唱到下一个字" ✓
+                // 逐字标签 ⇒ Result[WordSpan{start, dur}]
+                Result[WordSpan] w = parsing.parse_word_span(tag)
+                if w.isOk() {
+                    lastW = w.val.start
+                    lastWEnd = w.val.start + w.val.dur    // 时长缺失(0) ⇒ end == start ⇒ 渲染侧退回"唱到下一个字" ✓
                 }
                 seen = seen + 1
                 i = j + 1

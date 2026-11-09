@@ -32,7 +32,10 @@ import "web_gzip" as gzip
 import "web_charset" as charsets
 
 use net.(Response, HttpClient)
-use gzip.GzipResult
+// ★ 2026-11-09（P2）：解压返回值改成 Result[Inflated]
+import "Result" as res
+use res.Result
+use gzip.Inflated
 
 const LYRIC_KEY = "yeelion"
 const LYRIC_URL = "http://newlyric.kuwo.cn/newlyric.lrc?"
@@ -88,9 +91,9 @@ export func decodelyricbody(string raw): string {
     // zlib 头两字节：CMF(0x78) FLG(0x9C/0x01/0xDA...) ⇒ 剥掉再按裸 deflate 解
     int cmf = _byteAt(zbody, 0)
     if (cmf & 0x0F) != 8 { return "" }
-    GzipResult r = gzip.inflateRaw(zbody.byte_slice(2, zbody.byte_len()))
-    if not r.ok { return "" }
-    return charsets.decode(r.data, "gb18030")
+    Result[Inflated] r = gzip.inflateRaw(zbody.byte_slice(2, zbody.byte_len()))
+    if r.isErr() { return "" }
+    return charsets.decode(r.val.data, "gb18030")
 }
 
 func _byteAt(string s, int i): int {
@@ -172,9 +175,9 @@ func unzlib(string raw): string {
     string zbody = raw.byte_slice(start, n - 1)
     int cmf = _byteAt(zbody, 0)
     if (cmf & 0x0F) != 8 { return "" }
-    GzipResult r = gzip.inflateRaw(zbody.byte_slice(2, zbody.byte_len()))
-    if not r.ok { return "" }
-    return r.data                             // ⚠ `r.data` 本身就是"字节串" ✓ 别再 `from_bytes`（那是给数组用的 ✗）
+    Result[Inflated] r = gzip.inflateRaw(zbody.byte_slice(2, zbody.byte_len()))
+    if r.isErr() { return "" }
+    return r.val.data                         // ⚠ `r.val.data` 本身就是"字节串" ✓ 别再 `from_bytes`（那是给数组用的 ✗）
 }
 
 // 取"逐字版"歌词（任何一步不对 ⇒ "" ⇒ 调用方退回标准 LRC ✓）

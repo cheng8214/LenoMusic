@@ -7,6 +7,10 @@
 //   这条区别是 2026-10-09 实测踩出来的（详见 parsing.leno 文件头的实测表）。
 import "../parsing.leno" as parsing
 import "../songrow.leno" as srow
+// ★ 2026-11-10：解析改成标准 Result 口径
+import "Result" as res
+use res.Result
+use parsing.WordSpan
 
 var fails = 0
 
@@ -68,44 +72,39 @@ main() {
     check("digits_only -12 -> false", not parsing.digits_only("-12"))
     check("digits_only 前导空格 -> false", not parsing.digits_only(" 12"))
 
-    var[int, bool](n1, ok1) = parsing.parse_uint("2026")
-    check("parse_uint 成功 -> 取值 + ok", ok1 and n1 == 2026)
-    var[int, bool](n2, ok2) = parsing.parse_uint("20x6")
-    check("parse_uint 失败 -> ok=false 且值给 0", (not ok2) and n2 == 0)
+    // ★ 2026-11-10（P2）：四个解析函数从自造多返回值改成标准 `Result[T]`
+    Result[int] n1 = parsing.parse_uint("2026")
+    check("parse_uint 成功 -> 取值", n1.isOk() and n1.val == 2026)
+    Result[int] n2 = parsing.parse_uint("20x6")
+    check("parse_uint 失败 -> isErr + PARSE 码", n2.isErr() and n2.code == res.ErrCode.PARSE)
 
     // ---- parse_secs：三种形状 + 严格性 ----
-    var[float, bool](s1, k1) = parsing.parse_secs("00:12.34")
-    check("parse_secs mm:ss.xx", k1 and _int(s1 * 100.0) == 1234)
-    var[float, bool](s2, k2) = parsing.parse_secs("01:05")
-    check("parse_secs mm:ss", k2 and _int(s2) == 65)
-    var[float, bool](s3, k3) = parsing.parse_secs("00:00.001")
-    check("parse_secs 毫秒位", k3 and _int(s3 * 1000.0) == 1)
-    var[float, bool](s4, k4) = parsing.parse_secs("ti:歌名")
-    check("parse_secs 元信息标签 -> 失败 ", not k4)
-    var[float, bool](s5, k5) = parsing.parse_secs("1234")
-    check("parse_secs 纯毫秒**不认**（交给 parse_millis）", not k5)
-    var[float, bool](s6, k6) = parsing.parse_secs("12:34:56")
-    check("parse_secs 三段 -> 失败 ", not k6)
-    var[float, bool](s7, k7) = parsing.parse_secs(" 12:34")
-    check("parse_secs 前导空格 -> 失败（不 trim）", not k7)
+    Result[float] s1 = parsing.parse_secs("00:12.34")
+    check("parse_secs mm:ss.xx", s1.isOk() and _int(s1.val * 100.0) == 1234)
+    Result[float] s2 = parsing.parse_secs("01:05")
+    check("parse_secs mm:ss", s2.isOk() and _int(s2.val) == 65)
+    Result[float] s3 = parsing.parse_secs("00:00.001")
+    check("parse_secs 毫秒位", s3.isOk() and _int(s3.val * 1000.0) == 1)
+    check("parse_secs 元信息标签 -> 失败", parsing.parse_secs("ti:歌名").isErr())
+    check("parse_secs 纯毫秒**不认**（交给 parse_millis）", parsing.parse_secs("1234").isErr())
+    check("parse_secs 三段 -> 失败", parsing.parse_secs("12:34:56").isErr())
+    check("parse_secs 前导空格 -> 失败（不 trim）", parsing.parse_secs(" 12:34").isErr())
 
     // ---- parse_millis ----
-    var[float, bool](m1, mk1) = parsing.parse_millis("1500")
-    check("parse_millis 1500 -> 1.5s", mk1 and _int(m1 * 100.0) == 150)
-    var[float, bool](m2, mk2) = parsing.parse_millis("15.0")
-    check("parse_millis 小数 -> 失败 ", not mk2)
+    Result[float] m1 = parsing.parse_millis("1500")
+    check("parse_millis 1500 -> 1.5s", m1.isOk() and _int(m1.val * 100.0) == 150)
+    check("parse_millis 小数 -> 失败", parsing.parse_millis("15.0").isErr())
 
-    // ---- parse_word_span：三返回值 ----
-    var[float, float, bool](w1, d1, wk1) = parsing.parse_word_span("1000,500")
-    check("word_span 毫秒起点 + 时长", wk1 and _int(w1 * 1000.0) == 1000 and _int(d1 * 1000.0) == 500)
-    var[float, float, bool](w2, d2, wk2) = parsing.parse_word_span("00:10.00,500")
-    check("word_span mm:ss 起点", wk2 and _int(w2 * 100.0) == 1000)
-    var[float, float, bool](w3, d3, wk3) = parsing.parse_word_span("abc,500")
-    check("word_span 起点认不出 -> ok=false ", not wk3)
-    var[float, float, bool](w4, d4, wk4) = parsing.parse_word_span("1000,0.5")
-    check("word_span 时长带小数 -> 记 0（既有口径）", wk4 and _int(d4 * 1000.0) == 0)
-    var[float, float, bool](w5, d5, wk5) = parsing.parse_word_span("")
-    check("word_span 空串 -> ok=false ", not wk5)
+    // ---- parse_word_span：Result[WordSpan{start, dur}] ----
+    Result[WordSpan] w1 = parsing.parse_word_span("1000,500")
+    check("word_span 毫秒起点 + 时长",
+        w1.isOk() and _int(w1.val.start * 1000.0) == 1000 and _int(w1.val.dur * 1000.0) == 500)
+    Result[WordSpan] w2 = parsing.parse_word_span("00:10.00,500")
+    check("word_span mm:ss 起点", w2.isOk() and _int(w2.val.start * 100.0) == 1000)
+    check("word_span 起点认不出 -> isErr", parsing.parse_word_span("abc,500").isErr())
+    Result[WordSpan] w4 = parsing.parse_word_span("1000,0.5")
+    check("word_span 时长带小数 -> 记 0（既有口径）", w4.isOk() and _int(w4.val.dur * 1000.0) == 0)
+    check("word_span 空串 -> isErr", parsing.parse_word_span("").isErr())
 
     // ---- songrow：字段契约 ----
     Array[string] full = ["id1", "歌名", "歌手", "专辑", "229", "flac", "52.8MB", "55372096", "kugou", "http://x"]
