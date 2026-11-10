@@ -44,6 +44,31 @@ import "./dl_engine.leno" as eng
 import "./dl_settings.leno" as dlset   // ⚠ 只借它的**常量与钳位口径**（LIMIT_MIN/MAX ✓）—— 本页不读盘 ✗
 use SDL3.(Table, Button, CheckBox, ComboBox, Edit, Label, HBox, VBox, ProgressBar, SpinBox)
 
+// ==================== 表格行：按**字段名**绑列（2026-11-10，P1）====================
+// 原来行是位置数组 `["", 歌名, 歌手, …]`，列顺序同时出现在 headers / table_row / 各处取值 ⇒
+// 插一列要三处一起改，漏一处就串列。现在字段有名字，列顺序只在 `search_keys()` 里写一次。
+// ⚠ 本结构只描述**表格显示什么**，不是网络行协议（`songs` 仍是 Array[string]，
+//   协议在 songrow.leno / dl_engine.leno —— 改它要动 4 个站点的解析器，是另一件事）。
+struct SearchRow {
+    string pad = ""          // 第 0 列 = 勾选框（表格自绘 ✓ 这里留空）
+    string name = ""
+    string artist = ""
+    string album = ""
+    string duration = ""
+    string ext = ""
+    string size = ""
+    string src = ""          // 来源（多音源同搜时靠它分辨 ✓）
+}
+
+// 列顺序的**唯一事实来源**（表头与字段名必须等长同序 ⇒ 由 test/test_search_keys.leno 钉住）
+export func search_keys(): Array[string] {
+    return ["pad", "name", "artist", "album", "duration", "ext", "size", "src"]
+}
+
+export func search_headers(): Array[string] {
+    return ["", "歌名", "歌手", "专辑", "时长", "格式", "大小", "来源"]
+}
+
 // ★ 线程入口（2026-10-12 TH2 起）：模块函数、闭包都能直接作 `threads.start` 入口 ✓
 //   （唯一要求：所属模块已初始化 ⇒ 出现在入口脚本的 import 链上）
 //   本页仍由宿主经 `set_workers` 传入 worker 函数值 —— **组织方式选择**，不是语言限制 ✓
@@ -245,17 +270,25 @@ export struct SearchPage {
         return id
     }
 
-    // 歌曲行 → 表格行（列顺序见 make_table 里的 headers）
+    // 原始行（`eng.F_*` 索引）→ 表格记录。**本页唯一读 F_\* 的地方**（单一事实来源 ✓）
     //   ★ 2026-10-08：末尾加「来源」列（多音源同搜时，同一首歌会出现多行 ⇒ 靠它分辨 ✓）
-    func table_row(Array[string] s): Array[string] {
-        return ["", s[eng.F_NAME], s[eng.F_ARTIST], s[eng.F_ALBUM],
-                eng.fmtduration(_int(s[eng.F_DURATION])), s[eng.F_EXT], s[eng.F_SIZETEXT],
-                src_name(eng.srcid(s))]
+    func to_row(Array[string] s): SearchRow {
+        SearchRow r = new SearchRow()
+        r.name = s[eng.F_NAME]
+        r.artist = s[eng.F_ARTIST]
+        r.album = s[eng.F_ALBUM]
+        r.duration = eng.fmtduration(_int(s[eng.F_DURATION]))
+        r.ext = s[eng.F_EXT]
+        r.size = s[eng.F_SIZETEXT]
+        r.src = src_name(eng.srcid(s))
+        return r
     }
 
     func fill_table() {
+        // ★ 列顺序只在 `search_keys()` 里（与 `search_headers()` 同序 ✓）
+        table.set_struct_keys(search_keys())
         Array[Array[string]] rows = []
-        for songs to s { rows.add(table_row(s)) }
+        for songs to s { rows.add(table.struct_row(to_row(s))) }
         table.set_rows(rows)
         // ★ 2026-10-22（群友建议）：**默认不勾选** —— 多数人只挑两三首下，
         //   默认全勾容易误下整张表；要全下点「全选」即可 ✓
@@ -950,7 +983,7 @@ export struct SearchPage {
             //     侧栏 104 = **931**（实测表格区就是 117..1047 ✓）。旧账写「总 986」是**超预算 55px**
             //     的（侧栏 80 那会儿也超 30）⇒ 表现是**最右边「来源」被裁掉半截** ✗（加宽侧栏后更明显）
             //     现在合计 **928 ≤ 931** ⇒ 8 列全可见 ✓（改列宽时请照这个预算来 ✓）
-            headers: ["", "歌名", "歌手", "专辑", "时长", "格式", "大小", "来源"],
+            headers: search_headers(),      // 与 search_keys() 同序（见那两个函数的注释）
             col_widths: [40.0, 280.0, 140.0, 140.0, 66.0, 66.0, 106.0, 90.0],
             aligns: [1, 0, 0, 0, 1, 1, 2, 1],
             header_aligns: [1, 0, 0, 0, 1, 1, 2, 1],

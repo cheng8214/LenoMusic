@@ -1,0 +1,33 @@
+// test_bang_keys.leno —— 榜单表的「表头 ↔ 字段名」契约（2026-11-10，P1）
+//
+// 为什么单独钉：`make_page` 里 `headers: ["", "歌名", "歌手", "专辑", "时长", "格式", "大小"]`
+// 与 `bang_keys()` 必须**等长同序**。错位是**编译期查不出来**的 —— 表现是"歌手列里显示专辑"，
+// 看着像数据错了，实际是列顺序对不上。改表头/加列时，这个测试会先红。
+import "../bang_page.leno" as bp
+
+main() {
+    Array[string] keys = bp.bang_keys()
+    // 读**真正上屏的那两个数组**（make_page 用的就是这两个函数 ✓）
+    Array[string] headers = bp.bang_headers()
+
+    assert_eq(keys.len(), headers.len(), "keys 与 headers 等长");
+    assert_eq(keys.len(), 7, "7 列（勾选 + 6 个数据列）");
+
+    // 逐位对应（左=字段名，右=该列的标题）——错位会在这里断
+    assert_eq(keys[0], "pad", "第 0 列 = 勾选框（标题为空）");
+    assert_eq(headers[0], "", "第 0 列标题确实为空");
+    assert_eq(keys[1], "name", "第 1 列 = 歌名");
+    assert_eq(headers[1], "歌名", "第 1 列标题 = 歌名");
+    assert_eq(keys[2], "artist", "第 2 列 = 歌手");
+    assert_eq(headers[2], "歌手", "第 2 列标题 = 歌手");
+    assert_eq(keys[3], "album", "第 3 列 = 专辑");
+    assert_eq(headers[3], "专辑", "第 3 列标题 = 专辑");
+    assert_eq(keys[4], "duration", "第 4 列 = 时长");
+    assert_eq(headers[4], "时长", "第 4 列标题 = 时长");
+    assert_eq(keys[5], "ext", "第 5 列 = 格式");
+    assert_eq(headers[5], "格式", "第 5 列标题 = 格式");
+    assert_eq(keys[6], "size", "第 6 列 = 大小");
+    assert_eq(headers[6], "大小", "第 6 列标题 = 大小");
+
+    print("test_bang_keys passed（7 列表头 ↔ 字段名逐位对应）")
+}

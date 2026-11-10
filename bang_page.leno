@@ -32,6 +32,36 @@ import "./songrow.leno" as srow          // 行字段的具名存取（歌名/�
 // ⚠ `Thread` **不在**这里（它是内建类型，不是 SDL3 导出的 ✓ 放进 use 列表会报"期望类型名"✗）
 use SDL3.(Table, ComboBox, Button, CheckBox, Label, HBox, VBox)
 
+// ==================== 表格行：按**字段名**绑列（2026-11-10，P1）====================
+// 原来表格行是位置数组 `["", 歌名, 歌手, 专辑, 时长, 格式, 大小]`，列顺序同时出现在
+//   `createTable(headers: [...])`、`tablerow()`、以及所有按行号取值的 `songs[i][F_xxx]` 处 ——
+// 插一列要三处一起改，漏一处就**串列**（不报错、看着像数据错了）。
+// 现在字段有名字，列顺序只在 `fill_table` 的 `set_struct_keys([...])` 里出现一次。
+// ⚠ 本结构只描述**表格要显示什么**，不是网络行协议：`songs` 仍是 `Array[string]`
+//   （协议在 songrow.leno / dl_engine.leno，改它要动 4 个站点的解析器，是另一件事）。
+struct BangRow {
+    string pad = ""          // 第 0 列 = 勾选框（表格自绘 ✓ 这里留空）
+    string name = ""
+    string artist = ""
+    string album = ""
+    string duration = ""
+    string ext = ""
+    string size = ""
+}
+
+// 列顺序的**唯一事实来源**：`make_page` 的 headers 与 `fill_table` 的 keys 都对着它。
+//   为什么单独导出一个函数：这两个数组必须**等长同序**，而错位是编译期查不出来、
+//   视觉上却会串列的（"歌手"列里显示专辑）⇒ 用 `test/test_bang_keys.leno` 把契约钉住。
+export func bang_keys(): Array[string] {
+    return ["pad", "name", "artist", "album", "duration", "ext", "size"]
+}
+
+// 表头（给人看的中文）与上面一一对应 —— `make_page` 直接用它，
+// 这样"表头"和"字段名"在代码里各只有一处，测试比的就是**真正上屏的那两个数组**。
+export func bang_headers(): Array[string] {
+    return ["", "歌名", "歌手", "专辑", "时长", "格式", "大小"]
+}
+
 // ==================== 线程入口：由宿主传入（组织方式，非语言限制）====================
 // ★ 2026-10-12 TH2 起：模块函数、闭包都能直接作 `threads.start` 入口 ✓
 //   （唯一要求：所属模块已初始化）—— 2026-10-11 那句"模块函数一律被拦"**已过期**。
@@ -182,15 +212,24 @@ export struct BangPage {
         return 0
     }
 
-    // 榜单歌曲行 → 表格行（列比搜索页少一个「来源」：榜单本身就是单一音源 ✓）
-    func tablerow(Array[string] s): Array[string] {
-        return ["", s[eng.F_NAME], s[eng.F_ARTIST], s[eng.F_ALBUM],
-                eng.fmtduration(_int(s[eng.F_DURATION])), s[eng.F_EXT], s[eng.F_SIZETEXT]]
+    // 原始行（`eng.F_*` 索引）→ 表格记录。**本页唯一读 F_\* 的地方**（单一事实来源 ✓）
+    //   列比搜索页少一个「来源」：榜单本身就是单一音源 ✓
+    func to_row(Array[string] s): BangRow {
+        BangRow r = new BangRow()
+        r.name = s[eng.F_NAME]
+        r.artist = s[eng.F_ARTIST]
+        r.album = s[eng.F_ALBUM]
+        r.duration = eng.fmtduration(_int(s[eng.F_DURATION]))
+        r.ext = s[eng.F_EXT]
+        r.size = s[eng.F_SIZETEXT]
+        return r
     }
 
     func fill_table() {
+        // ★ 列顺序只在 `bang_keys()` 里写一次（与 make_page 的 headers 同序 ✓ 见该函数注释）
+        table.set_struct_keys(bang_keys())
         Array[Array[string]] rows = []
-        for songs to s { rows.add(tablerow(s)) }
+        for songs to s { rows.add(table.struct_row(to_row(s))) }
         table.set_rows(rows)
         table.uncheck_all()          // 默认不勾选（同搜索页 ✓ 要全下点「全选」）
     }
@@ -525,7 +564,7 @@ export struct BangPage {
         // ---- 榜单歌曲表格 ----
         //   列与搜索表一致、少了「来源」（榜单本身就是单一站点 ✓）；第 0 列仍是勾选列 ✓
         table = SDL3.createTable({
-            headers: ["", "歌名", "歌手", "专辑", "时长", "格式", "大小"],
+            headers: bang_headers(),        // 与 bang_keys() 同序（见那两个函数的注释）
             col_widths: [40.0, 300.0, 150.0, 180.0, 70.0, 66.0, 110.0],
             aligns: [1, 0, 0, 0, 1, 1, 2],
             header_aligns: [1, 0, 0, 0, 1, 1, 2],
