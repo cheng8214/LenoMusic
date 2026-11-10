@@ -88,7 +88,7 @@ export func fetchlyric(string hash, string name, string artist, string durationS
 // 整行入口（row = [hash, 歌名, 歌手, 专辑, 时长秒, ext, sizeText, sizeBytes, "kugou"]）
 // 返回写入字节数；0 = 没有歌词/取失败/写不进去
 export func savelyric_by(Array[string] row, string targetpath): int {
-    if row.len() <= srow.F_DURATION { return 0 }
+    if not srow.has_field(row, srow.F_DURATION) { return 0 }   // 段数不够 ⇒ 老行，认不出
     // 字段含义一律走songrow 的 accessor（不再裸下标 ✓ 与另两个音源同一口径）
     string hash = srow.rowid(row)
     string name = srow.rowname(row)

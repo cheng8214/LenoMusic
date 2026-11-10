@@ -40,25 +40,11 @@ use kuwo.SongInfo
 //   0 id / 1 歌名 / 2 歌手 / 3 专辑 / 4 时长(秒) / 5 格式 / 6 列表标注大小 / 7 标注字节数
 //   8 **音源 id**（"kuwo" / "netease" / "kugou" / "qq"；缺这一项的行一律当 kuwo ⇒ 向后兼容 ✓ 见 srcid()）
 //   9 搜索时第三方已取回的直链（空 ⇒ 落盘时现取 ✓ 见 songurl）
-//   ⚠ 2026-10-09：下标常量已沉到 `songrow.leno`（唯一事实来源 ✓），这里**原样转发**
-//     一份，保住既有的 `eng.F_xxx` 调用 ⇒ GUI / 下载窗口 / player 零改动 ✓
-//     为什么值得转发而不是让外面直接 import songrow：调用点已经很多，
-//     转发一次换来"不用改 5 个文件"，而字段顺序仍然只有一处能改 ✓
-export const int F_ID = srow.F_ID
-export const int F_NAME = srow.F_NAME
-export const int F_ARTIST = srow.F_ARTIST
-export const int F_ALBUM = srow.F_ALBUM
-export const int F_DURATION = srow.F_DURATION
-export const int F_EXT = srow.F_EXT
-export const int F_SIZETEXT = srow.F_SIZETEXT
-export const int F_BYTES = srow.F_BYTES
-// 音源标记（2026-10-08 加网易源时新增）：取直链与抓歌词都按它分发到对应音源模块 ✓
-export const int F_SRC = srow.F_SRC
-// 直链（2026-10-08 加第三方聚合接口时新增）：搜索时第三方**已经取回来的直链**，落盘时直接用 ✓
-//   为什么必须带在行里：网易那条 flac 通路（qinglvai）对**游客每日只给 3 首**⇒
-//   搜索那一次已经吃掉配额，落盘时再取一次必然失败 ✗（实测 42903）
-//   · 空串 / 老行没有第 10 项 ⇒ 回落 `directurl(client, src, id)`（向后兼容 ✓）
-export const int F_URL = srow.F_URL
+//   ⚠ 2026-11-10（**协议层收尾**）：原来这里把 `srow.F_*` 转发成 `eng.F_*`，让外面
+//     （GUI / 下载窗口 / player）继续按下标取值。现在那些调用点全部改成了
+//     **`songrow` 的具名存取**（读 `rowname/rowext/rowbytes`、写 `setext/seturl/…`、
+//     整体转换 `from_row/to_row`）⇒ 这批转发常量**已无人使用，删掉**。
+//     从今往后：`F_*` 只存在于 `songrow.leno`（唯一事实来源），别的文件按名字说话。
 //
 // 进度消息（channel 里的 Array[string]，固定 5 段；kind 在第 0 段）：
 //   ["search", 音源id, 入表条数, 隐藏条数(没有歌曲大小 ⇒ 没入表), ""]
@@ -148,7 +134,8 @@ export func fmtduration(int secs): string {
 // 歌曲行 → 一行摘要（下载对话框里显示用）
 //   ⚠ 保持原口径：段数不够一律空串；否则**即使歌手为空也照样留" - "**（不擅自改显示 ✗）
 export func songlabel(Array[string] row): string {
-    if row.len() <= F_ARTIST { return "" }
+    // ⚠ 门槛保留：段数不够 ⇒ **整条空串**（不能靠 accessor 各给 "" —— 那会留一个孤零零的 " - "）
+    if not srow.has_field(row, srow.F_ARTIST) { return "" }
     return srow.rowname(row) + " - " + srow.rowartist(row)
 }
 
@@ -157,7 +144,7 @@ export func songlabel(Array[string] row): string {
 //   已经下好的本地文件与同名 .lrc（见 resolve_locals ✓）—— 不能"按搜索行的格式列拼一个确切文件名"
 //   ✗，因为落盘扩展名由服务端给的格式定（realext），跟列表里的"格式"列不一定一致 ⇒ 拼名字会漏 ✓
 export func base_of(Array[string] row): string {
-    if row.len() <= F_ARTIST { return "" }
+    if not srow.has_field(row, srow.F_ARTIST) { return "" }   // 同上：段数不够 ⇒ 整条空串
     return kuwo.sanitizefilename(srow.rowname(row) + " - " + srow.rowartist(row))
 }
 
@@ -492,17 +479,19 @@ export func fill_sizes(Array[Array[string]] rows): Array[Array[string]] {
         // ② 官方直链 + 探真实体积（酷我只能走这条 ✓；另三源第三方没给也再试一次 ✓）
         string link = directurl(client, src, srow.rowid(row))
         if link == "" { continue }
-        row[srow.F_URL] = link
+        // ★ 2026-11-10：写入改用具名 setter（按位置写会静默串列；setter 自带越界补齐 ——
+        //   酷我的行只有 8 段，原来靠 `padrow` 手工补到 10 段才能写第 9 项）
+        srow.seturl(row, link)
         if srow.rowext(row) == "" {             // ext 只在为空时回填（有的源已按 formats 标好 ✓）
             string ext = kuwo.extfromurl(link)
-            if ext != "" { row[srow.F_EXT] = ext }
+            if ext != "" { srow.setext(row, ext) }
         }
         int n = thirdparty.remotelen(client, link)
         if n > 0 {
-            row[srow.F_BYTES] = _str(n)
+            srow.setbytes(row, n)
             // 用**行契约里那份** formatter（"10.32 MB"，与三个 core 的显示口径一致 ✓）
             // —— 别用 `strings.fmt_size`：那是"KB/MB 取整、不保留小数"的通用版，列表里会与搜索页不一致 ✗
-            row[srow.F_SIZETEXT] = srow.fmtsize(n)
+            srow.setsizetext(row, srow.fmtsize(n))
         }
     }
     return rows
@@ -515,8 +504,10 @@ export func fill_sizes(Array[Array[string]] rows): Array[Array[string]] {
 //   第 8 段写成**该行真实的音源**（不是空串）⇒ 行从此自带来源，与另三源的行走同一套 ✓
 //   （只写"空"的行等价于 kuwo ✓ 见 srcid 的默认口径；空着不写会一直靠默认值兜 ✓）
 func padrow(Array[string] row, string src): Array[string] {
-    while row.len() <= srow.F_URL { row.add("") }
-    if srow.rowsrc(row) == "" { row[srow.F_SRC] = src }
+    // ★ 2026-11-10：补齐这件事现在由 `srow.put` 统一做（越界先补空串再写 ⇒ 不用再手工
+    //   `while row.len() <= F_URL`）。这里保留"补到 10 段"的效果：写一下第 9 段（url）即可。
+    if srow.rowsrc(row) == "" { srow.setsrc(row, src) }
+    if row.len() <= srow.F_URL { srow.seturl(row, srow.rowurl(row)) }
     return row
 }
 
@@ -867,9 +858,9 @@ func hasflag(Array[string] flags, string name): bool {
 // ⚠ 签名保持**行**：调用方是界面（`musicdl_gui` 的"在资源管理器里定位"），
 //   它拿的是搜索结果行，不属于下载任务路径 ⇒ 不跟着 SongRow 改。
 export func find_local(Array[string] job, string outdir): string {
-    if job.len() <= F_ARTIST { return "" }
+    if not srow.has_field(job, srow.F_ARTIST) { return "" }
     if not dirs.exists(outdir) { return "" }
-    string base = kuwo.sanitizefilename(job[F_NAME] + " - " + job[F_ARTIST])
+    string base = kuwo.sanitizefilename(srow.rowname(job) + " - " + srow.rowartist(job))
     if base == "" { return "" }
     var names = dirs.listdir(outdir)
     for names to nm {

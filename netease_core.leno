@@ -155,9 +155,10 @@ export func searchrows(HttpClient client, string keyword, int limit): Array[Arra
         Array[string] row = rows[k]
         int sz = getsize(sizes, srow.rowid(row))
         if sz > 0 {
-            row[srow.F_EXT] = "mp3"                  // 未登录时服务端只给 mp3（见头部 ③）
-            row[srow.F_SIZETEXT] = fmtsize(sz)
-            row[srow.F_BYTES] = _str(sz)
+            // ★ 2026-11-10：写入改用具名 setter（按位置写会静默串列）
+            srow.setext(row, "mp3")                  // 未登录时服务端只给 mp3（见头部 ③）
+            srow.setsizetext(row, fmtsize(sz))
+            srow.setbytes(row, sz)
         }
         k = k + 1
     }
@@ -174,13 +175,13 @@ export func searchrows(HttpClient client, string keyword, int limit): Array[Arra
 export func proberow(HttpClient client, Array[string] row) {
     Array[string] tp = thirdparty.resolve(client, "netease", srow.rowid(row))
     if tp.len() < 3 { return }
-    row[srow.F_EXT] = tp[1]                  // ext 按**直链后缀**（flac / 兜底的 mp3 ✓）
+    srow.setext(row, tp[1])                  // ext 按**直链后缀**（flac / 兜底的 mp3 ✓）
     int tb = _int_or(tp[2], 0)
     if tb > 0 {
-        row[srow.F_SIZETEXT] = fmtsize(tb)
-        row[srow.F_BYTES] = _str(tb)
+        srow.setsizetext(row, fmtsize(tb))
+        srow.setbytes(row, tb)
     }
-    row[srow.F_URL] = tp[0]
+    srow.seturl(row, tp[0])
 }
 
 // id → 可下体积（拿不到直链的 id 不进表 ⇒ 列表里显示空白 = 这首下不了）

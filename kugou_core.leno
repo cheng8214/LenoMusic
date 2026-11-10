@@ -238,11 +238,13 @@ export func mergeweb(Array[Array[string]] rows, Dict[string, Array[string]] webm
         if one == null or one.len() < 2 { continue }
         int rs = _int_or(one[1], 0)
         if rs <= cur { continue }
-        row[srow.F_ID] = one[0]        // ResFileHash（**大写**，大小写敏感 ⇒ 原样存 ✓）
-        row[srow.F_EXT] = "flac"
-        row[srow.F_SIZETEXT] = fmtsize(rs)
-        row[srow.F_BYTES] = _str(rs)
-        row[srow.F_URL] = ""           // 直链要重取（旧的是 SQ 的链 ✗）
+        // ★ 2026-11-10：写入改用具名 setter（原来 `row[srow.F_XXX] = …` 按位置写，
+        //   字段顺序一调就静默串列；setter 里自带"越界先补空串"）
+        srow.setid(row, one[0])        // ResFileHash（**大写**，大小写敏感 ⇒ 原样存 ✓）
+        srow.setext(row, "flac")
+        srow.setsizetext(row, fmtsize(rs))
+        srow.setbytes(row, rs)
+        srow.seturl(row, "")           // 直链要重取（旧的是 SQ 的链 ✗）
     }
 }
 
@@ -254,13 +256,13 @@ export func proberow(HttpClient client, Array[string] row) {
     if srow.rowext(row) != "" { return }                // 已有格式 ⇒ 官方已给直链，不动✓
     Array[string] tp = thirdparty.resolve(client, "kugou", srow.rowid(row))
     if tp.len() < 3 { return }
-    row[srow.F_EXT] = tp[1]
+    srow.setext(row, tp[1])
     int tb = _int_or(tp[2], 0)
     if tb > 0 {
-        row[srow.F_SIZETEXT] = fmtsize(tb)
-        row[srow.F_BYTES] = _str(tb)
+        srow.setsizetext(row, fmtsize(tb))
+        srow.setbytes(row, tb)
     }
-    row[srow.F_URL] = tp[0]
+    srow.seturl(row, tp[0])
 }
 
 // ==================== ② 取直链 ====================

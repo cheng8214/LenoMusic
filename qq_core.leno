@@ -230,16 +230,17 @@ export func proberow(HttpClient client, Array[string] row) {
     string oldext = srow.rowext(row)
     string ext = tp[1]
     int tb = _int_or(tp[2], 0)
-    row[srow.F_EXT] = ext
+    // ★ 2026-11-10：写入改用具名 setter（按位置写会静默串列；setter 自带越界补齐）
+    srow.setext(row, ext)
     if tb > 0 {
-        row[srow.F_SIZETEXT] = strings.fmt_size(tb)
-        row[srow.F_BYTES] = _str(tb)
+        srow.setsizetext(row, strings.fmt_size(tb))
+        srow.setbytes(row, tb)
     } else if oldext != ext {
         // 档位跟原列表不同、体积又探不到 ⇒ **不冒充**（宁可这行被 has_size 过滤 ✓）
-        row[srow.F_SIZETEXT] = ""
-        row[srow.F_BYTES] = "0"
+        srow.setsizetext(row, "")
+        srow.setbytes(row, 0)
     }
-    row[srow.F_URL] = tp[0]
+    srow.seturl(row, tp[0])
 }
 
 // 搜索（带重试）：公开兜底 q36 会被限流 ⇒ 偶发返回空壳

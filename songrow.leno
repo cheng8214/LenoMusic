@@ -103,6 +103,29 @@ export func rowurl(Array[string] row): string { return parsing.at(row, F_URL, ""
 // 字节数的**字符串**形态（行里存的就是字符串 ⇒ 进度消息要原样带走，别转 int 又转回 ✓）
 export func rowbytes_text(Array[string] row): string { return parsing.at(row, F_BYTES, "0") }
 
+// ==================== 具名写入（与上面的只读存取对称，2026-11-10）====================
+// 为什么需要：**读**早就走存取函数了，但**写**还在 `row[srow.F_EXT] = ...` ——
+//   ① 字段顺序一调就静默串列（写错位置没有任何提示）；
+//   ② 老行只有 9 项时写第 10 项会越界，所以调用方各自手工
+//      `while row.len() <= F_URL { row.add("") }`（dl_engine 里就有一份）。
+// 这里统一成"越界先补空串再写"，调用方只写字段名。
+// ⚠ 数组按引用传（与既有原地改行的写法一致）⇒ 函数返回 void，改的是同一个数组。
+export func put(Array[string] row, int field, string v) {
+    while row.len() <= field { row.add("") }
+    row[field] = v
+}
+
+export func setid(Array[string] row, string v)       { put(row, F_ID, v) }
+export func setname(Array[string] row, string v)     { put(row, F_NAME, v) }
+export func setartist(Array[string] row, string v)   { put(row, F_ARTIST, v) }
+export func setalbum(Array[string] row, string v)    { put(row, F_ALBUM, v) }
+export func setduration(Array[string] row, string v) { put(row, F_DURATION, v) }
+export func setext(Array[string] row, string v)      { put(row, F_EXT, v) }
+export func setsizetext(Array[string] row, string v) { put(row, F_SIZETEXT, v) }
+export func setbytes(Array[string] row, int n)       { put(row, F_BYTES, _str(n)) }
+export func setsrc(Array[string] row, string v)      { put(row, F_SRC, v) }
+export func seturl(Array[string] row, string v)      { put(row, F_URL, v) }
+
 // ==================== 字节数 → 显示串（列表「大小」列 / 进度分母都用它 ✓）====================
 //   口径与 kuwo_core / netease_core / kugou_core 里那三份 `fmtsize` **完全一致**（"10.32 MB"：
 //   GB/MB 保留两位小数、KB 取整 ✓）—— 为什么在这里再放一份：那三份是各 core 私有的显示实现，

@@ -1,0 +1,69 @@
+// test_songrow_put.leno —— 行契约的**具名写入**（2026-11-10，协议层收尾）
+//
+// 背景：读取早就走 `rowname/rowext/rowbytes…` 了，但**写入**一直还是
+//   `row[srow.F_EXT] = …`（按位置）。两个真实隐患：
+//     ① 字段顺序一调，写入静默串列（编译期看不出来）；
+//     ② 老行只有 8~9 段时写第 10 段会**越界抛异常** —— 所以调用方各自手工
+//        `while row.len() <= F_URL { row.add("") }`（dl_engine 里就有一份）。
+// 现在统一成 `srow.setext/seturl/…`，内部 `put()` 负责"越界先补空串再写"。
+//
+// 这个测试钉的就是那条补齐语义 + 各个 setter 与 accessor 的对称性。
+import "../songrow.leno" as srow
+
+main() {
+    // ① 空行 → 写最后一个字段：要补到第 9 段（0..9 共 10 段），中间全是空串
+    Array[string] r = []
+    srow.seturl(r, "http://x")
+    assert_eq(r.len(), 10, "① 写第 9 段 ⇒ 自动补到 10 段");
+    assert_eq(srow.rowurl(r), "http://x", "① 写进去的值读得回来");
+    assert_eq(srow.rowname(r), "", "① 补出来的中间段是空串");
+    assert_eq(srow.rowbytes(r), 0, "① 补出来的字节段按 0 读（不崩）");
+
+    // ② 8 段的老行（酷我 encode 出来的就是这种）→ 补 src / url 不越界
+    Array[string] old = ["id1", "歌名", "歌手", "专辑", "200", "flac", "10 MB", "10485760"]
+    assert_eq(srow.has_field(old, srow.F_SRC), false, "② 老行确实没有第 8 段");
+    srow.setsrc(old, "kugou")
+    assert_eq(old.len(), 9, "② 写 src（第 8 段）⇒ 补到 9 段");
+    assert_eq(srow.rowsrc(old), "kugou", "② src 写对了位置");
+    assert_eq(srow.rowurl(old), "", "② 第 9 段还不存在 ⇒ url 读出来是空串（不崩）");
+    srow.seturl(old, "")
+    assert_eq(old.len(), 10, "② 再写 url ⇒ 补到 10 段");
+
+    // ③ 各 setter 与对应 accessor 对称（写谁读谁）
+    Array[string] full = []
+    srow.setid(full, "sid")
+    srow.setname(full, "名字")
+    srow.setartist(full, "歌手")
+    srow.setalbum(full, "专辑")
+    srow.setduration(full, "321")
+    srow.setext(full, "mp3")
+    srow.setsizetext(full, "3.21 MB")
+    srow.setbytes(full, 3365928)
+    srow.setsrc(full, "qq")
+    srow.seturl(full, "http://y")
+    assert_eq(srow.rowid(full), "sid", "③ id");
+    assert_eq(srow.rowname(full), "名字", "③ name");
+    assert_eq(srow.rowartist(full), "歌手", "③ artist");
+    assert_eq(srow.rowalbum(full), "专辑", "③ album");
+    assert_eq(srow.rowduration(full), "321", "③ duration");
+    assert_eq(srow.rowext(full), "mp3", "③ ext");
+    assert_eq(srow.rowsizetext(full), "3.21 MB", "③ sizetext");
+    assert_eq(srow.rowbytes(full), 3365928, "③ bytes（int 进、int 出）");
+    assert_eq(srow.rowbytes_text(full), "3365928", "③ bytes 在行里存的是字符串");
+    assert_eq(srow.rowsrc(full), "qq", "③ src");
+    assert_eq(srow.rowurl(full), "http://y", "③ url");
+
+    // ④ 覆盖写（同一字段写两次取后者）
+    srow.setext(full, "flac")
+    assert_eq(srow.rowext(full), "flac", "④ 重复写以最后一次为准");
+
+    // ⑤ 与 from_row / to_row 一致：写完后整体转成 SongRow 再转回来，值不变
+    srow.SongRow s = srow.from_row(full)
+    assert_eq(s.ext, "flac", "⑤ from_row 读到 setext 写的值");
+    assert_eq(s.bytes, 3365928, "⑤ from_row 读到 setbytes 写的值");
+    Array[string] back = srow.to_row(s)
+    assert_eq(back.len(), 10, "⑤ to_row 出来仍是 10 段");
+    assert_eq(srow.rowurl(back), "http://y", "⑤ 往返后 url 不变");
+
+    print("test_songrow_put passed（补齐 / 老行 / 对称 / 覆盖 / 往返 五组）")
+}
