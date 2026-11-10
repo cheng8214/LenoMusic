@@ -4,6 +4,8 @@
 #   模块由 LenoLang 发行包的 leno_module/ 提供，编译器在 import 时校验版本。
 #   ⇒ 用旧运行时会直接报「模块包 'LenoSDL3' 版本 x 不满足项目要求」，而不是等到
 #     `Table.source_row` 这类调用点才报"没有方法" ✓
+#
+# ★ 2026-11-10（§5.3）：补齐成"实际 import 到的每个包"（此前只有 LenoSDL3 一条）。
 
 [package]
 name = "LenoMusic"
@@ -11,4 +13,18 @@ version = "0.2.2"
 
 [requires]
 # source_row(display) 自 LenoSDL3 0.1.1 起提供
-LenoSDL3 = ">=0.1.1"
+LenoSDL3     = ">=0.1.1"
+# 命令行入口（CLI 包的参数解析）
+LenoCLI      = ">=0.1.0"
+# 播放核心（Music 包：audio / Sound / 流式解码）
+LenoMusic    = ">=2.0.0"
+# 摘要与随机（各音乐站签名）
+LenoCrypto   = ">=1.1.0"
+# 标准 Result / Option（解析模块的返回类型）
+LenoResult   = ">=0.1.0"
+# exe 路径 / 开机自启等跨平台能力
+LenoSys      = ">=0.1.0"
+# 各站点 HTTP 客户端（WebNet）；web_charset 也在本包
+LenoWeb      = ">=1.0.0"
+# web_gzip（LenoWeb 内部 `import "Compress"`；项目侧一并声明）
+LenoCompress = ">=0.2.0"
