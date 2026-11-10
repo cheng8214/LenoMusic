@@ -41,6 +41,7 @@ import times
 import strings
 import SDL3
 import "./dl_engine.leno" as eng
+import "./songrow.leno" as srow           // ★ 2026-11-10：行 → SongRow（本页不再直接读 F_*，见 to_row）
 import "./dl_settings.leno" as dlset   // ⚠ 只借它的**常量与钳位口径**（LIMIT_MIN/MAX ✓）—— 本页不读盘 ✗
 use SDL3.(Table, Button, CheckBox, ComboBox, Edit, Label, HBox, VBox, ProgressBar, SpinBox)
 
@@ -270,17 +271,19 @@ export struct SearchPage {
         return id
     }
 
-    // 原始行（`eng.F_*` 索引）→ 表格记录。**本页唯一读 F_\* 的地方**（单一事实来源 ✓）
+    // SongRow（**字段有名**）→ 表格记录。
+    //   ★ 2026-11-10：本页不再直接 `s[eng.F_xxx]` —— 行协议只在 `songrow.from_row` 一处解码
+    //     （那边有越界防御），页面这层拿到的已经是具名字段 ⇒ 列号常量从本页彻底消失。
     //   ★ 2026-10-08：末尾加「来源」列（多音源同搜时，同一首歌会出现多行 ⇒ 靠它分辨 ✓）
-    func to_row(Array[string] s): SearchRow {
+    func to_row(srow.SongRow s): SearchRow {
         SearchRow r = new SearchRow()
-        r.name = s[eng.F_NAME]
-        r.artist = s[eng.F_ARTIST]
-        r.album = s[eng.F_ALBUM]
-        r.duration = eng.fmtduration(_int(s[eng.F_DURATION]))
-        r.ext = s[eng.F_EXT]
-        r.size = s[eng.F_SIZETEXT]
-        r.src = src_name(eng.srcid(s))
+        r.name = s.name
+        r.artist = s.artist
+        r.album = s.album
+        r.duration = eng.fmtduration(_int(s.duration))
+        r.ext = s.ext
+        r.size = s.sizetext
+        r.src = src_name(s.src)          // 行的来源标记本来就是音源 id（见 SongRow.src）
         return r
     }
 
@@ -288,7 +291,7 @@ export struct SearchPage {
         // ★ 列顺序只在 `search_keys()` 里（与 `search_headers()` 同序 ✓）
         table.set_struct_keys(search_keys())
         Array[Array[string]] rows = []
-        for songs to s { rows.add(table.struct_row(to_row(s))) }
+        for songs to s { rows.add(table.struct_row(to_row(srow.from_row(s)))) }
         table.set_rows(rows)
         // ★ 2026-10-22（群友建议）：**默认不勾选** —— 多数人只挑两三首下，
         //   默认全勾容易误下整张表；要全下点「全选」即可 ✓
@@ -320,7 +323,9 @@ export struct SearchPage {
         string want = fmt_want()
         if want == "" { return true }
         string e = "未知"
-        if row.len() > eng.F_EXT and row[eng.F_EXT] != "" { e = strings.to_lower(row[eng.F_EXT]) }
+        // ★ 2026-11-10：走只读存取函数（越界给 ""，自带长度防御 ⇒ 不用再写 `len() > F_EXT`）
+        string ex = srow.rowext(row)
+        if ex != "" { e = strings.to_lower(ex) }
         return e == want
     }
 
@@ -333,7 +338,8 @@ export struct SearchPage {
         Array[Array[string]] cand = base_rows()
         for cand to s {
             string e = "未知"
-            if s.len() > eng.F_EXT and s[eng.F_EXT] != "" { e = strings.to_lower(s[eng.F_EXT]) }
+            string ex = srow.rowext(s)              // ★ 2026-11-10：同上，走存取函数
+            if ex != "" { e = strings.to_lower(ex) }
             bool has = false
             for exts to x { if x == e { has = true } }
             if not has { exts.add(e) }
@@ -688,11 +694,18 @@ export struct SearchPage {
             while j < allRows.len() {
                 if eng.songlabel(allRows[j]) + "||" + eng.srcid(allRows[j]) == key {
                     bool before = row_playable(allRows[j])
-                    if rr.len() > eng.F_URL {
-                        allRows[j][eng.F_EXT] = rr[eng.F_EXT]
-                        allRows[j][eng.F_SIZETEXT] = rr[eng.F_SIZETEXT]
-                        allRows[j][eng.F_BYTES] = rr[eng.F_BYTES]
-                        allRows[j][eng.F_URL] = rr[eng.F_URL]
+                    // ★ 2026-11-10：合并走 SongRow 具名字段（原来按下标抄四个位置，
+                    //   行长度一变就串列；字段名写错编译期就能查出来）。
+                    //   ⚠ 门槛沿用原判据 `rr.len() > F_URL`（= `has_field(rr, F_URL)`），
+                    //     不改成"url 非空"——那会变成"空值不覆盖"，是另一套语义。
+                    if srow.has_field(rr, srow.F_URL) {
+                        srow.SongRow got = srow.from_row(rr)
+                        srow.SongRow dst = srow.from_row(allRows[j])
+                        dst.ext = got.ext
+                        dst.sizetext = got.sizetext
+                        dst.bytes = got.bytes
+                        dst.url = got.url
+                        allRows[j] = srow.to_row(dst)
                     }
                     if not before and row_playable(allRows[j]) { fixed = fixed + 1 }
                     j = allRows.len()        // 命中即收手
@@ -818,7 +831,7 @@ export struct SearchPage {
         for checked to i {
             int r = table.source_row(i)          // ★ 显示行 → 数据行（排序后也正确 ✓）
             if r >= 0 and r < songs.len() {
-                bytes = bytes + _int(songs[r][eng.F_BYTES])
+                bytes = bytes + srow.rowbytes(songs[r])   // ★ 2026-11-10：走存取函数（自带越界防御）
                 if fmt_ok(songs[r]) { match = match + 1 }
             }
         }

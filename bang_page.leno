@@ -212,16 +212,17 @@ export struct BangPage {
         return 0
     }
 
-    // 原始行（`eng.F_*` 索引）→ 表格记录。**本页唯一读 F_\* 的地方**（单一事实来源 ✓）
+    // SongRow（字段有名）→ 表格记录。
+    //   ★ 2026-11-10：本页不再直接读 `eng.F_*` —— 行协议只在 `songrow.from_row` 一处解码。
     //   列比搜索页少一个「来源」：榜单本身就是单一音源 ✓
-    func to_row(Array[string] s): BangRow {
+    func to_row(srow.SongRow s): BangRow {
         BangRow r = new BangRow()
-        r.name = s[eng.F_NAME]
-        r.artist = s[eng.F_ARTIST]
-        r.album = s[eng.F_ALBUM]
-        r.duration = eng.fmtduration(_int(s[eng.F_DURATION]))
-        r.ext = s[eng.F_EXT]
-        r.size = s[eng.F_SIZETEXT]
+        r.name = s.name
+        r.artist = s.artist
+        r.album = s.album
+        r.duration = eng.fmtduration(_int(s.duration))
+        r.ext = s.ext
+        r.size = s.sizetext
         return r
     }
 
@@ -229,7 +230,7 @@ export struct BangPage {
         // ★ 列顺序只在 `bang_keys()` 里写一次（与 make_page 的 headers 同序 ✓ 见该函数注释）
         table.set_struct_keys(bang_keys())
         Array[Array[string]] rows = []
-        for songs to s { rows.add(table.struct_row(to_row(s))) }
+        for songs to s { rows.add(table.struct_row(to_row(srow.from_row(s)))) }
         table.set_rows(rows)
         table.uncheck_all()          // 默认不勾选（同搜索页 ✓ 要全下点「全选」）
     }
